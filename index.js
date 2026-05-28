@@ -1177,17 +1177,27 @@ function calculateRR(signal, entry, tp, sl) {
 // ======================================================
 function calculateDynamicTPSL(signal, entry, atr, strength = "WEAK") {
   let tpMultiplier = ATR_TP_MULTIPLIER;
+
   if (strength === "STRONG") tpMultiplier = 2.5;
   if (strength === "EXTREME") tpMultiplier = 3;
+
+  let slMultiplier = 1.5;
+
+  if (strength === "MEDIUM") slMultiplier = 1.8;
+  if (strength === "STRONG") slMultiplier = 2.2;
+  if (strength === "EXTREME") slMultiplier = 2.5;
+
   let tp;
   let sl;
+
   if (signal === "LONG") {
     tp = entry + atr * tpMultiplier;
-    sl = entry - atr;
+    sl = entry - atr * slMultiplier;
   } else {
     tp = entry - atr * tpMultiplier;
-    sl = entry + atr;
+    sl = entry + atr * slMultiplier;
   }
+
   return {
     tp,
     sl,
