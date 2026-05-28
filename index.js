@@ -952,13 +952,26 @@ function extractJsonObject(text) {
   return cleaned.slice(start, end + 1);
 }
 
+function normalizeAIStrength(value) {
+  const strength = String(value || "WEAK").trim().toUpperCase();
+  const aliases = {
+    LOW: "WEAK",
+    MILD: "WEAK",
+    MODERATE: "MEDIUM",
+    HIGH: "STRONG",
+    VERY_HIGH: "EXTREME",
+    VERYHIGH: "EXTREME",
+  };
+  return aliases[strength] || strength;
+}
+
 function normalizeAISignal(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("AI response is not an object");
   }
 
   const signal = String(raw.signal || "").trim().toUpperCase();
-  const strength = String(raw.strength || "WEAK").trim().toUpperCase();
+  const strength = normalizeAIStrength(raw.strength);
   const confidence = Number(raw.confidence);
   const tradeAllowed =
     typeof raw.tradeAllowed === "boolean"
@@ -1010,6 +1023,8 @@ RULES:
 - Only give ${LONG_ONLY ? "LONG" : "LONG or SHORT"} if probability is high.
 - Ignore weak momentum setups.
 - Allowed output signals: ${allowedSignals}
+- Allowed output strengths: WEAK, MEDIUM, STRONG, EXTREME
+- Use WEAK instead of LOW.
 - Market regime: ${regimeInfo.regime}
 - Regime guidance: ${regimeInfo.reason}
 
