@@ -2,6 +2,7 @@ node_modules/
 .env
 .env.tuned
 tuned-config.json
+walk-forward-report.json
 profit-ledger.json
 risk-state.json
 bot-paused.flag

@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "optimize": "node walk-forward-optimizer.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
