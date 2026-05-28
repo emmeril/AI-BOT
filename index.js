@@ -113,6 +113,18 @@ const model =
         model: GEMINI_MODEL
     });
 
+const AI_FILTER_ENABLED =
+    process.env.AI_FILTER_ENABLED !== 'false';
+
+const MIN_AI_CONFIDENCE =
+    Number(process.env.MIN_AI_CONFIDENCE || 65);
+
+const ALLOWED_AI_STRENGTHS =
+    (process.env.ALLOWED_AI_STRENGTHS || 'MEDIUM,STRONG,EXTREME')
+        .split(',')
+        .map(s => s.trim().toUpperCase())
+        .filter(Boolean);
+
 // ======================================================
 // EXCHANGE
 // ======================================================
@@ -528,6 +540,8 @@ RETURN JSON ONLY:
 {
   "signal":"LONG",
   "strength":"MEDIUM",
+  "confidence":75,
+  "tradeAllowed":true,
   "reason":"Strong bullish trend confirmation."
 }
 `;
@@ -775,6 +789,62 @@ function fundingSafe(
 }
 
 // ======================================================
+// AI FILTER
+// ======================================================
+
+function aiFilterSafe(ai) {
+
+    if (!AI_FILTER_ENABLED)
+        return true;
+
+    const strength =
+        String(ai.strength || '')
+            .toUpperCase();
+
+    const confidence =
+        Number(ai.confidence || 0);
+
+    const tradeAllowed =
+        ai.tradeAllowed !== false;
+
+    if (!tradeAllowed) {
+
+        console.warn(
+            '⚠️ AI filter blocked: tradeAllowed=false'
+        );
+
+        return false;
+    }
+
+    if (
+        !ALLOWED_AI_STRENGTHS.includes(
+            strength
+        )
+    ) {
+
+        console.warn(
+            `⚠️ AI filter blocked: strength ${strength || 'UNKNOWN'}`
+        );
+
+        return false;
+    }
+
+    if (
+        confidence <
+        MIN_AI_CONFIDENCE
+    ) {
+
+        console.warn(
+            `⚠️ AI filter blocked: confidence ${confidence}/${MIN_AI_CONFIDENCE}`
+        );
+
+        return false;
+    }
+
+    return true;
+}
+
+// ======================================================
 // CANCEL
 // ======================================================
 
@@ -924,17 +994,14 @@ async function closePosition(
 // STOP LOSS MARKET (NEW)
 // ======================================================
 
-async function createStopLossOrder(position, entryPrice, slPrice) {
+async function createStopLossOrder(position, slPrice) {
     const side = position.side === 'long' ? 'sell' : 'buy';
-    const quantity = position.contracts; // full position size
-    
     const stopPrice = exchange.priceToPrecision(SYMBOL, slPrice);
-    const qtyPrecise = exchange.amountToPrecision(SYMBOL, quantity);
     
     console.log(`
 🛑 CREATE STOP LOSS MARKET
 Side: ${side}
-Quantity: ${qtyPrecise}
+Mode: close remaining position
 Stop trigger: ${stopPrice}
 `);
     
@@ -942,11 +1009,11 @@ Stop trigger: ${stopPrice}
         SYMBOL,
         'STOP_MARKET',
         side,
-        qtyPrecise,
+        undefined,
         undefined,
         {
             stopPrice: stopPrice,
-            reduceOnly: true,
+            closePosition: true,
             workingType: 'MARK_PRICE'
         }
     ));
@@ -1208,6 +1275,23 @@ async function tradingCycle() {
         const signal =
             ai.signal?.toUpperCase();
 
+        const aiStrength =
+            String(ai.strength || '')
+                .toUpperCase();
+
+        if (
+            !['LONG', 'SHORT', 'HOLD'].includes(
+                signal
+            )
+        ) {
+
+            console.warn(
+                '⚠️ Invalid AI signal'
+            );
+
+            return;
+        }
+
         if (
             signal === 'HOLD'
         ) {
@@ -1227,6 +1311,11 @@ async function tradingCycle() {
             console.log(
                 '⏸️ SHORT ignored in LONG ONLY mode'
             );
+
+            return;
+        }
+
+        if (!aiFilterSafe(ai)) {
 
             return;
         }
@@ -1253,8 +1342,8 @@ ${signalConfirmCount}/${REQUIRED_CONFIRMATION}
         const confirmed =
             signalConfirmCount >=
             REQUIRED_CONFIRMATION ||
-            ai.strength === 'STRONG' ||
-            ai.strength === 'EXTREME';
+            aiStrength === 'STRONG' ||
+            aiStrength === 'EXTREME';
 
         if (!confirmed) {
 
@@ -1340,7 +1429,7 @@ ${signalConfirmCount}/${REQUIRED_CONFIRMATION}
                 signal,
                 context.price,
                 snapshot.atr,
-                ai.strength
+                aiStrength
             );
 
         const rr =
@@ -1402,7 +1491,7 @@ ${rr.toFixed(2)}
             ? actualEntry - snapshot.atr 
             : actualEntry + snapshot.atr;
 
-        await createStopLossOrder(newPos, actualEntry, slPrice);
+        await createStopLossOrder(newPos, slPrice);
 
         // ==================================================
         // CREATE PARTIAL TPS
