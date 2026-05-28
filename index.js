@@ -12,7 +12,20 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 // ======================================================
 // CONFIG
 // ======================================================
-const SYMBOL = process.env.SYMBOL || "DOGE/USDT:USDT";
+const DEFAULT_MEME_SYMBOLS =
+  "DOGE/USDT:USDT,1000SHIB/USDT:USDT,1000PEPE/USDT:USDT,1000FLOKI/USDT:USDT,1000BONK/USDT:USDT";
+const SYMBOL_INPUT =
+  process.env.SYMBOLS ||
+  process.env.MEME_SYMBOLS ||
+  process.env.SYMBOL ||
+  DEFAULT_MEME_SYMBOLS;
+const SYMBOLS = SYMBOL_INPUT
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const SCAN_SYMBOLS =
+  SYMBOLS.length > 0 ? SYMBOLS : DEFAULT_MEME_SYMBOLS.split(",");
+const MAX_OPEN_POSITIONS = Number(process.env.MAX_OPEN_POSITIONS || 1);
 const LEVERAGE = Number(process.env.LEVERAGE || 10);
 const ORDER_SIZE_USDT = Number(process.env.ORDER_SIZE_USDT || 5);
 const TIMEFRAME = process.env.TIMEFRAME || "5m";
@@ -125,8 +138,7 @@ if (process.env.EXCHANGE_DEMO === "true") {
 // GLOBAL
 // ======================================================
 let isTrading = false;
-let lastSignal = null;
-let signalConfirmCount = 0;
+let signalStateBySymbol = {};
 let lastPositionChangeTime = 0;
 let profitLedger = loadProfitLedger();
 let riskState = loadRiskState();
@@ -160,7 +172,7 @@ function getNextCandleDelay() {
 function createEmptyProfitLedger() {
   const now = new Date().toISOString();
   return {
-    symbol: SYMBOL,
+    symbol: SCAN_SYMBOLS.join(","),
     startedAt: now,
     updatedAt: now,
     lastTradeTimestamp: Date.now(),
@@ -182,7 +194,7 @@ function normalizeProfitLedger(ledger) {
   return {
     ...empty,
     ...ledger,
-    symbol: ledger.symbol || SYMBOL,
+    symbol: ledger.symbol || SCAN_SYMBOLS.join(","),
     processedTradeIds: Array.isArray(ledger.processedTradeIds)
       ? ledger.processedTradeIds
       : [],
@@ -257,6 +269,7 @@ function applyTradeToProfitLedger(trade) {
   if (netProfit < 0) profitLedger.totals.lossEvents++;
   profitLedger.recentTrades.unshift({
     id,
+    symbol: trade.symbol,
     time:
       trade.datetime || new Date(trade.timestamp || Date.now()).toISOString(),
     side: trade.side,
@@ -423,17 +436,25 @@ async function syncRiskState() {
         : dayStart,
     );
 
-    const trades = await retry(() =>
-      exchange.fetchMyTrades(SYMBOL, since, PROFIT_SYNC_LIMIT),
-    );
-    const sortedTrades = trades
-      .filter((trade) => !trade.symbol || trade.symbol === SYMBOL)
-      .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
-
     let newTrades = 0;
-    for (const trade of sortedTrades) {
-      if (applyTradeToRiskState(trade)) {
-        newTrades++;
+    for (const symbol of SCAN_SYMBOLS) {
+      let sortedTrades = [];
+      try {
+        const trades = await retry(() =>
+          exchange.fetchMyTrades(symbol, since, PROFIT_SYNC_LIMIT),
+        );
+        sortedTrades = trades
+          .filter((trade) => !trade.symbol || trade.symbol === symbol)
+          .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
+      } catch (err) {
+        console.warn(`${symbol} risk trade sync skipped: ${err.message}`);
+        continue;
+      }
+
+      for (const trade of sortedTrades) {
+        if (applyTradeToRiskState(trade)) {
+          newTrades++;
+        }
       }
     }
 
@@ -486,16 +507,24 @@ async function syncProfitLedger() {
     const since = profitLedger.lastTradeTimestamp
       ? profitLedger.lastTradeTimestamp - 1
       : undefined;
-    const trades = await retry(() =>
-      exchange.fetchMyTrades(SYMBOL, since, PROFIT_SYNC_LIMIT),
-    );
-    const sortedTrades = trades
-      .filter((trade) => !trade.symbol || trade.symbol === SYMBOL)
-      .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
     let newTrades = 0;
-    for (const trade of sortedTrades) {
-      if (applyTradeToProfitLedger(trade)) {
-        newTrades++;
+    for (const symbol of SCAN_SYMBOLS) {
+      let sortedTrades = [];
+      try {
+        const trades = await retry(() =>
+          exchange.fetchMyTrades(symbol, since, PROFIT_SYNC_LIMIT),
+        );
+        sortedTrades = trades
+          .filter((trade) => !trade.symbol || trade.symbol === symbol)
+          .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
+      } catch (err) {
+        console.warn(`${symbol} profit trade sync skipped: ${err.message}`);
+        continue;
+      }
+      for (const trade of sortedTrades) {
+        if (applyTradeToProfitLedger(trade)) {
+          newTrades++;
+        }
       }
     }
     if (newTrades > 0) saveProfitLedger();
@@ -508,10 +537,10 @@ async function syncProfitLedger() {
 // ======================================================
 // MARKET
 // ======================================================
-async function getMarketContext() {
+async function getMarketContext(symbol) {
   const [ticker, funding] = await Promise.all([
-    retry(() => exchange.fetchTicker(SYMBOL)),
-    retry(() => exchange.fetchFundingRate(SYMBOL)),
+    retry(() => exchange.fetchTicker(symbol)),
+    retry(() => exchange.fetchFundingRate(symbol)),
   ]);
   return {
     price: Number(ticker.last),
@@ -563,9 +592,9 @@ function calculateATR(ohlcv) {
 // ======================================================
 // SNAPSHOT
 // ======================================================
-async function getMarketSnapshot(context, timeframe = TIMEFRAME) {
+async function getMarketSnapshot(symbol, context, timeframe = TIMEFRAME) {
   const ohlcv = await retry(() =>
-    exchange.fetchOHLCV(SYMBOL, timeframe, undefined, LOOKBACK_CANDLES),
+    exchange.fetchOHLCV(symbol, timeframe, undefined, LOOKBACK_CANDLES),
   );
   const closes = ohlcv.map((c) => c[4]);
   const ema20 = calculateEMA(closes.slice(-20), 20);
@@ -685,7 +714,7 @@ function regimeFilterSafe(regimeInfo) {
 // ======================================================
 // AI SIGNAL
 // ======================================================
-async function getAISignal(snapshot, htfSnapshot, regimeInfo) {
+async function getAISignal(symbol, snapshot, htfSnapshot, regimeInfo) {
   const allowedSignals = LONG_ONLY ? "LONG, HOLD" : "LONG, SHORT, HOLD";
   const prompt = `
 You are a professional crypto futures trader AI.
@@ -710,6 +739,9 @@ RULES:
 - Regime guidance: ${regimeInfo.reason}
 
 MARKET DATA:
+
+SYMBOL:
+${symbol}
 
 PRICE:
 ${snapshot.price}
@@ -769,17 +801,31 @@ RETURN JSON ONLY:
 // ======================================================
 // POSITION
 // ======================================================
-async function getCurrentPosition() {
-  const positions = await retry(() => exchange.fetchPositions([SYMBOL]));
+async function getCurrentPosition(symbol) {
+  const positions = await retry(() => exchange.fetchPositions([symbol]));
   const pos = positions.find(
-    (p) => p.symbol === SYMBOL && Number(p.contracts) > 0,
+    (p) => p.symbol === symbol && Number(p.contracts) > 0,
   );
   if (!pos) return null;
   return {
     side: pos.side,
+    symbol: pos.symbol,
     contracts: Number(pos.contracts),
     entryPrice: Number(pos.entryPrice),
   };
+}
+
+async function getOpenPositions() {
+  const openPositions = [];
+  for (const symbol of SCAN_SYMBOLS) {
+    try {
+      const position = await getCurrentPosition(symbol);
+      if (position) openPositions.push(position);
+    } catch (err) {
+      console.warn(`${symbol} position check skipped: ${err.message}`);
+    }
+  }
+  return openPositions;
 }
 
 // ======================================================
@@ -793,8 +839,8 @@ async function getAvailableBalance() {
 // ======================================================
 // CONTRACTS
 // ======================================================
-async function calculateContracts(price, stopDistance) {
-  const market = exchange.markets[SYMBOL];
+async function calculateContracts(symbol, price, stopDistance) {
+  const market = exchange.markets[symbol];
   const balance = await getAccountEquity();
   const riskCapital = balance * RISK_PER_TRADE_PCT;
   const riskBasedContracts =
@@ -808,7 +854,7 @@ async function calculateContracts(price, stopDistance) {
   );
   const finalContracts =
     cappedContracts < minContracts ? minContracts : cappedContracts;
-  return Number(exchange.amountToPrecision(SYMBOL, finalContracts));
+  return Number(exchange.amountToPrecision(symbol, finalContracts));
 }
 
 // ======================================================
@@ -898,12 +944,12 @@ function aiFilterSafe(ai) {
 // ======================================================
 // CANCEL
 // ======================================================
-async function cancelAllOrders() {
+async function cancelAllOrders(symbol) {
   try {
-    const orders = await retry(() => exchange.fetchOpenOrders(SYMBOL));
+    const orders = await retry(() => exchange.fetchOpenOrders(symbol));
     for (const o of orders) {
       try {
-        await retry(() => exchange.cancelOrder(o.id, SYMBOL));
+        await retry(() => exchange.cancelOrder(o.id, symbol));
         console.log(`🗑️ Cancel ${o.id}`);
       } catch (err) {
         console.error(err.message);
@@ -917,17 +963,17 @@ async function cancelAllOrders() {
 // ======================================================
 // OPEN POSITION
 // ======================================================
-async function openPosition(signal, context, stopDistance) {
-  await retry(() => exchange.setLeverage(LEVERAGE, SYMBOL));
+async function openPosition(symbol, signal, context, stopDistance) {
+  await retry(() => exchange.setLeverage(LEVERAGE, symbol));
   const balance = await getAvailableBalance();
-  const market = exchange.markets[SYMBOL];
+  const market = exchange.markets[symbol];
   const minBalance = market?.limits?.cost?.min || 5;
   if (balance < minBalance) {
     console.warn("⛔ Balance insufficient");
     return null;
   }
   const side = signal === "LONG" ? "buy" : "sell";
-  const amount = await calculateContracts(context.price, stopDistance);
+  const amount = await calculateContracts(symbol, context.price, stopDistance);
   console.log(`
 🚀 OPEN ${signal}
 
@@ -935,7 +981,7 @@ Contracts:
 ${amount}
 `);
   const order = await retry(() =>
-    exchange.createMarketOrder(SYMBOL, side, amount),
+    exchange.createMarketOrder(symbol, side, amount),
   );
   console.log(`
 ✅ ORDER:
@@ -943,29 +989,29 @@ ${order.id}
 `);
   lastPositionChangeTime = Date.now();
   await sleep(3000);
-  return await getCurrentPosition();
+  return await getCurrentPosition(symbol);
 }
 
 // ======================================================
 // CLOSE POSITION
 // ======================================================
-async function closePosition(position) {
+async function closePosition(symbol, position) {
   const side = position.side === "long" ? "sell" : "buy";
   await retry(() =>
-    exchange.createMarketOrder(SYMBOL, side, position.contracts, {
+    exchange.createMarketOrder(symbol, side, position.contracts, {
       reduceOnly: true,
     }),
   );
-  await cancelAllOrders();
+  await cancelAllOrders(symbol);
   console.log("🔻 POSITION CLOSED");
 }
 
 // ======================================================
 // STOP LOSS MARKET (NEW)
 // ======================================================
-async function createStopLossOrder(position, slPrice) {
+async function createStopLossOrder(symbol, position, slPrice) {
   const side = position.side === "long" ? "sell" : "buy";
-  const stopPrice = exchange.priceToPrecision(SYMBOL, slPrice);
+  const stopPrice = exchange.priceToPrecision(symbol, slPrice);
   console.log(`
 🛑 CREATE STOP LOSS MARKET
 Side: ${side}
@@ -973,7 +1019,7 @@ Mode: close remaining position
 Stop trigger: ${stopPrice}
 `);
   await retry(() =>
-    exchange.createOrder(SYMBOL, "STOP_MARKET", side, undefined, undefined, {
+    exchange.createOrder(symbol, "STOP_MARKET", side, undefined, undefined, {
       stopPrice: stopPrice,
       closePosition: true,
       workingType: "MARK_PRICE",
@@ -985,18 +1031,18 @@ Stop trigger: ${stopPrice}
 // ======================================================
 // PARTIAL TP
 // ======================================================
-async function createPartialTPs(position, entryPrice, atr) {
+async function createPartialTPs(symbol, position, entryPrice, atr) {
   const side = position.side === "long" ? "sell" : "buy";
   const isLong = position.side === "long";
   const totalContracts = position.contracts;
   const tp1Qty = Number(
-    exchange.amountToPrecision(SYMBOL, totalContracts * (TP1_PERCENT / 100)),
+    exchange.amountToPrecision(symbol, totalContracts * (TP1_PERCENT / 100)),
   );
   const tp2Qty = Number(
-    exchange.amountToPrecision(SYMBOL, totalContracts * (TP2_PERCENT / 100)),
+    exchange.amountToPrecision(symbol, totalContracts * (TP2_PERCENT / 100)),
   );
   const runnerQty = Number(
-    exchange.amountToPrecision(SYMBOL, totalContracts - tp1Qty - tp2Qty),
+    exchange.amountToPrecision(symbol, totalContracts - tp1Qty - tp2Qty),
   );
   let tp1Price;
   let tp2Price;
@@ -1007,8 +1053,8 @@ async function createPartialTPs(position, entryPrice, atr) {
     tp1Price = entryPrice - atr * TP1_RR;
     tp2Price = entryPrice - atr * TP2_RR;
   }
-  tp1Price = Number(exchange.priceToPrecision(SYMBOL, tp1Price));
-  tp2Price = Number(exchange.priceToPrecision(SYMBOL, tp2Price));
+  tp1Price = Number(exchange.priceToPrecision(symbol, tp1Price));
+  tp2Price = Number(exchange.priceToPrecision(symbol, tp2Price));
   console.log(`
 🎯 TP1:
 ${tp1Price}
@@ -1019,7 +1065,7 @@ ${tp2Price}
   if (tp1Qty > 0) {
     await retry(() =>
       exchange.createOrder(
-        SYMBOL,
+        symbol,
         "TAKE_PROFIT_MARKET",
         side,
         tp1Qty,
@@ -1039,7 +1085,7 @@ ${tp1Qty}`,
   if (tp2Qty > 0) {
     await retry(() =>
       exchange.createOrder(
-        SYMBOL,
+        symbol,
         "TAKE_PROFIT_MARKET",
         side,
         tp2Qty,
@@ -1060,7 +1106,7 @@ ${tp2Qty}`,
     const callbackRate = calculateCallbackRate(atr, entryPrice);
     await retry(() =>
       exchange.createOrder(
-        SYMBOL,
+        symbol,
         "TRAILING_STOP_MARKET",
         side,
         runnerQty,
@@ -1087,6 +1133,136 @@ ${callbackRate}%
 // ======================================================
 // TRADING
 // ======================================================
+function updateSignalConfirmation(symbol, signal, strength) {
+  const state = signalStateBySymbol[symbol] || {
+    lastSignal: null,
+    confirmCount: 0,
+  };
+  if (state.lastSignal === signal) {
+    state.confirmCount += 1;
+  } else {
+    state.lastSignal = signal;
+    state.confirmCount = 1;
+  }
+  signalStateBySymbol[symbol] = state;
+
+  const confirmed =
+    state.confirmCount >= REQUIRED_CONFIRMATION ||
+    strength === "STRONG" ||
+    strength === "EXTREME";
+  return {
+    count: state.confirmCount,
+    confirmed,
+  };
+}
+
+function scoreCandidate(ai, rr, regimeInfo) {
+  const strength = String(ai.strength || "").toUpperCase();
+  const strengthBonus = {
+    MEDIUM: 5,
+    STRONG: 15,
+    EXTREME: 25,
+  }[strength] || 0;
+  const confidence = Number(ai.confidence || 0);
+  const rrBonus = Math.min(rr, 3) * 10;
+  const trendBonus = regimeInfo.allow ? 10 : 0;
+  return confidence + strengthBonus + rrBonus + trendBonus;
+}
+
+async function analyzeSymbol(symbol) {
+  try {
+    console.log(`
+========== SCAN ${symbol} ==========
+`);
+    const context = await getMarketContext(symbol);
+    const snapshot = await getMarketSnapshot(symbol, context, TIMEFRAME);
+    const htfSnapshot = await getMarketSnapshot(symbol, context, HTF_TIMEFRAME);
+    const regimeInfo = detectMarketRegime(snapshot, htfSnapshot);
+
+    if (snapshot.emaGap < SIDEWAYS_EMA_GAP) {
+      console.log(`${symbol} skipped: sideways market`);
+      return null;
+    }
+
+    if (!regimeFilterSafe(regimeInfo)) {
+      console.log(`${symbol} skipped: ${regimeInfo.reason}`);
+      return null;
+    }
+
+    console.log(`Asking Gemini for ${symbol}...`);
+    const ai = await getAISignal(symbol, snapshot, htfSnapshot, regimeInfo);
+    console.log(ai);
+
+    const signal = ai.signal?.toUpperCase();
+    const aiStrength = String(ai.strength || "").toUpperCase();
+    if (!["LONG", "SHORT", "HOLD"].includes(signal)) {
+      console.warn(`${symbol} skipped: invalid AI signal`);
+      return null;
+    }
+    if (signal === "HOLD") {
+      console.log(`${symbol} skipped: HOLD`);
+      return null;
+    }
+    if (LONG_ONLY && signal === "SHORT") {
+      console.log(`${symbol} skipped: SHORT ignored in LONG ONLY mode`);
+      return null;
+    }
+    if (!aiFilterSafe(ai)) {
+      console.log(`${symbol} skipped: AI filter`);
+      return null;
+    }
+
+    const confirmation = updateSignalConfirmation(symbol, signal, aiStrength);
+    console.log(`
+SIGNAL CONFIRM ${symbol}:
+${confirmation.count}/${REQUIRED_CONFIRMATION}
+`);
+    if (!confirmation.confirmed) {
+      console.log(`${symbol} skipped: signal not confirmed`);
+      return null;
+    }
+
+    if (!fundingSafe(signal, context.fundingRate)) {
+      console.warn(`${symbol} skipped: funding unsafe`);
+      return null;
+    }
+
+    const dynamicTPSL = calculateDynamicTPSL(
+      signal,
+      context.price,
+      snapshot.atr,
+      aiStrength,
+    );
+    const rr = calculateRR(
+      signal,
+      context.price,
+      dynamicTPSL.tp,
+      dynamicTPSL.sl,
+    );
+    console.log(`${symbol} RR: ${rr.toFixed(2)}`);
+    if (rr < MIN_RR) {
+      console.warn(`${symbol} skipped: RR too low`);
+      return null;
+    }
+
+    return {
+      symbol,
+      signal,
+      ai,
+      aiStrength,
+      context,
+      snapshot,
+      htfSnapshot,
+      regimeInfo,
+      rr,
+      score: scoreCandidate(ai, rr, regimeInfo),
+    };
+  } catch (err) {
+    console.warn(`${symbol} scan skipped: ${err.message}`);
+    return null;
+  }
+}
+
 async function tradingCycle() {
   if (isTrading) {
     console.log("⏳ Previous cycle running");
@@ -1102,148 +1278,69 @@ async function tradingCycle() {
     if (!riskGateAllowsTrading()) {
       return;
     }
-    const context = await getMarketContext();
-    const snapshot = await getMarketSnapshot(context, TIMEFRAME);
-    const htfSnapshot = await getMarketSnapshot(context, HTF_TIMEFRAME);
-    const regimeInfo = detectMarketRegime(snapshot, htfSnapshot);
+    const candidates = [];
+    for (const symbol of SCAN_SYMBOLS) {
+      const candidate = await analyzeSymbol(symbol);
+      if (candidate) candidates.push(candidate);
+    }
 
-    // ==================================================
-    // SIDEWAYS FILTER
-    // ==================================================
-    if (snapshot.emaGap < SIDEWAYS_EMA_GAP) {
-      console.log("⚠️ Sideways market skip");
+    if (candidates.length === 0) {
+      console.log("No meme coin setup passed the scanner.");
       return;
     }
 
-    if (!regimeFilterSafe(regimeInfo)) {
-      return;
-    }
+    candidates.sort((a, b) => b.score - a.score);
+    console.table(
+      candidates.map((c) => ({
+        symbol: c.symbol,
+        signal: c.signal,
+        confidence: c.ai.confidence,
+        strength: c.aiStrength,
+        rr: Number(c.rr.toFixed(2)),
+        regime: c.regimeInfo.regime,
+        score: Number(c.score.toFixed(2)),
+      })),
+    );
 
-    // ==================================================
-    // AI
-    // ==================================================
-    console.log("🤖 Asking Gemini...");
-    const ai = await getAISignal(snapshot, htfSnapshot, regimeInfo);
-    console.log(ai);
-    const signal = ai.signal?.toUpperCase();
-    const aiStrength = String(ai.strength || "").toUpperCase();
-    if (!["LONG", "SHORT", "HOLD"].includes(signal)) {
-      console.warn("⚠️ Invalid AI signal");
-      return;
-    }
-    if (signal === "HOLD") {
-      console.log("⏸️ HOLD");
-      return;
-    }
-    if (LONG_ONLY && signal === "SHORT") {
-      console.log("⏸️ SHORT ignored in LONG ONLY mode");
-      return;
-    }
-    if (!aiFilterSafe(ai)) {
-      return;
-    }
+    const best = candidates[0];
+    const { symbol, signal, context, snapshot } = best;
+    const openPositions = await getOpenPositions();
+    const position = openPositions.find((p) => p.symbol === symbol);
+    console.log("OPEN POSITIONS:", openPositions.length ? openPositions : "NONE");
 
-    // ==================================================
-    // CONFIRMATION
-    // ==================================================
-    if (signal === lastSignal) {
-      signalConfirmCount++;
-    } else {
-      signalConfirmCount = 1;
-      lastSignal = signal;
-    }
-    console.log(`
-📈 SIGNAL CONFIRM:
-${signalConfirmCount}/${REQUIRED_CONFIRMATION}
-`);
-    const confirmed =
-      signalConfirmCount >= REQUIRED_CONFIRMATION ||
-      aiStrength === "STRONG" ||
-      aiStrength === "EXTREME";
-    if (!confirmed) {
-      console.log("⚠️ Signal not confirmed");
-      return;
-    }
-
-    // ==================================================
-    // FUNDING FILTER
-    // ==================================================
-    if (!fundingSafe(signal, context.fundingRate)) {
-      console.warn("⚠️ Funding unsafe");
-      return;
-    }
-    const position = await getCurrentPosition();
-    console.log("📌 POSITION:", position || "NONE");
-
-    // ==================================================
-    // SAME POSITION
-    // ==================================================
     if (position && position.side === signal.toLowerCase()) {
-      console.log("📈 Position already exists");
+      console.log(`${symbol} position already exists`);
       return;
     }
 
-    // ==================================================
-    // REVERSAL COOLDOWN
-    // ==================================================
+    if (!position && openPositions.length >= MAX_OPEN_POSITIONS) {
+      console.log(
+        `Max open positions reached: ${openPositions.length}/${MAX_OPEN_POSITIONS}`,
+      );
+      return;
+    }
+
     const cooldownMs = REVERSAL_COOLDOWN_MINUTES * 60 * 1000;
     if (position && Date.now() - lastPositionChangeTime < cooldownMs) {
-      console.log("⏳ Reversal cooldown active");
+      console.log(`${symbol} reversal cooldown active`);
       return;
     }
 
-    // ==================================================
-    // RR
-    // ==================================================
-    const dynamicTPSL = calculateDynamicTPSL(
-      signal,
-      context.price,
-      snapshot.atr,
-      aiStrength,
-    );
-    const rr = calculateRR(
-      signal,
-      context.price,
-      dynamicTPSL.tp,
-      dynamicTPSL.sl,
-    );
-    console.log(`
-📈 RR:
-${rr.toFixed(2)}
-`);
-    if (rr < MIN_RR) {
-      console.warn("⚠️ RR too low");
-      return;
-    }
-
-    // ==================================================
-    // CLOSE OLD POSITION
-    // ==================================================
     if (position) {
-      await closePosition(position);
+      await closePosition(symbol, position);
     }
-    await cancelAllOrders();
+    await cancelAllOrders(symbol);
 
-    // ==================================================
-    // OPEN NEW POSITION
-    // ==================================================
-    const newPos = await openPosition(signal, context, snapshot.atr);
+    const newPos = await openPosition(symbol, signal, context, snapshot.atr);
     if (!newPos) return;
 
-    // ==================================================
-    // CREATE STOP LOSS (using actual entry price)
-    // ==================================================
     const actualEntry = newPos.entryPrice;
     const slPrice =
       signal === "LONG"
         ? actualEntry - snapshot.atr
         : actualEntry + snapshot.atr;
-    await createStopLossOrder(newPos, slPrice);
-
-    // ==================================================
-    // CREATE PARTIAL TPS
-    // ==================================================
-    await createPartialTPs(newPos, actualEntry, snapshot.atr);
+    await createStopLossOrder(symbol, newPos, slPrice);
+    await createPartialTPs(symbol, newPos, actualEntry, snapshot.atr);
   } catch (err) {
     console.error("❌ Trading Error:", err.message);
   } finally {
@@ -1258,8 +1355,10 @@ async function main() {
   console.log(`
 🔥 SMART AI FUTURES BOT
 
-PAIR:
-${SYMBOL}
+SCAN SYMBOLS:
+${SCAN_SYMBOLS.join(", ")}
+MAX OPEN POSITIONS:
+${MAX_OPEN_POSITIONS}
 LEVERAGE:
 ${LEVERAGE}x
 ORDER:
