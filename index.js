@@ -100,6 +100,14 @@ const MIN_ATR_PCT = Number(process.env.MIN_ATR_PCT || 0.15) / 100;
 const MIN_VOLUME_CHANGE_FOR_TREND = Number(
   process.env.MIN_VOLUME_CHANGE_FOR_TREND || -20,
 );
+const SYMBOL_COOLDOWN_ENABLED =
+  process.env.SYMBOL_COOLDOWN_ENABLED !== "false";
+const SYMBOL_COOLDOWN_MINUTES = Number(
+  process.env.SYMBOL_COOLDOWN_MINUTES || 30,
+);
+const SYMBOL_ERROR_COOLDOWN_MINUTES = Number(
+  process.env.SYMBOL_ERROR_COOLDOWN_MINUTES || 5,
+);
 
 // ======================================================
 // AI
@@ -117,6 +125,19 @@ const ALLOWED_AI_STRENGTHS = (
   .split(",")
   .map((s) => s.trim().toUpperCase())
   .filter(Boolean);
+const AI_RESPONSE_RETRIES = Number(process.env.AI_RESPONSE_RETRIES || 2);
+
+// ======================================================
+// CIRCUIT BREAKER
+// ======================================================
+const CIRCUIT_BREAKER_ENABLED =
+  process.env.CIRCUIT_BREAKER_ENABLED !== "false";
+const CIRCUIT_BREAKER_MAX_ERRORS = Number(
+  process.env.CIRCUIT_BREAKER_MAX_ERRORS || 5,
+);
+const CIRCUIT_BREAKER_PAUSE_MINUTES = Number(
+  process.env.CIRCUIT_BREAKER_PAUSE_MINUTES || 15,
+);
 
 // ======================================================
 // EXCHANGE
@@ -142,6 +163,11 @@ let signalStateBySymbol = {};
 let lastPositionChangeTime = 0;
 let profitLedger = loadProfitLedger();
 let riskState = loadRiskState();
+let circuitBreakerState = {
+  consecutiveErrors: 0,
+  pausedUntil: 0,
+  lastError: null,
+};
 
 // ======================================================
 // UTILS
@@ -318,6 +344,7 @@ function createEmptyRiskState() {
     dailyNetPnL: 0,
     consecutiveLosses: 0,
     processedTradeIds: [],
+    symbolCooldowns: {},
     lastSyncedAt: 0,
     updatedAt: now,
   };
@@ -331,6 +358,10 @@ function normalizeRiskState(state) {
     processedTradeIds: Array.isArray(state?.processedTradeIds)
       ? state.processedTradeIds
       : [],
+    symbolCooldowns:
+      state?.symbolCooldowns && typeof state.symbolCooldowns === "object"
+        ? state.symbolCooldowns
+        : {},
   };
 }
 
@@ -350,6 +381,50 @@ function loadRiskState() {
 function saveRiskState() {
   riskState.updatedAt = new Date().toISOString();
   fs.writeFileSync(RISK_STATE_PATH, JSON.stringify(riskState, null, 2));
+}
+
+function setSymbolCooldown(symbol, minutes, reason) {
+  if (!SYMBOL_COOLDOWN_ENABLED || minutes <= 0 || !symbol) return;
+  riskState.symbolCooldowns = riskState.symbolCooldowns || {};
+  const until = Date.now() + minutes * 60 * 1000;
+  riskState.symbolCooldowns[symbol] = {
+    until,
+    reason,
+    updatedAt: new Date().toISOString(),
+  };
+  console.warn(
+    `[COOLDOWN] ${symbol} paused for ${minutes}m: ${reason}`,
+  );
+}
+
+function cleanupSymbolCooldowns() {
+  if (!riskState.symbolCooldowns) return false;
+  const now = Date.now();
+  let changed = false;
+  for (const [symbol, cooldown] of Object.entries(riskState.symbolCooldowns)) {
+    if (!cooldown?.until || Number(cooldown.until) <= now) {
+      delete riskState.symbolCooldowns[symbol];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function symbolCooldownAllowsTrading(symbol) {
+  if (!SYMBOL_COOLDOWN_ENABLED) return true;
+  const cooldown = riskState.symbolCooldowns?.[symbol];
+  if (!cooldown) return true;
+  const remainingMs = Number(cooldown.until || 0) - Date.now();
+  if (remainingMs <= 0) {
+    delete riskState.symbolCooldowns[symbol];
+    saveRiskState();
+    return true;
+  }
+  const remainingMinutes = Math.ceil(remainingMs / 60000);
+  console.log(
+    `[COOLDOWN] ${symbol} skipped for ${remainingMinutes}m: ${cooldown.reason}`,
+  );
+  return false;
 }
 
 async function getAccountEquity() {
@@ -383,6 +458,11 @@ function applyTradeToRiskState(trade) {
   if (isRealizedTrade(trade)) {
     if (netProfit < 0) {
       riskState.consecutiveLosses += 1;
+      setSymbolCooldown(
+        trade.symbol,
+        SYMBOL_COOLDOWN_MINUTES,
+        `realized loss ${netProfit.toFixed(6)} USDT`,
+      );
     } else if (netProfit > 0) {
       riskState.consecutiveLosses = 0;
     }
@@ -480,6 +560,10 @@ ${riskState.consecutiveLosses}
 }
 
 function riskGateAllowsTrading() {
+  if (cleanupSymbolCooldowns()) {
+    saveRiskState();
+  }
+
   const dailyLossLimit = getDailyLossLimit();
   if (dailyLossLimit > 0 && riskState.dailyNetPnL <= -dailyLossLimit) {
     console.warn(
@@ -499,6 +583,45 @@ function riskGateAllowsTrading() {
   }
 
   return true;
+}
+
+function circuitBreakerAllowsTrading() {
+  if (!CIRCUIT_BREAKER_ENABLED) return true;
+  const remainingMs = circuitBreakerState.pausedUntil - Date.now();
+  if (remainingMs <= 0) return true;
+
+  const remainingMinutes = Math.ceil(remainingMs / 60000);
+  console.warn(
+    `[CIRCUIT] Trading paused for ${remainingMinutes}m after ${circuitBreakerState.consecutiveErrors} consecutive errors. Last error: ${circuitBreakerState.lastError}`,
+  );
+  return false;
+}
+
+function recordCircuitBreakerSuccess() {
+  if (!CIRCUIT_BREAKER_ENABLED) return;
+  if (circuitBreakerState.consecutiveErrors > 0) {
+    console.log("[CIRCUIT] Error streak cleared");
+  }
+  circuitBreakerState.consecutiveErrors = 0;
+  circuitBreakerState.lastError = null;
+}
+
+function recordCircuitBreakerError(source, err) {
+  if (!CIRCUIT_BREAKER_ENABLED) return;
+  circuitBreakerState.consecutiveErrors += 1;
+  circuitBreakerState.lastError = `${source}: ${err?.message || err}`;
+
+  console.warn(
+    `[CIRCUIT] Error ${circuitBreakerState.consecutiveErrors}/${CIRCUIT_BREAKER_MAX_ERRORS} from ${source}: ${err?.message || err}`,
+  );
+
+  if (circuitBreakerState.consecutiveErrors >= CIRCUIT_BREAKER_MAX_ERRORS) {
+    circuitBreakerState.pausedUntil =
+      Date.now() + CIRCUIT_BREAKER_PAUSE_MINUTES * 60 * 1000;
+    console.warn(
+      `[CIRCUIT] Trading paused for ${CIRCUIT_BREAKER_PAUSE_MINUTES}m`,
+    );
+  }
 }
 
 async function syncProfitLedger() {
@@ -714,6 +837,66 @@ function regimeFilterSafe(regimeInfo) {
 // ======================================================
 // AI SIGNAL
 // ======================================================
+function createHoldAISignal(reason) {
+  return {
+    signal: "HOLD",
+    strength: "WEAK",
+    confidence: 0,
+    tradeAllowed: false,
+    reason,
+  };
+}
+
+function extractJsonObject(text) {
+  const cleaned = String(text || "")
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error("AI response does not contain a JSON object");
+  }
+  return cleaned.slice(start, end + 1);
+}
+
+function normalizeAISignal(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("AI response is not an object");
+  }
+
+  const signal = String(raw.signal || "").trim().toUpperCase();
+  const strength = String(raw.strength || "WEAK").trim().toUpperCase();
+  const confidence = Number(raw.confidence);
+  const tradeAllowed =
+    typeof raw.tradeAllowed === "boolean"
+      ? raw.tradeAllowed
+      : signal !== "HOLD";
+  const reason = String(raw.reason || "No reason provided.").trim();
+
+  if (!["LONG", "SHORT", "HOLD"].includes(signal)) {
+    throw new Error(`Invalid AI signal: ${raw.signal}`);
+  }
+  if (!["WEAK", "MEDIUM", "STRONG", "EXTREME"].includes(strength)) {
+    throw new Error(`Invalid AI strength: ${raw.strength}`);
+  }
+  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 100) {
+    throw new Error(`Invalid AI confidence: ${raw.confidence}`);
+  }
+
+  return {
+    signal,
+    strength,
+    confidence,
+    tradeAllowed,
+    reason: reason.slice(0, 500),
+  };
+}
+
+function parseAISignal(text) {
+  return normalizeAISignal(JSON.parse(extractJsonObject(text)));
+}
+
 async function getAISignal(symbol, snapshot, htfSnapshot, regimeInfo) {
   const allowedSignals = LONG_ONLY ? "LONG, HOLD" : "LONG, SHORT, HOLD";
   const prompt = `
@@ -789,13 +972,31 @@ RETURN JSON ONLY:
   "reason":"Strong bullish trend confirmation."
 }
 `;
-  const result = await model.generateContent(prompt);
-  const text = result.response
-    .text()
-    .replace(/```json/g, "")
-    .replace(/```/g, "")
-    .trim();
-  return JSON.parse(text);
+  let lastError = null;
+  for (let attempt = 1; attempt <= AI_RESPONSE_RETRIES + 1; attempt++) {
+    try {
+      const result = await model.generateContent(prompt);
+      const text = result.response.text();
+      return parseAISignal(text);
+    } catch (err) {
+      lastError = err;
+      console.warn(
+        `[WARN] AI response invalid for ${symbol} (${attempt}/${AI_RESPONSE_RETRIES + 1}): ${err.message}`,
+      );
+      if (attempt <= AI_RESPONSE_RETRIES) {
+        await sleep(1000 * attempt);
+      }
+    }
+  }
+
+  recordCircuitBreakerError(
+    `AI response for ${symbol}`,
+    lastError || new Error("unknown AI response error"),
+  );
+
+  return createHoldAISignal(
+    `AI response fallback to HOLD: ${lastError?.message || "unknown error"}`,
+  );
 }
 
 // ======================================================
@@ -1174,6 +1375,10 @@ async function analyzeSymbol(symbol) {
     console.log(`
 ========== SCAN ${symbol} ==========
 `);
+    if (!symbolCooldownAllowsTrading(symbol)) {
+      return null;
+    }
+
     const context = await getMarketContext(symbol);
     const snapshot = await getMarketSnapshot(symbol, context, TIMEFRAME);
     const htfSnapshot = await getMarketSnapshot(symbol, context, HTF_TIMEFRAME);
@@ -1259,6 +1464,9 @@ ${confirmation.count}/${REQUIRED_CONFIRMATION}
     };
   } catch (err) {
     console.warn(`${symbol} scan skipped: ${err.message}`);
+    recordCircuitBreakerError(`scan ${symbol}`, err);
+    setSymbolCooldown(symbol, SYMBOL_ERROR_COOLDOWN_MINUTES, "scan error");
+    saveRiskState();
     return null;
   }
 }
@@ -1269,10 +1477,16 @@ async function tradingCycle() {
     return;
   }
   isTrading = true;
+  const circuitErrorsAtStart = circuitBreakerState.consecutiveErrors;
+  let circuitAllowedThisCycle = false;
   try {
     console.log(`
 ========== ${new Date().toISOString()} ==========
 `);
+    if (!circuitBreakerAllowsTrading()) {
+      return;
+    }
+    circuitAllowedThisCycle = true;
     await syncProfitLedger();
     await syncRiskState();
     if (!riskGateAllowsTrading()) {
@@ -1343,7 +1557,14 @@ async function tradingCycle() {
     await createPartialTPs(symbol, newPos, actualEntry, snapshot.atr);
   } catch (err) {
     console.error("[ERROR] Trading error:", err.message);
+    recordCircuitBreakerError("trading cycle", err);
   } finally {
+    if (
+      circuitAllowedThisCycle &&
+      circuitBreakerState.consecutiveErrors === circuitErrorsAtStart
+    ) {
+      recordCircuitBreakerSuccess();
+    }
     isTrading = false;
   }
 }
