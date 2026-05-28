@@ -4,6 +4,7 @@ node_modules/
 tuned-config.json
 profit-ledger.json
 risk-state.json
+bot-paused.flag
 .DS_Store
 npm-debug.log*
 pnpm-debug.log*
