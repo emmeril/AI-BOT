@@ -135,6 +135,14 @@ const ALLOWED_AI_STRENGTHS = (
   .map((s) => s.trim().toUpperCase())
   .filter(Boolean);
 const AI_RESPONSE_RETRIES = Number(process.env.AI_RESPONSE_RETRIES || 2);
+const AI_EXPLAIN_LOG_ENABLED =
+  process.env.AI_EXPLAIN_LOG_ENABLED !== "false";
+const AI_EXPLAIN_LOG_FILE =
+  process.env.AI_EXPLAIN_LOG_FILE || "ai-explain-log.jsonl";
+const AI_EXPLAIN_LOG_MAX_LINES = Number(
+  process.env.AI_EXPLAIN_LOG_MAX_LINES || 5000,
+);
+const AI_EXPLAIN_LOG_PATH = path.resolve(process.cwd(), AI_EXPLAIN_LOG_FILE);
 
 // ======================================================
 // CIRCUIT BREAKER
@@ -217,6 +225,66 @@ function killSwitchActive() {
     return true;
   }
   return false;
+}
+
+function roundNumber(value, digits = 6) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return Number(number.toFixed(digits));
+}
+
+function snapshotForExplainLog(snapshot) {
+  if (!snapshot) return null;
+  return {
+    price: roundNumber(snapshot.price, 10),
+    fundingRate: roundNumber(snapshot.fundingRate, 8),
+    trend: snapshot.trend,
+    ema20: roundNumber(snapshot.ema20, 10),
+    ema50: roundNumber(snapshot.ema50, 10),
+    ema20Slope: roundNumber(snapshot.ema20Slope, 10),
+    ema50Slope: roundNumber(snapshot.ema50Slope, 10),
+    emaGap: roundNumber(snapshot.emaGap, 4),
+    rsi: roundNumber(snapshot.rsi, 2),
+    atr: roundNumber(snapshot.atr, 10),
+    volumeChange: roundNumber(snapshot.volumeChange, 2),
+  };
+}
+
+function pruneAIExplainLogIfNeeded() {
+  if (!AI_EXPLAIN_LOG_MAX_LINES || AI_EXPLAIN_LOG_MAX_LINES <= 0) return;
+  if (!fs.existsSync(AI_EXPLAIN_LOG_PATH)) return;
+  const lines = fs
+    .readFileSync(AI_EXPLAIN_LOG_PATH, "utf8")
+    .split(/\r?\n/)
+    .filter(Boolean);
+  if (lines.length <= AI_EXPLAIN_LOG_MAX_LINES) return;
+  fs.writeFileSync(
+    AI_EXPLAIN_LOG_PATH,
+    `${lines.slice(-AI_EXPLAIN_LOG_MAX_LINES).join("\n")}\n`,
+  );
+}
+
+function logAIExplainDecision(event) {
+  if (!AI_EXPLAIN_LOG_ENABLED) return;
+  try {
+    const entry = {
+      timestamp: new Date().toISOString(),
+      bot: "smart-binance-ai-futures-bot",
+      timeframe: TIMEFRAME,
+      htfTimeframe: HTF_TIMEFRAME,
+      longOnly: LONG_ONLY,
+      minAiConfidence: MIN_AI_CONFIDENCE,
+      allowedAiStrengths: ALLOWED_AI_STRENGTHS,
+      minRR: MIN_RR,
+      ...event,
+      snapshot: snapshotForExplainLog(event.snapshot),
+      htfSnapshot: snapshotForExplainLog(event.htfSnapshot),
+    };
+    fs.appendFileSync(AI_EXPLAIN_LOG_PATH, `${JSON.stringify(entry)}\n`);
+    pruneAIExplainLogIfNeeded();
+  } catch (err) {
+    console.warn(`[WARN] Failed to write AI explain log: ${err.message}`);
+  }
 }
 
 function createEmptyProfitLedger() {
@@ -1512,14 +1580,32 @@ async function analyzeSymbol(symbol) {
     const snapshot = await getMarketSnapshot(symbol, context, TIMEFRAME);
     const htfSnapshot = await getMarketSnapshot(symbol, context, HTF_TIMEFRAME);
     const regimeInfo = detectMarketRegime(snapshot, htfSnapshot);
+    const logScanDecision = (event) =>
+      logAIExplainDecision({
+        symbol,
+        snapshot,
+        htfSnapshot,
+        regimeInfo,
+        ...event,
+      });
 
     if (snapshot.emaGap < SIDEWAYS_EMA_GAP) {
       console.log(`${symbol} skipped: sideways market`);
+      logScanDecision({
+        outcome: "REJECTED_BEFORE_AI",
+        stage: "sideways_filter",
+        rejectReason: "EMA gap below sideways threshold.",
+      });
       return null;
     }
 
     if (!regimeFilterSafe(regimeInfo)) {
       console.log(`${symbol} skipped: ${regimeInfo.reason}`);
+      logScanDecision({
+        outcome: "REJECTED_BEFORE_AI",
+        stage: "regime_filter",
+        rejectReason: regimeInfo.reason,
+      });
       return null;
     }
 
@@ -1531,18 +1617,42 @@ async function analyzeSymbol(symbol) {
     const aiStrength = String(ai.strength || "").toUpperCase();
     if (!["LONG", "SHORT", "HOLD"].includes(signal)) {
       console.warn(`${symbol} skipped: invalid AI signal`);
+      logScanDecision({
+        outcome: "REJECTED_AFTER_AI",
+        stage: "ai_signal_validation",
+        ai,
+        rejectReason: "Invalid AI signal.",
+      });
       return null;
     }
     if (signal === "HOLD") {
       console.log(`${symbol} skipped: HOLD`);
+      logScanDecision({
+        outcome: "REJECTED_AFTER_AI",
+        stage: "ai_hold",
+        ai,
+        rejectReason: ai.reason || "AI returned HOLD.",
+      });
       return null;
     }
     if (LONG_ONLY && signal === "SHORT") {
       console.log(`${symbol} skipped: SHORT ignored in LONG ONLY mode`);
+      logScanDecision({
+        outcome: "REJECTED_AFTER_AI",
+        stage: "long_only_filter",
+        ai,
+        rejectReason: "AI returned SHORT while LONG_ONLY mode is active.",
+      });
       return null;
     }
     if (!aiFilterSafe(ai)) {
       console.log(`${symbol} skipped: AI filter`);
+      logScanDecision({
+        outcome: "REJECTED_AFTER_AI",
+        stage: "ai_filter",
+        ai,
+        rejectReason: "AI did not pass confidence, strength, or tradeAllowed filter.",
+      });
       return null;
     }
 
@@ -1553,11 +1663,25 @@ ${confirmation.count}/${REQUIRED_CONFIRMATION}
 `);
     if (!confirmation.confirmed) {
       console.log(`${symbol} skipped: signal not confirmed`);
+      logScanDecision({
+        outcome: "REJECTED_AFTER_AI",
+        stage: "signal_confirmation",
+        ai,
+        confirmation,
+        rejectReason: "Signal did not reach required confirmation count.",
+      });
       return null;
     }
 
     if (!fundingSafe(signal, context.fundingRate)) {
       console.warn(`${symbol} skipped: funding unsafe`);
+      logScanDecision({
+        outcome: "REJECTED_AFTER_AI",
+        stage: "funding_filter",
+        ai,
+        confirmation,
+        rejectReason: "Funding rate is unsafe for the AI signal direction.",
+      });
       return null;
     }
 
@@ -1576,8 +1700,31 @@ ${confirmation.count}/${REQUIRED_CONFIRMATION}
     console.log(`${symbol} RR: ${rr.toFixed(2)}`);
     if (rr < MIN_RR) {
       console.warn(`${symbol} skipped: RR too low`);
+      logScanDecision({
+        outcome: "REJECTED_AFTER_AI",
+        stage: "rr_filter",
+        ai,
+        confirmation,
+        rr: roundNumber(rr, 4),
+        tp: roundNumber(dynamicTPSL.tp, 10),
+        sl: roundNumber(dynamicTPSL.sl, 10),
+        rejectReason: "Risk/reward is below MIN_RR.",
+      });
       return null;
     }
+
+    const score = scoreCandidate(ai, rr, regimeInfo);
+    logScanDecision({
+      outcome: "CANDIDATE_ACCEPTED",
+      stage: "candidate_score",
+      ai,
+      confirmation,
+      rr: roundNumber(rr, 4),
+      tp: roundNumber(dynamicTPSL.tp, 10),
+      sl: roundNumber(dynamicTPSL.sl, 10),
+      score: roundNumber(score, 2),
+      acceptReason: "AI signal passed filters and became a trade candidate.",
+    });
 
     return {
       symbol,
@@ -1589,7 +1736,7 @@ ${confirmation.count}/${REQUIRED_CONFIRMATION}
       htfSnapshot,
       regimeInfo,
       rr,
-      score: scoreCandidate(ai, rr, regimeInfo),
+      score,
     };
   } catch (err) {
     console.warn(`${symbol} scan skipped: ${err.message}`);
@@ -1654,10 +1801,31 @@ async function tradingCycle() {
 
     const best = candidates[0];
     const { symbol, signal, context, snapshot } = best;
+    const logBestDecision = (event) =>
+      logAIExplainDecision({
+        symbol,
+        ai: best.ai,
+        snapshot: best.snapshot,
+        htfSnapshot: best.htfSnapshot,
+        regimeInfo: best.regimeInfo,
+        rr: roundNumber(best.rr, 4),
+        score: roundNumber(best.score, 2),
+        ...event,
+      });
+    logBestDecision({
+      outcome: "BEST_CANDIDATE_SELECTED",
+      stage: "candidate_ranking",
+      acceptReason: "Highest-scoring candidate after scanning all symbols.",
+    });
     const position = openPositions.find((p) => p.symbol === symbol);
 
     if (position && position.side === signal.toLowerCase()) {
       console.log(`${symbol} position already exists`);
+      logBestDecision({
+        outcome: "NOT_EXECUTED",
+        stage: "existing_position",
+        rejectReason: "Position already exists in the same direction.",
+      });
       return;
     }
 
@@ -1665,12 +1833,22 @@ async function tradingCycle() {
       console.log(
         `Max open positions reached: ${openPositions.length}/${MAX_OPEN_POSITIONS}`,
       );
+      logBestDecision({
+        outcome: "NOT_EXECUTED",
+        stage: "max_open_positions",
+        rejectReason: "MAX_OPEN_POSITIONS limit reached.",
+      });
       return;
     }
 
     const cooldownMs = REVERSAL_COOLDOWN_MINUTES * 60 * 1000;
     if (position && Date.now() - lastPositionChangeTime < cooldownMs) {
       console.log(`${symbol} reversal cooldown active`);
+      logBestDecision({
+        outcome: "NOT_EXECUTED",
+        stage: "reversal_cooldown",
+        rejectReason: "Reversal cooldown is still active.",
+      });
       return;
     }
 
@@ -1680,7 +1858,14 @@ async function tradingCycle() {
     await cancelAllOrders(symbol);
 
     const newPos = await openPosition(symbol, signal, context, snapshot.atr);
-    if (!newPos) return;
+    if (!newPos) {
+      logBestDecision({
+        outcome: "NOT_EXECUTED",
+        stage: "open_position",
+        rejectReason: "Exchange did not return an opened position.",
+      });
+      return;
+    }
 
     const actualEntry = newPos.entryPrice;
     const slPrice =
@@ -1689,6 +1874,17 @@ async function tradingCycle() {
         : actualEntry + snapshot.atr;
     await createStopLossOrder(symbol, newPos, slPrice);
     await createPartialTPs(symbol, newPos, actualEntry, snapshot.atr);
+    logBestDecision({
+      outcome: "EXECUTED",
+      stage: "order_opened",
+      position: {
+        side: newPos.side,
+        contracts: roundNumber(newPos.contracts, 8),
+        entryPrice: roundNumber(actualEntry, 10),
+      },
+      sl: roundNumber(slPrice, 10),
+      acceptReason: "Market order opened and protection orders were created.",
+    });
   } catch (err) {
     console.error("[ERROR] Trading error:", err.message);
     recordCircuitBreakerError("trading cycle", err);
