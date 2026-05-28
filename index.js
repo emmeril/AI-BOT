@@ -29,12 +29,23 @@ const PROFIT_TRACKER_FILE =
   process.env.PROFIT_TRACKER_FILE || "profit-ledger.json";
 const PROFIT_SYNC_LIMIT = Number(process.env.PROFIT_SYNC_LIMIT || 100);
 const PROFIT_LEDGER_PATH = path.resolve(process.cwd(), PROFIT_TRACKER_FILE);
+const RISK_STATE_FILE = process.env.RISK_STATE_FILE || "risk-state.json";
+const RISK_STATE_PATH = path.resolve(process.cwd(), RISK_STATE_FILE);
 
 // ======================================================
 // RISK
 // ======================================================
 const MAX_FUNDING_RATE = Number(process.env.MAX_FUNDING_RATE || 0.1) / 100;
 const MIN_RR = Number(process.env.MIN_RR || 1.5);
+const RISK_PER_TRADE_PCT = Number(process.env.RISK_PER_TRADE_PCT || 1) / 100;
+const MAX_DAILY_LOSS_PCT = Number(process.env.MAX_DAILY_LOSS_PCT || 3) / 100;
+const MAX_DAILY_LOSS_USDT = Number(process.env.MAX_DAILY_LOSS_USDT || 0);
+const MAX_CONSECUTIVE_LOSSES = Number(
+  process.env.MAX_CONSECUTIVE_LOSSES || 3,
+);
+const MAX_POSITION_NOTIONAL_USDT = Number(
+  process.env.MAX_POSITION_NOTIONAL_USDT || ORDER_SIZE_USDT * LEVERAGE,
+);
 
 // ======================================================
 // ATR
@@ -64,6 +75,18 @@ const REVERSAL_COOLDOWN_MINUTES = Number(
   process.env.REVERSAL_COOLDOWN_MINUTES || 10,
 );
 const LONG_ONLY = process.env.LONG_ONLY !== "false";
+const REGIME_FILTER_ENABLED = process.env.REGIME_FILTER_ENABLED !== "false";
+const ALLOWED_MARKET_REGIMES = (
+  process.env.ALLOWED_MARKET_REGIMES || "TRENDING_UP,TRENDING_DOWN"
+)
+  .split(",")
+  .map((s) => s.trim().toUpperCase())
+  .filter(Boolean);
+const MAX_ATR_PCT = Number(process.env.MAX_ATR_PCT || 2.5) / 100;
+const MIN_ATR_PCT = Number(process.env.MIN_ATR_PCT || 0.15) / 100;
+const MIN_VOLUME_CHANGE_FOR_TREND = Number(
+  process.env.MIN_VOLUME_CHANGE_FOR_TREND || -20,
+);
 
 // ======================================================
 // AI
@@ -106,6 +129,7 @@ let lastSignal = null;
 let signalConfirmCount = 0;
 let lastPositionChangeTime = 0;
 let profitLedger = loadProfitLedger();
+let riskState = loadRiskState();
 
 // ======================================================
 // UTILS
@@ -269,6 +293,193 @@ ${totals.profitEvents}/${totals.lossEvents}
 `);
 }
 
+function getUtcDayKey(timestamp = Date.now()) {
+  return new Date(timestamp).toISOString().slice(0, 10);
+}
+
+function createEmptyRiskState() {
+  const now = new Date().toISOString();
+  return {
+    dayKey: null,
+    dayStartEquity: 0,
+    dailyNetPnL: 0,
+    consecutiveLosses: 0,
+    processedTradeIds: [],
+    lastSyncedAt: 0,
+    updatedAt: now,
+  };
+}
+
+function normalizeRiskState(state) {
+  const empty = createEmptyRiskState();
+  return {
+    ...empty,
+    ...state,
+    processedTradeIds: Array.isArray(state?.processedTradeIds)
+      ? state.processedTradeIds
+      : [],
+  };
+}
+
+function loadRiskState() {
+  if (!fs.existsSync(RISK_STATE_PATH)) {
+    return createEmptyRiskState();
+  }
+  try {
+    const raw = fs.readFileSync(RISK_STATE_PATH, "utf8");
+    return normalizeRiskState(JSON.parse(raw));
+  } catch (err) {
+    console.warn("⚠️ Risk state reset:", err.message);
+    return createEmptyRiskState();
+  }
+}
+
+function saveRiskState() {
+  riskState.updatedAt = new Date().toISOString();
+  fs.writeFileSync(RISK_STATE_PATH, JSON.stringify(riskState, null, 2));
+}
+
+async function getAccountEquity() {
+  const balance = await retry(() => exchange.fetchBalance());
+  return Number(balance?.USDT?.total || balance?.USDT?.free || 0);
+}
+
+function isRealizedTrade(trade) {
+  const realizedPnl = getRealizedPnl(trade);
+  return Math.abs(realizedPnl) > 0.0000001;
+}
+
+function applyTradeToRiskState(trade) {
+  const id = tradeIdOf(trade);
+  if (riskState.processedTradeIds.includes(id)) {
+    return false;
+  }
+
+  const realizedPnl = getRealizedPnl(trade);
+  const fee = getTradeFee(trade);
+  const netProfit = realizedPnl - fee;
+
+  riskState.processedTradeIds.push(id);
+  riskState.processedTradeIds = riskState.processedTradeIds.slice(-1000);
+  riskState.lastSyncedAt = Math.max(
+    Number(riskState.lastSyncedAt || 0),
+    Number(trade.timestamp || 0),
+  );
+  riskState.dailyNetPnL += netProfit;
+
+  if (isRealizedTrade(trade)) {
+    if (netProfit < 0) {
+      riskState.consecutiveLosses += 1;
+    } else if (netProfit > 0) {
+      riskState.consecutiveLosses = 0;
+    }
+  }
+
+  return true;
+}
+
+function getDailyLossLimit() {
+  if (riskState.dayStartEquity <= 0) {
+    return MAX_DAILY_LOSS_USDT > 0 ? MAX_DAILY_LOSS_USDT : Infinity;
+  }
+  const percentLimit = riskState.dayStartEquity * MAX_DAILY_LOSS_PCT;
+  if (MAX_DAILY_LOSS_USDT > 0) {
+    return Math.min(percentLimit, MAX_DAILY_LOSS_USDT);
+  }
+  return percentLimit;
+}
+
+function resetDailyRiskState(dayKey, equity) {
+  riskState = {
+    ...createEmptyRiskState(),
+    dayKey,
+    dayStartEquity: equity,
+  };
+  saveRiskState();
+}
+
+function ensureDailyRiskState(dayKey, equity) {
+  if (riskState.dayKey !== dayKey) {
+    resetDailyRiskState(dayKey, equity);
+    return;
+  }
+  if (!riskState.dayStartEquity && equity > 0) {
+    riskState.dayStartEquity = equity;
+    saveRiskState();
+  }
+}
+
+async function syncRiskState() {
+  try {
+    const equity = await getAccountEquity();
+    const dayKey = getUtcDayKey();
+    ensureDailyRiskState(dayKey, equity);
+
+    const dayStart = new Date(`${dayKey}T00:00:00.000Z`).getTime();
+    const since = Math.max(
+      dayStart,
+      Number(riskState.lastSyncedAt || 0) > 0
+        ? Number(riskState.lastSyncedAt) - 1
+        : dayStart,
+    );
+
+    const trades = await retry(() =>
+      exchange.fetchMyTrades(SYMBOL, since, PROFIT_SYNC_LIMIT),
+    );
+    const sortedTrades = trades
+      .filter((trade) => !trade.symbol || trade.symbol === SYMBOL)
+      .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
+
+    let newTrades = 0;
+    for (const trade of sortedTrades) {
+      if (applyTradeToRiskState(trade)) {
+        newTrades++;
+      }
+    }
+
+    if (newTrades > 0) {
+      saveRiskState();
+    }
+
+    console.log(`
+🛡️ RISK SUMMARY
+
+Day equity start:
+${riskState.dayStartEquity.toFixed(2)} USDT
+
+Daily net PnL:
+${riskState.dailyNetPnL.toFixed(2)} USDT
+
+Consecutive losses:
+${riskState.consecutiveLosses}
+`);
+  } catch (err) {
+    console.warn("⚠️ Risk sync skipped:", err.message);
+  }
+}
+
+function riskGateAllowsTrading() {
+  const dailyLossLimit = getDailyLossLimit();
+  if (dailyLossLimit > 0 && riskState.dailyNetPnL <= -dailyLossLimit) {
+    console.warn(
+      `⛔ Daily loss limit reached: ${riskState.dailyNetPnL.toFixed(2)} / -${dailyLossLimit.toFixed(2)} USDT`,
+    );
+    return false;
+  }
+
+  if (
+    MAX_CONSECUTIVE_LOSSES > 0 &&
+    riskState.consecutiveLosses >= MAX_CONSECUTIVE_LOSSES
+  ) {
+    console.warn(
+      `⛔ Consecutive loss limit reached: ${riskState.consecutiveLosses}/${MAX_CONSECUTIVE_LOSSES}`,
+    );
+    return false;
+  }
+
+  return true;
+}
+
 async function syncProfitLedger() {
   if (!PROFIT_TRACKER_ENABLED) return;
   try {
@@ -387,9 +598,94 @@ async function getMarketSnapshot(context, timeframe = TIMEFRAME) {
 }
 
 // ======================================================
+// MARKET REGIME
+// ======================================================
+function detectMarketRegime(snapshot, htfSnapshot) {
+  const atrPct = snapshot.price > 0 ? snapshot.atr / snapshot.price : 0;
+  const bullishAlignment =
+    snapshot.trend === "UPTREND" &&
+    htfSnapshot.trend === "UPTREND" &&
+    snapshot.ema20Slope > 0 &&
+    htfSnapshot.ema20Slope > 0 &&
+    snapshot.volumeChange >= MIN_VOLUME_CHANGE_FOR_TREND;
+  const bearishAlignment =
+    snapshot.trend === "DOWNTREND" &&
+    htfSnapshot.trend === "DOWNTREND" &&
+    snapshot.ema20Slope < 0 &&
+    htfSnapshot.ema20Slope < 0 &&
+    snapshot.volumeChange >= MIN_VOLUME_CHANGE_FOR_TREND;
+  const sideways =
+    snapshot.emaGap < SIDEWAYS_EMA_GAP ||
+    (Math.abs(snapshot.ema20Slope) < snapshot.atr * 0.02 &&
+      Math.abs(snapshot.ema50Slope) < snapshot.atr * 0.02 &&
+      Math.abs(htfSnapshot.ema20Slope) < htfSnapshot.atr * 0.02) ||
+    (snapshot.rsi >= 45 && snapshot.rsi <= 55 && atrPct < MIN_ATR_PCT);
+  const volatile = atrPct >= MAX_ATR_PCT;
+
+  if (sideways) {
+    return {
+      regime: "CHOPPY",
+      allow: false,
+      reason: "Market is ranging or too weak for trend execution.",
+      atrPct,
+    };
+  }
+
+  if (volatile && !bullishAlignment && !bearishAlignment) {
+    return {
+      regime: "HIGH_VOLATILITY",
+      allow: false,
+      reason: "ATR is elevated without clean directional alignment.",
+      atrPct,
+    };
+  }
+
+  if (bullishAlignment) {
+    return {
+      regime: "TRENDING_UP",
+      allow: true,
+      reason: "Higher timeframe and momentum are aligned bullishly.",
+      atrPct,
+    };
+  }
+
+  if (bearishAlignment) {
+    return {
+      regime: "TRENDING_DOWN",
+      allow: true,
+      reason: "Higher timeframe and momentum are aligned bearishly.",
+      atrPct,
+    };
+  }
+
+  return {
+    regime: volatile ? "VOLATILE_MIXED" : "MIXED",
+    allow: false,
+    reason: "Trend structure is not clean enough for execution.",
+    atrPct,
+  };
+}
+
+function regimeFilterSafe(regimeInfo) {
+  if (!REGIME_FILTER_ENABLED) return true;
+  if (!regimeInfo.allow) {
+    console.warn(`⚠️ Regime blocked: ${regimeInfo.regime}`);
+    return false;
+  }
+  if (
+    ALLOWED_MARKET_REGIMES.length > 0 &&
+    !ALLOWED_MARKET_REGIMES.includes(regimeInfo.regime)
+  ) {
+    console.warn(`⚠️ Regime not allowed: ${regimeInfo.regime}`);
+    return false;
+  }
+  return true;
+}
+
+// ======================================================
 // AI SIGNAL
 // ======================================================
-async function getAISignal(snapshot, htfSnapshot) {
+async function getAISignal(snapshot, htfSnapshot, regimeInfo) {
   const allowedSignals = LONG_ONLY ? "LONG, HOLD" : "LONG, SHORT, HOLD";
   const prompt = `
 You are a professional crypto futures trader AI.
@@ -410,6 +706,8 @@ RULES:
 - Only give ${LONG_ONLY ? "LONG" : "LONG or SHORT"} if probability is high.
 - Ignore weak momentum setups.
 - Allowed output signals: ${allowedSignals}
+- Market regime: ${regimeInfo.regime}
+- Regime guidance: ${regimeInfo.reason}
 
 MARKET DATA:
 
@@ -495,13 +793,21 @@ async function getAvailableBalance() {
 // ======================================================
 // CONTRACTS
 // ======================================================
-async function calculateContracts(usdt, price) {
+async function calculateContracts(price, stopDistance) {
   const market = exchange.markets[SYMBOL];
-  const exposure = usdt * LEVERAGE;
-  const contracts = exposure / price;
+  const balance = await getAccountEquity();
+  const riskCapital = balance * RISK_PER_TRADE_PCT;
+  const riskBasedContracts =
+    stopDistance > 0 ? riskCapital / stopDistance : 0;
+  const maxNotionalContracts = MAX_POSITION_NOTIONAL_USDT / price;
   const minCost = market?.limits?.cost?.min || 5;
   const minContracts = minCost / price;
-  const finalContracts = contracts < minContracts ? minContracts : contracts;
+  const cappedContracts = Math.min(
+    Math.max(riskBasedContracts, minContracts),
+    maxNotionalContracts,
+  );
+  const finalContracts =
+    cappedContracts < minContracts ? minContracts : cappedContracts;
   return Number(exchange.amountToPrecision(SYMBOL, finalContracts));
 }
 
@@ -611,15 +917,17 @@ async function cancelAllOrders() {
 // ======================================================
 // OPEN POSITION
 // ======================================================
-async function openPosition(signal, context) {
+async function openPosition(signal, context, stopDistance) {
   await retry(() => exchange.setLeverage(LEVERAGE, SYMBOL));
   const balance = await getAvailableBalance();
-  if (balance < ORDER_SIZE_USDT) {
+  const market = exchange.markets[SYMBOL];
+  const minBalance = market?.limits?.cost?.min || 5;
+  if (balance < minBalance) {
     console.warn("⛔ Balance insufficient");
     return null;
   }
   const side = signal === "LONG" ? "buy" : "sell";
-  const amount = await calculateContracts(ORDER_SIZE_USDT, context.price);
+  const amount = await calculateContracts(context.price, stopDistance);
   console.log(`
 🚀 OPEN ${signal}
 
@@ -790,9 +1098,14 @@ async function tradingCycle() {
 ========== ${new Date().toISOString()} ==========
 `);
     await syncProfitLedger();
+    await syncRiskState();
+    if (!riskGateAllowsTrading()) {
+      return;
+    }
     const context = await getMarketContext();
     const snapshot = await getMarketSnapshot(context, TIMEFRAME);
     const htfSnapshot = await getMarketSnapshot(context, HTF_TIMEFRAME);
+    const regimeInfo = detectMarketRegime(snapshot, htfSnapshot);
 
     // ==================================================
     // SIDEWAYS FILTER
@@ -802,11 +1115,15 @@ async function tradingCycle() {
       return;
     }
 
+    if (!regimeFilterSafe(regimeInfo)) {
+      return;
+    }
+
     // ==================================================
     // AI
     // ==================================================
     console.log("🤖 Asking Gemini...");
-    const ai = await getAISignal(snapshot, htfSnapshot);
+    const ai = await getAISignal(snapshot, htfSnapshot, regimeInfo);
     console.log(ai);
     const signal = ai.signal?.toUpperCase();
     const aiStrength = String(ai.strength || "").toUpperCase();
@@ -910,7 +1227,7 @@ ${rr.toFixed(2)}
     // ==================================================
     // OPEN NEW POSITION
     // ==================================================
-    const newPos = await openPosition(signal, context);
+    const newPos = await openPosition(signal, context, snapshot.atr);
     if (!newPos) return;
 
     // ==================================================

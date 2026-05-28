@@ -3,6 +3,7 @@ node_modules/
 .env.tuned
 tuned-config.json
 profit-ledger.json
+risk-state.json
 .DS_Store
 npm-debug.log*
 pnpm-debug.log*
