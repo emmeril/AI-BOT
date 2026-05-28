@@ -6,6 +6,8 @@
 
 require('dotenv').config();
 const ccxt = require('ccxt');
+const fs = require('fs');
+const path = require('path');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 // ======================================================
@@ -35,6 +37,26 @@ const INTERVAL_MINUTES =
 
 const INTERVAL_MS =
     INTERVAL_MINUTES * 60 * 1000;
+
+// ======================================================
+// PROFIT TRACKER
+// ======================================================
+
+const PROFIT_TRACKER_ENABLED =
+    process.env.PROFIT_TRACKER_ENABLED !== 'false';
+
+const PROFIT_TRACKER_FILE =
+    process.env.PROFIT_TRACKER_FILE ||
+    'profit-ledger.json';
+
+const PROFIT_SYNC_LIMIT =
+    Number(process.env.PROFIT_SYNC_LIMIT || 100);
+
+const PROFIT_LEDGER_PATH =
+    path.resolve(
+        process.cwd(),
+        PROFIT_TRACKER_FILE
+    );
 
 // ======================================================
 // RISK
@@ -166,6 +188,9 @@ let signalConfirmCount = 0;
 
 let lastPositionChangeTime = 0;
 
+let profitLedger =
+    loadProfitLedger();
+
 // ======================================================
 // UTILS
 // ======================================================
@@ -216,6 +241,310 @@ function getNextCandleDelay() {
         * INTERVAL_MS;
 
     return next - now;
+}
+
+function createEmptyProfitLedger() {
+
+    const now =
+        new Date().toISOString();
+
+    return {
+
+        symbol: SYMBOL,
+
+        startedAt: now,
+
+        updatedAt: now,
+
+        lastTradeTimestamp: Date.now(),
+
+        processedTradeIds: [],
+
+        totals: {
+
+            grossRealizedPnl: 0,
+
+            fees: 0,
+
+            netProfit: 0,
+
+            tradeCount: 0,
+
+            profitEvents: 0,
+
+            lossEvents: 0
+        },
+
+        recentTrades: []
+    };
+}
+
+function normalizeProfitLedger(ledger) {
+
+    const empty =
+        createEmptyProfitLedger();
+
+    return {
+        ...empty,
+        ...ledger,
+        symbol: ledger.symbol || SYMBOL,
+        processedTradeIds:
+            Array.isArray(ledger.processedTradeIds)
+                ? ledger.processedTradeIds
+                : [],
+        totals: {
+            ...empty.totals,
+            ...(ledger.totals || {})
+        },
+        recentTrades:
+            Array.isArray(ledger.recentTrades)
+                ? ledger.recentTrades
+                : []
+    };
+}
+
+function loadProfitLedger() {
+
+    if (!fs.existsSync(PROFIT_LEDGER_PATH))
+        return createEmptyProfitLedger();
+
+    try {
+
+        const raw =
+            fs.readFileSync(
+                PROFIT_LEDGER_PATH,
+                'utf8'
+            );
+
+        return normalizeProfitLedger(
+            JSON.parse(raw)
+        );
+
+    } catch (err) {
+
+        console.warn(
+            '⚠️ Profit ledger reset:',
+            err.message
+        );
+
+        return createEmptyProfitLedger();
+    }
+}
+
+function saveProfitLedger() {
+
+    profitLedger.updatedAt =
+        new Date().toISOString();
+
+    fs.writeFileSync(
+        PROFIT_LEDGER_PATH,
+        JSON.stringify(
+            profitLedger,
+            null,
+            2
+        )
+    );
+}
+
+function tradeIdOf(trade) {
+
+    return String(
+        trade.id ||
+        trade.info?.id ||
+        `${trade.timestamp}-${trade.order}-${trade.side}-${trade.amount}-${trade.price}`
+    );
+}
+
+function numberFromTrade(value) {
+
+    const number =
+        Number(value);
+
+    return Number.isFinite(number)
+        ? number
+        : 0;
+}
+
+function getRealizedPnl(trade) {
+
+    return numberFromTrade(
+        trade.info?.realizedPnl ||
+        trade.info?.realizedProfit ||
+        trade.realizedPnl
+    );
+}
+
+function getTradeFee(trade) {
+
+    const feeCost =
+        numberFromTrade(
+            trade.fee?.cost
+        );
+
+    if (feeCost > 0)
+        return feeCost;
+
+    return Math.abs(
+        numberFromTrade(
+            trade.info?.commission
+        )
+    );
+}
+
+function applyTradeToProfitLedger(trade) {
+
+    const id =
+        tradeIdOf(trade);
+
+    if (
+        profitLedger.processedTradeIds.includes(id)
+    ) {
+
+        return false;
+    }
+
+    const realizedPnl =
+        getRealizedPnl(trade);
+
+    const fee =
+        getTradeFee(trade);
+
+    const netProfit =
+        realizedPnl - fee;
+
+    profitLedger.processedTradeIds.push(id);
+
+    profitLedger.processedTradeIds =
+        profitLedger.processedTradeIds.slice(-1000);
+
+    profitLedger.lastTradeTimestamp =
+        Math.max(
+            Number(profitLedger.lastTradeTimestamp || 0),
+            Number(trade.timestamp || 0)
+        );
+
+    profitLedger.totals.grossRealizedPnl +=
+        realizedPnl;
+
+    profitLedger.totals.fees +=
+        fee;
+
+    profitLedger.totals.netProfit +=
+        netProfit;
+
+    profitLedger.totals.tradeCount++;
+
+    if (netProfit > 0)
+        profitLedger.totals.profitEvents++;
+
+    if (netProfit < 0)
+        profitLedger.totals.lossEvents++;
+
+    profitLedger.recentTrades.unshift({
+        id,
+        time:
+            trade.datetime ||
+            new Date(
+                trade.timestamp || Date.now()
+            ).toISOString(),
+        side: trade.side,
+        price: numberFromTrade(trade.price),
+        amount: numberFromTrade(trade.amount),
+        realizedPnl,
+        fee,
+        netProfit,
+        order: trade.order || trade.info?.orderId
+    });
+
+    profitLedger.recentTrades =
+        profitLedger.recentTrades.slice(0, 30);
+
+    return true;
+}
+
+function logProfitSummary(
+    newTrades = 0
+) {
+
+    const totals =
+        profitLedger.totals;
+
+    console.log(`
+💰 PROFIT SUMMARY
+
+New trades synced:
+${newTrades}
+
+Gross realized PnL:
+${totals.grossRealizedPnl.toFixed(6)} USDT
+
+Fees:
+${totals.fees.toFixed(6)} USDT
+
+TOTAL NET PROFIT:
+${totals.netProfit.toFixed(6)} USDT
+
+Profit/loss events:
+${totals.profitEvents}/${totals.lossEvents}
+`);
+}
+
+async function syncProfitLedger() {
+
+    if (!PROFIT_TRACKER_ENABLED)
+        return;
+
+    try {
+
+        const since =
+            profitLedger.lastTradeTimestamp
+                ? profitLedger.lastTradeTimestamp - 1
+                : undefined;
+
+        const trades =
+            await retry(() =>
+                exchange.fetchMyTrades(
+                    SYMBOL,
+                    since,
+                    PROFIT_SYNC_LIMIT
+                )
+            );
+
+        const sortedTrades =
+            trades
+                .filter(trade =>
+                    !trade.symbol ||
+                    trade.symbol === SYMBOL
+                )
+                .sort((a, b) =>
+                    Number(a.timestamp || 0) -
+                    Number(b.timestamp || 0)
+                );
+
+        let newTrades = 0;
+
+        for (const trade of sortedTrades) {
+
+            if (
+                applyTradeToProfitLedger(trade)
+            ) {
+
+                newTrades++;
+            }
+        }
+
+        if (newTrades > 0)
+            saveProfitLedger();
+
+        logProfitSummary(newTrades);
+
+    } catch (err) {
+
+        console.warn(
+            '⚠️ Profit sync skipped:',
+            err.message
+        );
+    }
 }
 
 // ======================================================
@@ -1225,6 +1554,8 @@ async function tradingCycle() {
 ========== ${new Date().toISOString()} ==========
 `);
 
+        await syncProfitLedger();
+
         const context =
             await getMarketContext();
 
@@ -1547,6 +1878,8 @@ ${GEMINI_MODEL}
     await retry(() =>
         exchange.loadMarkets()
     );
+
+    await syncProfitLedger();
 
     while (true) {
 
