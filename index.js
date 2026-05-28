@@ -131,7 +131,7 @@ const exchange = new ccxt.binance({
 });
 if (process.env.EXCHANGE_DEMO === "true") {
   exchange.enable_demo_trading(true);
-  console.log("🧪 DEMO FUTURES ENABLED");
+  console.log("[DEMO] Futures demo mode enabled");
 }
 
 // ======================================================
@@ -156,7 +156,7 @@ async function retry(fn, retries = 3, delay = 2000) {
       return await fn();
     } catch (err) {
       const last = i === retries - 1;
-      console.warn(`⚠️ Retry ${i + 1}/${retries}:`, err.message);
+      console.warn(`[WARN] Retry ${i + 1}/${retries}:`, err.message);
       if (last) throw err;
       await sleep(delay);
     }
@@ -212,7 +212,7 @@ function loadProfitLedger() {
     const raw = fs.readFileSync(PROFIT_LEDGER_PATH, "utf8");
     return normalizeProfitLedger(JSON.parse(raw));
   } catch (err) {
-    console.warn("⚠️ Profit ledger reset:", err.message);
+    console.warn("[WARN] Profit ledger reset:", err.message);
     return createEmptyProfitLedger();
   }
 }
@@ -287,7 +287,7 @@ function applyTradeToProfitLedger(trade) {
 function logProfitSummary(newTrades = 0) {
   const totals = profitLedger.totals;
   console.log(`
-💰 PROFIT SUMMARY
+[PROFIT] Summary
 
 New trades synced:
 ${newTrades}
@@ -342,7 +342,7 @@ function loadRiskState() {
     const raw = fs.readFileSync(RISK_STATE_PATH, "utf8");
     return normalizeRiskState(JSON.parse(raw));
   } catch (err) {
-    console.warn("⚠️ Risk state reset:", err.message);
+    console.warn("[WARN] Risk state reset:", err.message);
     return createEmptyRiskState();
   }
 }
@@ -463,7 +463,7 @@ async function syncRiskState() {
     }
 
     console.log(`
-🛡️ RISK SUMMARY
+[RISK] Summary
 
 Day equity start:
 ${riskState.dayStartEquity.toFixed(2)} USDT
@@ -475,7 +475,7 @@ Consecutive losses:
 ${riskState.consecutiveLosses}
 `);
   } catch (err) {
-    console.warn("⚠️ Risk sync skipped:", err.message);
+    console.warn("[WARN] Risk sync skipped:", err.message);
   }
 }
 
@@ -483,7 +483,7 @@ function riskGateAllowsTrading() {
   const dailyLossLimit = getDailyLossLimit();
   if (dailyLossLimit > 0 && riskState.dailyNetPnL <= -dailyLossLimit) {
     console.warn(
-      `⛔ Daily loss limit reached: ${riskState.dailyNetPnL.toFixed(2)} / -${dailyLossLimit.toFixed(2)} USDT`,
+      `[BLOCK] Daily loss limit reached: ${riskState.dailyNetPnL.toFixed(2)} / -${dailyLossLimit.toFixed(2)} USDT`,
     );
     return false;
   }
@@ -493,7 +493,7 @@ function riskGateAllowsTrading() {
     riskState.consecutiveLosses >= MAX_CONSECUTIVE_LOSSES
   ) {
     console.warn(
-      `⛔ Consecutive loss limit reached: ${riskState.consecutiveLosses}/${MAX_CONSECUTIVE_LOSSES}`,
+      `[BLOCK] Consecutive loss limit reached: ${riskState.consecutiveLosses}/${MAX_CONSECUTIVE_LOSSES}`,
     );
     return false;
   }
@@ -530,7 +530,7 @@ async function syncProfitLedger() {
     if (newTrades > 0) saveProfitLedger();
     logProfitSummary(newTrades);
   } catch (err) {
-    console.warn("⚠️ Profit sync skipped:", err.message);
+    console.warn("[WARN] Profit sync skipped:", err.message);
   }
 }
 
@@ -698,14 +698,14 @@ function detectMarketRegime(snapshot, htfSnapshot) {
 function regimeFilterSafe(regimeInfo) {
   if (!REGIME_FILTER_ENABLED) return true;
   if (!regimeInfo.allow) {
-    console.warn(`⚠️ Regime blocked: ${regimeInfo.regime}`);
+    console.warn(`[WARN] Regime blocked: ${regimeInfo.regime}`);
     return false;
   }
   if (
     ALLOWED_MARKET_REGIMES.length > 0 &&
     !ALLOWED_MARKET_REGIMES.includes(regimeInfo.regime)
   ) {
-    console.warn(`⚠️ Regime not allowed: ${regimeInfo.regime}`);
+    console.warn(`[WARN] Regime not allowed: ${regimeInfo.regime}`);
     return false;
   }
   return true;
@@ -925,16 +925,16 @@ function aiFilterSafe(ai) {
   const confidence = Number(ai.confidence || 0);
   const tradeAllowed = ai.tradeAllowed !== false;
   if (!tradeAllowed) {
-    console.warn("⚠️ AI filter blocked: tradeAllowed=false");
+    console.warn("[WARN] AI filter blocked: tradeAllowed=false");
     return false;
   }
   if (!ALLOWED_AI_STRENGTHS.includes(strength)) {
-    console.warn(`⚠️ AI filter blocked: strength ${strength || "UNKNOWN"}`);
+    console.warn(`[WARN] AI filter blocked: strength ${strength || "UNKNOWN"}`);
     return false;
   }
   if (confidence < MIN_AI_CONFIDENCE) {
     console.warn(
-      `⚠️ AI filter blocked: confidence ${confidence}/${MIN_AI_CONFIDENCE}`,
+      `[WARN] AI filter blocked: confidence ${confidence}/${MIN_AI_CONFIDENCE}`,
     );
     return false;
   }
@@ -950,7 +950,7 @@ async function cancelAllOrders(symbol) {
     for (const o of orders) {
       try {
         await retry(() => exchange.cancelOrder(o.id, symbol));
-        console.log(`🗑️ Cancel ${o.id}`);
+        console.log(`[CANCEL] Order ${o.id}`);
       } catch (err) {
         console.error(err.message);
       }
@@ -969,13 +969,13 @@ async function openPosition(symbol, signal, context, stopDistance) {
   const market = exchange.markets[symbol];
   const minBalance = market?.limits?.cost?.min || 5;
   if (balance < minBalance) {
-    console.warn("⛔ Balance insufficient");
+    console.warn("[BLOCK] Balance insufficient");
     return null;
   }
   const side = signal === "LONG" ? "buy" : "sell";
   const amount = await calculateContracts(symbol, context.price, stopDistance);
   console.log(`
-🚀 OPEN ${signal}
+[OPEN] ${signal}
 
 Contracts:
 ${amount}
@@ -984,7 +984,7 @@ ${amount}
     exchange.createMarketOrder(symbol, side, amount),
   );
   console.log(`
-✅ ORDER:
+[OK] Order:
 ${order.id}
 `);
   lastPositionChangeTime = Date.now();
@@ -1003,7 +1003,7 @@ async function closePosition(symbol, position) {
     }),
   );
   await cancelAllOrders(symbol);
-  console.log("🔻 POSITION CLOSED");
+  console.log("[CLOSE] Position closed");
 }
 
 // ======================================================
@@ -1013,7 +1013,7 @@ async function createStopLossOrder(symbol, position, slPrice) {
   const side = position.side === "long" ? "sell" : "buy";
   const stopPrice = exchange.priceToPrecision(symbol, slPrice);
   console.log(`
-🛑 CREATE STOP LOSS MARKET
+[SL] Create stop loss market
 Side: ${side}
 Mode: close remaining position
 Stop trigger: ${stopPrice}
@@ -1025,7 +1025,7 @@ Stop trigger: ${stopPrice}
       workingType: "MARK_PRICE",
     }),
   );
-  console.log("✅ Stop loss order aktif");
+  console.log("[OK] Stop loss order active");
 }
 
 // ======================================================
@@ -1056,10 +1056,10 @@ async function createPartialTPs(symbol, position, entryPrice, atr) {
   tp1Price = Number(exchange.priceToPrecision(symbol, tp1Price));
   tp2Price = Number(exchange.priceToPrecision(symbol, tp2Price));
   console.log(`
-🎯 TP1:
+[TP] TP1:
 ${tp1Price}
 
-🎯 TP2:
+[TP] TP2:
 ${tp2Price}
 `);
   if (tp1Qty > 0) {
@@ -1078,7 +1078,7 @@ ${tp2Price}
       ),
     );
     console.log(
-      `✅ TP1 CREATED:
+      `[OK] TP1 created:
 ${tp1Qty}`,
     );
   }
@@ -1098,7 +1098,7 @@ ${tp1Qty}`,
       ),
     );
     console.log(
-      `✅ TP2 CREATED:
+      `[OK] TP2 created:
 ${tp2Qty}`,
     );
   }
@@ -1119,7 +1119,7 @@ ${tp2Qty}`,
       ),
     );
     console.log(`
-📈 RUNNER TRAILING ACTIVE
+[TRAILING] Runner trailing active
 
 Qty:
 ${runnerQty}
@@ -1265,7 +1265,7 @@ ${confirmation.count}/${REQUIRED_CONFIRMATION}
 
 async function tradingCycle() {
   if (isTrading) {
-    console.log("⏳ Previous cycle running");
+    console.log("[WAIT] Previous cycle running");
     return;
   }
   isTrading = true;
@@ -1342,7 +1342,7 @@ async function tradingCycle() {
     await createStopLossOrder(symbol, newPos, slPrice);
     await createPartialTPs(symbol, newPos, actualEntry, snapshot.atr);
   } catch (err) {
-    console.error("❌ Trading Error:", err.message);
+    console.error("[ERROR] Trading error:", err.message);
   } finally {
     isTrading = false;
   }
@@ -1353,7 +1353,7 @@ async function tradingCycle() {
 // ======================================================
 async function main() {
   console.log(`
-🔥 SMART AI FUTURES BOT
+[START] Smart AI Futures Bot
 
 SCAN SYMBOLS:
 ${SCAN_SYMBOLS.join(", ")}
@@ -1376,7 +1376,7 @@ ${GEMINI_MODEL}
     try {
       const delay = getNextCandleDelay();
       console.log(`
-⏳ Waiting next candle:
+[WAIT] Waiting next candle:
 ${Math.floor(delay / 1000)}s
 `);
       await sleep(delay);
