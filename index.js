@@ -1149,20 +1149,17 @@ async function getAvailableBalance() {
 // ======================================================
 async function calculateContracts(symbol, price, stopDistance) {
   const market = exchange.markets[symbol];
-  const balance = await getAccountEquity();
-  const riskCapital = balance * RISK_PER_TRADE_PCT;
-  const riskBasedContracts =
-    stopDistance > 0 ? riskCapital / stopDistance : 0;
-  const maxNotionalContracts = MAX_POSITION_NOTIONAL_USDT / price;
+  const targetNotional = ORDER_SIZE_USDT * LEVERAGE;
+  const maxNotional = Math.min(targetNotional, MAX_POSITION_NOTIONAL_USDT);
   const minCost = market?.limits?.cost?.min || 5;
-  const minContracts = minCost / price;
-  const cappedContracts = Math.min(
-    Math.max(riskBasedContracts, minContracts),
-    maxNotionalContracts,
-  );
-  const finalContracts =
-    cappedContracts < minContracts ? minContracts : cappedContracts;
+  const minAmount = market?.limits?.amount?.min || 0;
+  const finalNotional = Math.max(minCost, maxNotional);
+  const finalContracts = Math.max(finalNotional / price, minAmount);
   return Number(exchange.amountToPrecision(symbol, finalContracts));
+}
+
+function calculateRequiredMargin(amount, price) {
+  return (amount * price) / LEVERAGE;
 }
 
 // ======================================================
@@ -1378,20 +1375,26 @@ async function recoverOpenPositionsProtection(openPositions) {
 // ======================================================
 async function openPosition(symbol, signal, context, stopDistance) {
   await retry(() => exchange.setLeverage(LEVERAGE, symbol));
-  const balance = await getAvailableBalance();
-  const market = exchange.markets[symbol];
-  const minBalance = market?.limits?.cost?.min || 5;
-  if (balance < minBalance) {
-    console.warn("[BLOCK] Balance insufficient");
-    return null;
-  }
   const side = signal === "LONG" ? "buy" : "sell";
   const amount = await calculateContracts(symbol, context.price, stopDistance);
+  const notional = amount * context.price;
+  const requiredMargin = calculateRequiredMargin(amount, context.price);
+  const balance = await getAvailableBalance();
+  if (balance < requiredMargin) {
+    console.warn(
+      `[BLOCK] Balance insufficient: free ${balance.toFixed(4)} USDT, required margin ${requiredMargin.toFixed(4)} USDT`,
+    );
+    return null;
+  }
   console.log(`
 [OPEN] ${signal}
 
 Contracts:
 ${amount}
+Notional:
+${notional.toFixed(4)} USDT
+Required margin:
+${requiredMargin.toFixed(4)} USDT
 `);
   const order = await retry(() =>
     exchange.createMarketOrder(symbol, side, amount),
