@@ -92,6 +92,9 @@ const SIDEWAYS_EMA_GAP =
 const REVERSAL_COOLDOWN_MINUTES =
     Number(process.env.REVERSAL_COOLDOWN_MINUTES || 10);
 
+const LONG_ONLY =
+    process.env.LONG_ONLY !== 'false';
+
 // ======================================================
 // AI
 // ======================================================
@@ -457,6 +460,11 @@ async function getAISignal(
     htfSnapshot
 ) {
 
+    const allowedSignals =
+        LONG_ONLY
+            ? 'LONG, HOLD'
+            : 'LONG, SHORT, HOLD';
+
     const prompt = `
 You are a professional crypto futures trader AI.
 
@@ -473,8 +481,9 @@ RULES:
 - Avoid fake breakouts.
 - Avoid overtrading.
 - Use higher timeframe as main trend filter.
-- Only give LONG or SHORT if probability is high.
+- Only give ${LONG_ONLY ? 'LONG' : 'LONG or SHORT'} if probability is high.
 - Ignore weak momentum setups.
+- Allowed output signals: ${allowedSignals}
 
 MARKET DATA:
 
@@ -1205,6 +1214,18 @@ async function tradingCycle() {
 
             console.log(
                 '⏸️ HOLD'
+            );
+
+            return;
+        }
+
+        if (
+            LONG_ONLY &&
+            signal === 'SHORT'
+        ) {
+
+            console.log(
+                '⏸️ SHORT ignored in LONG ONLY mode'
             );
 
             return;
