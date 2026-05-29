@@ -42,6 +42,16 @@ function resolveProjectPath(fileName) {
   return path.resolve(process.cwd(), fileName);
 }
 
+function classifyVolumeChange(volumeChange) {
+  const value = Number(volumeChange);
+  if (!Number.isFinite(value)) return "UNKNOWN";
+  if (value <= -80) return "SEVERE_DRY_UP";
+  if (value <= -40) return "HEAVY_DRY_UP";
+  if (value < 15) return "NEUTRAL";
+  if (value < 50) return "SUPPORTIVE";
+  return "SURGE";
+}
+
 // ======================================================
 // CONFIG
 // ======================================================
@@ -137,7 +147,7 @@ const MAX_ATR_PCT = envNumber("MAX_ATR_PCT", 2.5) / 100;
 const MIN_ATR_PCT = envNumber("MIN_ATR_PCT", 0.15) / 100;
 const MIN_VOLUME_CHANGE_FOR_TREND = envNumber(
   "MIN_VOLUME_CHANGE_FOR_TREND",
-  -20,
+  -30,
 );
 const SYMBOL_COOLDOWN_ENABLED = envBoolean("SYMBOL_COOLDOWN_ENABLED");
 const SYMBOL_COOLDOWN_MINUTES = envNumber("SYMBOL_COOLDOWN_MINUTES", 30);
@@ -1281,6 +1291,7 @@ function buildAISignalPrompt({
 }) {
   const allowedSignals = longOnly ? "LONG, HOLD" : "LONG, SHORT, HOLD";
   const allowedDirection = longOnly ? "LONG" : "LONG or SHORT";
+  const volumeContext = classifyVolumeChange(snapshot.volumeChange);
 
   return `
 You are a professional crypto futures trader AI.
@@ -1298,6 +1309,9 @@ RULES:
 - Avoid fake breakouts.
 - Avoid overtrading.
 - Use higher timeframe as main trend filter.
+- If the regime is TRENDING_UP or TRENDING_DOWN, prefer the aligned direction unless the structure is clearly broken.
+- A moderate volume dip is not a veto by itself. Only treat volume as a strong warning when it is a SEVERE_DRY_UP.
+- Use HOLD when the regime is MIXED/CHOPPY or when trend alignment is missing.
 - Only give ${allowedDirection} if probability is high.
 - Ignore weak momentum setups.
 - Allowed output signals: ${allowedSignals}
@@ -1305,6 +1319,7 @@ RULES:
 - Use WEAK instead of LOW.
 - Market regime: ${regimeInfo.regime}
 - Regime guidance: ${regimeInfo.reason}
+- Volume context: ${volumeContext}
 
 MARKET DATA:
 
