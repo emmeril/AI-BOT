@@ -100,6 +100,8 @@ Bot akan menunggu candle berikutnya sesuai `INTERVAL_MINUTES`, lalu menjalankan 
 
 Kalau ingin lebih hemat rate limit AI, atur `SCAN_ROTATION_BATCH_SIZE` supaya bot hanya memeriksa sebagian simbol per siklus secara bergiliran. Misalnya `2` akan membuat bot scan 2 simbol dulu, lalu lanjut ke batch berikutnya di siklus berikutnya.
 
+Saat mode rotating aktif, konfirmasi sinyal otomatis dipercepat ke `1` supaya setup yang lolos tidak keburu basi menunggu putaran scan berikutnya. Kalau rotating tidak aktif, bot kembali memakai `REQUIRED_CONFIRMATION`.
+
 ## Menjalankan Optimizer
 
 Optimizer dipakai untuk melakukan walk-forward test terhadap kombinasi parameter yang didefinisikan di `.env`.
