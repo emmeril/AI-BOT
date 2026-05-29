@@ -14,6 +14,7 @@ Bot trading Binance Futures berbasis Node.js yang menggabungkan analisis teknika
 - Kill switch lewat environment variable atau file `bot-paused.flag`.
 - Stop loss market, partial take profit, dan trailing stop.
 - Profit ledger lokal untuk ringkasan realized PnL.
+- Alert trade via Fonnte untuk info entry dan realized trade.
 - AI explain log untuk audit keputusan sinyal.
 - Walk-forward optimizer untuk mencari parameter yang lebih cocok dari data historis.
 
@@ -76,6 +77,10 @@ EXCHANGE_DEMO=true
 
 GEMINI_API_KEY=your_gemini_api_key
 GEMINI_MODEL=gemini-3.1-flash-lite
+
+FONNTE_ENABLED=true
+FONNTE_TOKEN=your_fonnte_token
+FONNTE_TARGET=62812xxxxxxx
 ```
 
 Untuk awal penggunaan, sangat disarankan tetap memakai:

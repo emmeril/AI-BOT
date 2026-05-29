@@ -8,6 +8,7 @@ const ccxt = require("ccxt");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const https = require("https");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 // ======================================================
@@ -172,6 +173,15 @@ const CIRCUIT_BREAKER_PAUSE_MINUTES = Number(
 );
 
 // ======================================================
+// FONNTE ALERT
+// ======================================================
+const FONNTE_ENABLED = process.env.FONNTE_ENABLED !== "false";
+const FONNTE_TOKEN = process.env.FONNTE_TOKEN || "";
+const FONNTE_TARGET = process.env.FONNTE_TARGET || "";
+const FONNTE_API_URL = process.env.FONNTE_API_URL || "https://api.fonnte.com/send";
+const FONNTE_COUNTRY_CODE = process.env.FONNTE_COUNTRY_CODE || "62";
+
+// ======================================================
 // EXCHANGE
 // ======================================================
 const exchange = new ccxt.binance({
@@ -197,6 +207,7 @@ let profitLedger = loadProfitLedger();
 let riskState = loadRiskState();
 let marketSnapshotCache = new Map();
 let aiSignalCache = new Map();
+let fonnteAlertWarningShown = false;
 let circuitBreakerState = {
   consecutiveErrors: 0,
   pausedUntil: 0,
@@ -262,6 +273,134 @@ async function retry(fn, retries = 3, delay = 2000) {
   }
 }
 
+function shouldSendFonnteAlerts() {
+  return Boolean(FONNTE_ENABLED && FONNTE_TOKEN && FONNTE_TARGET);
+}
+
+function postFormUrlEncoded(urlString, formBody, token) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlString);
+    const request = https.request(
+      {
+        method: "POST",
+        hostname: url.hostname,
+        port: url.port || 443,
+        path: `${url.pathname}${url.search}`,
+        headers: {
+          Authorization: token,
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Content-Length": Buffer.byteLength(formBody),
+        },
+      },
+      (response) => {
+        let data = "";
+        response.on("data", (chunk) => {
+          data += chunk;
+        });
+        response.on("end", () => {
+          resolve({
+            statusCode: response.statusCode || 0,
+            body: data,
+          });
+        });
+      },
+    );
+
+    request.on("error", reject);
+    request.write(formBody);
+    request.end();
+  });
+}
+
+function formatTradeOpenAlert({
+  symbol,
+  signal,
+  entryPrice,
+  contracts,
+  slPrice,
+  tpPrice,
+  rr,
+  confidence,
+  strength,
+}) {
+  return [
+    "[TRADE OPEN]",
+    `Symbol: ${symbol}`,
+    `Side: ${signal}`,
+    `Entry: ${roundNumber(entryPrice, 10)}`,
+    `Contracts: ${roundNumber(contracts, 8)}`,
+    `SL: ${roundNumber(slPrice, 10)}`,
+    `TP: ${roundNumber(tpPrice, 10)}`,
+    `RR: ${roundNumber(rr, 2)}`,
+    `Confidence: ${confidence ?? "-"}`,
+    `Strength: ${strength || "-"}`,
+  ].join("\n");
+}
+
+function formatTradeCloseAlert(trade, realizedPnl, fee, netProfit) {
+  return [
+    "[TRADE CLOSE]",
+    `Symbol: ${trade.symbol || "-"}`,
+    `Side: ${String(trade.side || "-").toUpperCase()}`,
+    `Time: ${trade.datetime || new Date(trade.timestamp || Date.now()).toISOString()}`,
+    `Realized PnL: ${roundNumber(realizedPnl, 6)} USDT`,
+    `Fee: ${roundNumber(fee, 6)} USDT`,
+    `Net Profit: ${roundNumber(netProfit, 6)} USDT`,
+  ].join("\n");
+}
+
+async function sendFonnteAlert(message) {
+  if (!shouldSendFonnteAlerts()) {
+    if (FONNTE_ENABLED && !fonnteAlertWarningShown) {
+      fonnteAlertWarningShown = true;
+      console.warn(
+        "[FONNTE] Alert skipped: set FONNTE_TOKEN and FONNTE_TARGET to enable trade alerts",
+      );
+    }
+    return false;
+  }
+
+  try {
+    const formBody = new URLSearchParams({
+      target: FONNTE_TARGET,
+      message,
+      countryCode: String(FONNTE_COUNTRY_CODE),
+    }).toString();
+
+    const response = await postFormUrlEncoded(
+      FONNTE_API_URL,
+      formBody,
+      FONNTE_TOKEN,
+    );
+
+    let payload = null;
+    try {
+      payload = JSON.parse(response.body);
+    } catch {
+      payload = null;
+    }
+
+    const success =
+      response.statusCode >= 200 &&
+      response.statusCode < 300 &&
+      payload?.status !== false &&
+      payload?.Status !== false;
+
+    if (!success) {
+      console.warn(
+        `[FONNTE] Alert failed (${response.statusCode}): ${response.body || "empty response"}`,
+      );
+      return false;
+    }
+
+    console.log("[FONNTE] Trade alert sent");
+    return true;
+  } catch (err) {
+    console.warn(`[FONNTE] Alert error: ${err.message}`);
+    return false;
+  }
+}
+
 function getNextCandleDelay() {
   const now = Date.now();
   const next = Math.ceil(now / INTERVAL_MS) * INTERVAL_MS;
@@ -315,7 +454,7 @@ async function syncTradesForSymbols({ since, onTrade, errorLabel }) {
         .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
 
       for (const trade of sortedTrades) {
-        if (onTrade(trade)) {
+        if (await onTrade(trade)) {
           newTrades++;
         }
       }
@@ -631,7 +770,7 @@ function isRealizedTrade(trade) {
   return Math.abs(realizedPnl) > 0.0000001;
 }
 
-function applyTradeToRiskState(trade) {
+async function applyTradeToRiskState(trade) {
   const id = tradeIdOf(trade);
   if (riskState.processedTradeIds.includes(id)) {
     return false;
@@ -660,6 +799,10 @@ function applyTradeToRiskState(trade) {
     } else if (netProfit > 0) {
       riskState.consecutiveLosses = 0;
     }
+
+    await sendFonnteAlert(
+      formatTradeCloseAlert(trade, realizedPnl, fee, netProfit),
+    );
   }
 
   return true;
@@ -1936,8 +2079,27 @@ async function tradingCycle() {
       signal === "LONG"
         ? actualEntry - snapshot.atr
         : actualEntry + snapshot.atr;
+    const openTPSL = calculateDynamicTPSL(
+      signal,
+      actualEntry,
+      snapshot.atr,
+      best.aiStrength,
+    );
     await createStopLossOrder(symbol, newPos, slPrice);
     await createPartialTPs(symbol, newPos, actualEntry, snapshot.atr);
+    await sendFonnteAlert(
+      formatTradeOpenAlert({
+        symbol,
+        signal,
+        entryPrice: actualEntry,
+        contracts: newPos.contracts,
+        slPrice,
+        tpPrice: openTPSL.tp,
+        rr: best.rr,
+        confidence: best.ai.confidence,
+        strength: best.aiStrength,
+      }),
+    );
     logBestDecision({
       outcome: "EXECUTED",
       stage: "order_opened",
@@ -1988,6 +2150,8 @@ MODEL:
 ${GEMINI_MODEL}
 KILL SWITCH:
 ${KILL_SWITCH_ENABLED ? `enabled (${KILL_SWITCH_FILE})` : "disabled"}
+FONNTE ALERT:
+${shouldSendFonnteAlerts() ? `enabled (${FONNTE_TARGET})` : FONNTE_ENABLED ? "configured partially" : "disabled"}
 `);
   await retry(() => exchange.loadMarkets());
   await syncProfitLedger();
