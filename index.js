@@ -11,124 +11,141 @@ const crypto = require("crypto");
 const https = require("https");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
+function envValue(key, fallback) {
+  const value = process.env[key];
+  return value === undefined || value === "" ? fallback : value;
+}
+
+function envNumber(key, fallback) {
+  const parsed = Number(envValue(key, fallback));
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function envBoolean(key, fallback = true) {
+  const value = process.env[key];
+  if (value === undefined || value === "") return fallback;
+  return value !== "false";
+}
+
+function envTrue(key) {
+  return process.env[key] === "true";
+}
+
+function envList(key, fallback) {
+  return String(envValue(key, fallback))
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function resolveProjectPath(fileName) {
+  return path.resolve(process.cwd(), fileName);
+}
+
 // ======================================================
 // CONFIG
 // ======================================================
 const DEFAULT_MEME_SYMBOLS =
   "DOGE/USDT:USDT,1000SHIB/USDT:USDT,1000PEPE/USDT:USDT,1000FLOKI/USDT:USDT,1000BONK/USDT:USDT";
-const SYMBOL_INPUT =
-  process.env.SYMBOLS ||
-  process.env.MEME_SYMBOLS ||
-  process.env.SYMBOL ||
-  DEFAULT_MEME_SYMBOLS;
-const SYMBOLS = SYMBOL_INPUT
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-const SCAN_SYMBOLS =
-  SYMBOLS.length > 0 ? SYMBOLS : DEFAULT_MEME_SYMBOLS.split(",");
-const MAX_OPEN_POSITIONS = Number(process.env.MAX_OPEN_POSITIONS || 1);
-const LEVERAGE = Number(process.env.LEVERAGE || 10);
-const ORDER_SIZE_USDT = Number(process.env.ORDER_SIZE_USDT || 5);
-const TIMEFRAME = process.env.TIMEFRAME || "5m";
-const HTF_TIMEFRAME = process.env.HTF_TIMEFRAME || "15m";
-const LOOKBACK_CANDLES = Number(process.env.LOOKBACK_CANDLES || 200);
-const INTERVAL_MINUTES = Number(process.env.INTERVAL_MINUTES || 5);
+const SYMBOL_INPUT = envValue(
+  "SYMBOLS",
+  envValue("MEME_SYMBOLS", envValue("SYMBOL", DEFAULT_MEME_SYMBOLS)),
+);
+const SYMBOLS = envList("SYMBOLS", SYMBOL_INPUT);
+const SCAN_SYMBOLS = SYMBOLS.length > 0 ? SYMBOLS : envList("MEME_SYMBOLS", DEFAULT_MEME_SYMBOLS);
+const MAX_OPEN_POSITIONS = envNumber("MAX_OPEN_POSITIONS", 1);
+const LEVERAGE = envNumber("LEVERAGE", 10);
+const ORDER_SIZE_USDT = envNumber("ORDER_SIZE_USDT", 5);
+const TIMEFRAME = envValue("TIMEFRAME", "5m");
+const HTF_TIMEFRAME = envValue("HTF_TIMEFRAME", "15m");
+const LOOKBACK_CANDLES = envNumber("LOOKBACK_CANDLES", 200);
+const INTERVAL_MINUTES = envNumber("INTERVAL_MINUTES", 5);
 const INTERVAL_MS = INTERVAL_MINUTES * 60 * 1000;
-const MARKET_SNAPSHOT_CACHE_ENABLED =
-  process.env.MARKET_SNAPSHOT_CACHE_ENABLED !== "false";
-const AI_SIGNAL_CACHE_ENABLED = process.env.AI_SIGNAL_CACHE_ENABLED !== "false";
+const MARKET_SNAPSHOT_CACHE_ENABLED = envBoolean(
+  "MARKET_SNAPSHOT_CACHE_ENABLED",
+);
+const AI_SIGNAL_CACHE_ENABLED = envBoolean("AI_SIGNAL_CACHE_ENABLED");
 const CACHE_MAX_ENTRIES = Math.max(
   1,
-  Number(process.env.CACHE_MAX_ENTRIES || 500) || 500,
+  envNumber("CACHE_MAX_ENTRIES", 500) || 500,
 );
 
 // ======================================================
 // EMERGENCY CONTROL
 // ======================================================
-const KILL_SWITCH_ENABLED = process.env.KILL_SWITCH_ENABLED !== "false";
-const STOP_TRADING = process.env.STOP_TRADING === "true";
-const KILL_SWITCH_FILE = process.env.KILL_SWITCH_FILE || "bot-paused.flag";
-const KILL_SWITCH_PATH = path.resolve(process.cwd(), KILL_SWITCH_FILE);
+const KILL_SWITCH_ENABLED = envBoolean("KILL_SWITCH_ENABLED");
+const STOP_TRADING = envTrue("STOP_TRADING");
+const KILL_SWITCH_FILE = envValue("KILL_SWITCH_FILE", "bot-paused.flag");
+const KILL_SWITCH_PATH = resolveProjectPath(KILL_SWITCH_FILE);
 
 // ======================================================
 // PROFIT TRACKER
 // ======================================================
-const PROFIT_TRACKER_ENABLED = process.env.PROFIT_TRACKER_ENABLED !== "false";
-const PROFIT_TRACKER_FILE =
-  process.env.PROFIT_TRACKER_FILE || "profit-ledger.json";
-const PROFIT_SYNC_LIMIT = Number(process.env.PROFIT_SYNC_LIMIT || 100);
-const PROFIT_LEDGER_PATH = path.resolve(process.cwd(), PROFIT_TRACKER_FILE);
-const RISK_STATE_FILE = process.env.RISK_STATE_FILE || "risk-state.json";
-const RISK_STATE_PATH = path.resolve(process.cwd(), RISK_STATE_FILE);
+const PROFIT_TRACKER_ENABLED = envBoolean("PROFIT_TRACKER_ENABLED");
+const PROFIT_TRACKER_FILE = envValue("PROFIT_TRACKER_FILE", "profit-ledger.json");
+const PROFIT_SYNC_LIMIT = envNumber("PROFIT_SYNC_LIMIT", 100);
+const PROFIT_LEDGER_PATH = resolveProjectPath(PROFIT_TRACKER_FILE);
+const RISK_STATE_FILE = envValue("RISK_STATE_FILE", "risk-state.json");
+const RISK_STATE_PATH = resolveProjectPath(RISK_STATE_FILE);
 
 // ======================================================
 // RISK
 // ======================================================
-const MAX_FUNDING_RATE = Number(process.env.MAX_FUNDING_RATE || 0.1) / 100;
-const MIN_RR = Number(process.env.MIN_RR || 1.5);
-const RISK_PER_TRADE_PCT = Number(process.env.RISK_PER_TRADE_PCT || 1) / 100;
-const MAX_DAILY_LOSS_PCT = Number(process.env.MAX_DAILY_LOSS_PCT || 3) / 100;
-const MAX_DAILY_LOSS_USDT = Number(process.env.MAX_DAILY_LOSS_USDT || 0);
-const MAX_CONSECUTIVE_LOSSES = Number(
-  process.env.MAX_CONSECUTIVE_LOSSES || 3,
-);
-const MAX_POSITION_NOTIONAL_USDT = Number(
-  process.env.MAX_POSITION_NOTIONAL_USDT || ORDER_SIZE_USDT * LEVERAGE,
+const MAX_FUNDING_RATE = envNumber("MAX_FUNDING_RATE", 0.1) / 100;
+const MIN_RR = envNumber("MIN_RR", 1.5);
+const RISK_PER_TRADE_PCT = envNumber("RISK_PER_TRADE_PCT", 1) / 100;
+const MAX_DAILY_LOSS_PCT = envNumber("MAX_DAILY_LOSS_PCT", 3) / 100;
+const MAX_DAILY_LOSS_USDT = envNumber("MAX_DAILY_LOSS_USDT", 0);
+const MAX_CONSECUTIVE_LOSSES = envNumber("MAX_CONSECUTIVE_LOSSES", 3);
+const MAX_POSITION_NOTIONAL_USDT = envNumber(
+  "MAX_POSITION_NOTIONAL_USDT",
+  ORDER_SIZE_USDT * LEVERAGE,
 );
 
 // ======================================================
 // ATR
 // ======================================================
-const ATR_TP_MULTIPLIER = Number(process.env.ATR_TP_MULTIPLIER || 1.8);
+const ATR_TP_MULTIPLIER = envNumber("ATR_TP_MULTIPLIER", 1.8);
 
 // ======================================================
 // TRAILING
 // ======================================================
-const TRAILING_CALLBACK_MIN = Number(process.env.TRAILING_CALLBACK_MIN || 0.3);
-const TRAILING_CALLBACK_MAX = Number(process.env.TRAILING_CALLBACK_MAX || 1.5);
+const TRAILING_CALLBACK_MIN = envNumber("TRAILING_CALLBACK_MIN", 0.3);
+const TRAILING_CALLBACK_MAX = envNumber("TRAILING_CALLBACK_MAX", 1.5);
 
 // ======================================================
 // PARTIAL TP
 // ======================================================
-const TP1_PERCENT = Number(process.env.TP1_PERCENT || 30);
-const TP2_PERCENT = Number(process.env.TP2_PERCENT || 40);
-const TP1_RR = Number(process.env.TP1_RR || 1.0);
-const TP2_RR = Number(process.env.TP2_RR || 2.0);
+const TP1_PERCENT = envNumber("TP1_PERCENT", 30);
+const TP2_PERCENT = envNumber("TP2_PERCENT", 40);
+const TP1_RR = envNumber("TP1_RR", 1.0);
+const TP2_RR = envNumber("TP2_RR", 2.0);
 
 // ======================================================
 // FILTER
 // ======================================================
-const REQUIRED_CONFIRMATION = Number(process.env.REQUIRED_CONFIRMATION || 2);
-const SIDEWAYS_EMA_GAP = Number(process.env.SIDEWAYS_EMA_GAP || 0.04);
-const REVERSAL_COOLDOWN_MINUTES = Number(
-  process.env.REVERSAL_COOLDOWN_MINUTES || 10,
+const REQUIRED_CONFIRMATION = envNumber("REQUIRED_CONFIRMATION", 2);
+const SIDEWAYS_EMA_GAP = envNumber("SIDEWAYS_EMA_GAP", 0.04);
+const REVERSAL_COOLDOWN_MINUTES = envNumber("REVERSAL_COOLDOWN_MINUTES", 10);
+const LONG_ONLY = envBoolean("LONG_ONLY");
+const REGIME_FILTER_ENABLED = envBoolean("REGIME_FILTER_ENABLED");
+const ALLOWED_MARKET_REGIMES = envList(
+  "ALLOWED_MARKET_REGIMES",
+  "TRENDING_UP,TRENDING_DOWN",
+).map((regime) => regime.toUpperCase());
+const MAX_ATR_PCT = envNumber("MAX_ATR_PCT", 2.5) / 100;
+const MIN_ATR_PCT = envNumber("MIN_ATR_PCT", 0.15) / 100;
+const MIN_VOLUME_CHANGE_FOR_TREND = envNumber(
+  "MIN_VOLUME_CHANGE_FOR_TREND",
+  -20,
 );
-const LONG_ONLY = process.env.LONG_ONLY !== "false";
-const REGIME_FILTER_ENABLED = process.env.REGIME_FILTER_ENABLED !== "false";
-const ALLOWED_MARKET_REGIMES = (
-  process.env.ALLOWED_MARKET_REGIMES || "TRENDING_UP,TRENDING_DOWN"
-)
-  .split(",")
-  .map((s) => s.trim().toUpperCase())
-  .filter(Boolean);
-const MAX_ATR_PCT = Number(process.env.MAX_ATR_PCT || 2.5) / 100;
-const MIN_ATR_PCT = Number(process.env.MIN_ATR_PCT || 0.15) / 100;
-const MIN_VOLUME_CHANGE_FOR_TREND = Number(
-  process.env.MIN_VOLUME_CHANGE_FOR_TREND || -20,
+const SYMBOL_COOLDOWN_ENABLED = envBoolean("SYMBOL_COOLDOWN_ENABLED");
+const SYMBOL_COOLDOWN_MINUTES = envNumber("SYMBOL_COOLDOWN_MINUTES", 30);
+const SYMBOL_ERROR_COOLDOWN_MINUTES = envNumber(
+  "SYMBOL_ERROR_COOLDOWN_MINUTES",
+  5,
 );
-const SYMBOL_COOLDOWN_ENABLED =
-  process.env.SYMBOL_COOLDOWN_ENABLED !== "false";
-const SYMBOL_COOLDOWN_MINUTES = Number(
-  process.env.SYMBOL_COOLDOWN_MINUTES || 30,
-);
-const SYMBOL_ERROR_COOLDOWN_MINUTES = Number(
-  process.env.SYMBOL_ERROR_COOLDOWN_MINUTES || 5,
-);
-const SCAN_ROTATION_BATCH_SIZE = Math.max(
-  1,
-  Number(process.env.SCAN_ROTATION_BATCH_SIZE || 2),
-);
+const SCAN_ROTATION_BATCH_SIZE = Math.max(1, envNumber("SCAN_ROTATION_BATCH_SIZE", 2));
 const ROTATING_SCAN_ENABLED = SCAN_ROTATION_BATCH_SIZE < SCAN_SYMBOLS.length;
 const EFFECTIVE_REQUIRED_CONFIRMATION = ROTATING_SCAN_ENABLED
   ? 1
@@ -137,49 +154,44 @@ const EFFECTIVE_REQUIRED_CONFIRMATION = ROTATING_SCAN_ENABLED
 // ======================================================
 // AI
 // ======================================================
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash-lite";
+const GEMINI_MODEL = envValue("GEMINI_MODEL", "gemini-1.5-flash-lite");
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({
   model: GEMINI_MODEL,
 });
-const AI_FILTER_ENABLED = process.env.AI_FILTER_ENABLED !== "false";
-const MIN_AI_CONFIDENCE = Number(process.env.MIN_AI_CONFIDENCE || 65);
-const ALLOWED_AI_STRENGTHS = (
-  process.env.ALLOWED_AI_STRENGTHS || "MEDIUM,STRONG,EXTREME"
-)
-  .split(",")
-  .map((s) => s.trim().toUpperCase())
-  .filter(Boolean);
-const AI_RESPONSE_RETRIES = Number(process.env.AI_RESPONSE_RETRIES || 2);
-const AI_EXPLAIN_LOG_ENABLED =
-  process.env.AI_EXPLAIN_LOG_ENABLED !== "false";
-const AI_EXPLAIN_LOG_FILE =
-  process.env.AI_EXPLAIN_LOG_FILE || "ai-explain-log.jsonl";
-const AI_EXPLAIN_LOG_MAX_LINES = Number(
-  process.env.AI_EXPLAIN_LOG_MAX_LINES || 5000,
-);
-const AI_EXPLAIN_LOG_PATH = path.resolve(process.cwd(), AI_EXPLAIN_LOG_FILE);
+const AI_FILTER_ENABLED = envBoolean("AI_FILTER_ENABLED");
+const MIN_AI_CONFIDENCE = envNumber("MIN_AI_CONFIDENCE", 65);
+const ALLOWED_AI_STRENGTHS = envList(
+  "ALLOWED_AI_STRENGTHS",
+  "MEDIUM,STRONG,EXTREME",
+).map((strength) => strength.toUpperCase());
+const AI_RESPONSE_RETRIES = envNumber("AI_RESPONSE_RETRIES", 2);
+const AI_EXPLAIN_LOG_ENABLED = envBoolean("AI_EXPLAIN_LOG_ENABLED");
+const AI_EXPLAIN_LOG_FILE = envValue("AI_EXPLAIN_LOG_FILE", "ai-explain-log.jsonl");
+const AI_EXPLAIN_LOG_MAX_LINES = envNumber("AI_EXPLAIN_LOG_MAX_LINES", 5000);
+const AI_EXPLAIN_LOG_PATH = resolveProjectPath(AI_EXPLAIN_LOG_FILE);
 
 // ======================================================
 // CIRCUIT BREAKER
 // ======================================================
-const CIRCUIT_BREAKER_ENABLED =
-  process.env.CIRCUIT_BREAKER_ENABLED !== "false";
-const CIRCUIT_BREAKER_MAX_ERRORS = Number(
-  process.env.CIRCUIT_BREAKER_MAX_ERRORS || 5,
-);
-const CIRCUIT_BREAKER_PAUSE_MINUTES = Number(
-  process.env.CIRCUIT_BREAKER_PAUSE_MINUTES || 15,
+const CIRCUIT_BREAKER_ENABLED = envBoolean("CIRCUIT_BREAKER_ENABLED");
+const CIRCUIT_BREAKER_MAX_ERRORS = envNumber("CIRCUIT_BREAKER_MAX_ERRORS", 5);
+const CIRCUIT_BREAKER_PAUSE_MINUTES = envNumber(
+  "CIRCUIT_BREAKER_PAUSE_MINUTES",
+  15,
 );
 
 // ======================================================
 // FONNTE ALERT
 // ======================================================
-const FONNTE_ENABLED = process.env.FONNTE_ENABLED !== "false";
-const FONNTE_TOKEN = process.env.FONNTE_TOKEN || "";
-const FONNTE_TARGET = process.env.FONNTE_TARGET || "";
-const FONNTE_API_URL = process.env.FONNTE_API_URL || "https://api.fonnte.com/send";
-const FONNTE_COUNTRY_CODE = process.env.FONNTE_COUNTRY_CODE || "62";
+const FONNTE_ENABLED = envBoolean("FONNTE_ENABLED");
+const FONNTE_TOKEN = envValue("FONNTE_TOKEN", "");
+const FONNTE_TARGET = envValue("FONNTE_TARGET", "");
+const FONNTE_API_URL = envValue(
+  "FONNTE_API_URL",
+  "https://api.fonnte.com/send",
+);
+const FONNTE_COUNTRY_CODE = envValue("FONNTE_COUNTRY_CODE", "62");
 
 // ======================================================
 // EXCHANGE
@@ -1065,7 +1077,9 @@ async function getMarketSnapshot(symbol, context, timeframe = TIMEFRAME) {
   const atr = calculateATR(ohlcv.slice(-15));
   const latestVolume = ohlcv[ohlcv.length - 1][5];
   const prevVolume = ohlcv[ohlcv.length - 2][5];
-  const volumeChange = ((latestVolume - prevVolume) / prevVolume) * 100;
+  const volumeChange = prevVolume
+    ? ((latestVolume - prevVolume) / prevVolume) * 100
+    : 0;
   const trend =
     ema20 > ema50 ? "UPTREND" : ema20 < ema50 ? "DOWNTREND" : "SIDEWAYS";
   const emaGap = (Math.abs(ema20 - ema50) / context.price) * 100;
@@ -1086,7 +1100,6 @@ async function getMarketSnapshot(symbol, context, timeframe = TIMEFRAME) {
     price: context.price,
     fundingRate: context.fundingRate,
     ...baseSnapshot,
-    emaGap: (Math.abs(ema20 - ema50) / context.price) * 100,
   };
   if (MARKET_SNAPSHOT_CACHE_ENABLED) {
     marketSnapshotCache.set(cacheKey, {
@@ -1259,29 +1272,17 @@ function parseAISignal(text) {
   return normalizeAISignal(JSON.parse(extractJsonObject(text)));
 }
 
-async function getAISignal(symbol, snapshot, htfSnapshot, regimeInfo) {
-  const promptKey = crypto
-    .createHash("sha256")
-    .update(
-      JSON.stringify({
-        symbol,
-        longOnly: LONG_ONLY,
-        snapshot,
-        htfSnapshot,
-        regimeInfo,
-      }),
-    )
-    .digest("hex");
-  if (AI_SIGNAL_CACHE_ENABLED) {
-    const cached = aiSignalCache.get(promptKey);
-    if (isCacheEntryValid(cached)) {
-      console.log(`[CACHE] AI hit ${symbol}`);
-      return cached.signal;
-    }
-  }
+function buildAISignalPrompt({
+  symbol,
+  snapshot,
+  htfSnapshot,
+  regimeInfo,
+  longOnly,
+}) {
+  const allowedSignals = longOnly ? "LONG, HOLD" : "LONG, SHORT, HOLD";
+  const allowedDirection = longOnly ? "LONG" : "LONG or SHORT";
 
-  const allowedSignals = LONG_ONLY ? "LONG, HOLD" : "LONG, SHORT, HOLD";
-  const prompt = `
+  return `
 You are a professional crypto futures trader AI.
 
 Your job is to determine:
@@ -1297,7 +1298,7 @@ RULES:
 - Avoid fake breakouts.
 - Avoid overtrading.
 - Use higher timeframe as main trend filter.
-- Only give ${LONG_ONLY ? "LONG" : "LONG or SHORT"} if probability is high.
+- Only give ${allowedDirection} if probability is high.
 - Ignore weak momentum setups.
 - Allowed output signals: ${allowedSignals}
 - Allowed output strengths: WEAK, MEDIUM, STRONG, EXTREME
@@ -1356,6 +1357,36 @@ RETURN JSON ONLY:
   "reason":"Strong bullish trend confirmation."
 }
 `;
+}
+
+async function getAISignal(symbol, snapshot, htfSnapshot, regimeInfo) {
+  const promptKey = crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify({
+        symbol,
+        longOnly: LONG_ONLY,
+        snapshot,
+        htfSnapshot,
+        regimeInfo,
+      }),
+    )
+    .digest("hex");
+  if (AI_SIGNAL_CACHE_ENABLED) {
+    const cached = aiSignalCache.get(promptKey);
+    if (isCacheEntryValid(cached)) {
+      console.log(`[CACHE] AI hit ${symbol}`);
+      return cached.signal;
+    }
+  }
+
+  const prompt = buildAISignalPrompt({
+    symbol,
+    snapshot,
+    htfSnapshot,
+    regimeInfo,
+    longOnly: LONG_ONLY,
+  });
   let lastError = null;
   for (let attempt = 1; attempt <= AI_RESPONSE_RETRIES + 1; attempt++) {
     try {
@@ -1436,7 +1467,7 @@ async function getAvailableBalance() {
 // ======================================================
 // CONTRACTS
 // ======================================================
-async function calculateContracts(symbol, price, stopDistance) {
+async function calculateContracts(symbol, price) {
   const market = exchange.markets[symbol];
   const targetNotional = ORDER_SIZE_USDT * LEVERAGE;
   const maxNotional = Math.min(targetNotional, MAX_POSITION_NOTIONAL_USDT);
@@ -1557,10 +1588,10 @@ async function cancelAllOrders(symbol) {
 // ======================================================
 // OPEN POSITION
 // ======================================================
-async function openPosition(symbol, signal, context, stopDistance) {
+async function openPosition(symbol, signal, context) {
   await retry(() => exchange.setLeverage(LEVERAGE, symbol));
   const side = signal === "LONG" ? "buy" : "sell";
-  const amount = await calculateContracts(symbol, context.price, stopDistance);
+  const amount = await calculateContracts(symbol, context.price);
   const notional = amount * context.price;
   const requiredMargin = calculateRequiredMargin(amount, context.price);
   const balance = await getAvailableBalance();
