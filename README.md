@@ -98,6 +98,8 @@ node index.js
 
 Bot akan menunggu candle berikutnya sesuai `INTERVAL_MINUTES`, lalu menjalankan siklus scan, validasi AI, risk check, dan eksekusi order jika ada setup yang lolos.
 
+Kalau ingin lebih hemat rate limit AI, atur `SCAN_ROTATION_BATCH_SIZE` supaya bot hanya memeriksa sebagian simbol per siklus secara bergiliran. Misalnya `2` akan membuat bot scan 2 simbol dulu, lalu lanjut ke batch berikutnya di siklus berikutnya.
+
 ## Menjalankan Optimizer
 
 Optimizer dipakai untuk melakukan walk-forward test terhadap kombinasi parameter yang didefinisikan di `.env`.
@@ -131,6 +133,7 @@ ORDER_SIZE_USDT=5
 TIMEFRAME=15m
 HTF_TIMEFRAME=30m
 INTERVAL_MINUTES=5
+SCAN_ROTATION_BATCH_SIZE=2
 ```
 
 ### Risk Management

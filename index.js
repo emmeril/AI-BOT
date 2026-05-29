@@ -117,6 +117,10 @@ const SYMBOL_COOLDOWN_MINUTES = Number(
 const SYMBOL_ERROR_COOLDOWN_MINUTES = Number(
   process.env.SYMBOL_ERROR_COOLDOWN_MINUTES || 5,
 );
+const SCAN_ROTATION_BATCH_SIZE = Math.max(
+  1,
+  Number(process.env.SCAN_ROTATION_BATCH_SIZE || 2),
+);
 
 // ======================================================
 // AI
@@ -437,6 +441,7 @@ function createEmptyRiskState() {
     consecutiveLosses: 0,
     processedTradeIds: [],
     symbolCooldowns: {},
+    scanRotationIndex: 0,
     lastSyncedAt: 0,
     updatedAt: now,
   };
@@ -454,6 +459,9 @@ function normalizeRiskState(state) {
       state?.symbolCooldowns && typeof state.symbolCooldowns === "object"
         ? state.symbolCooldowns
         : {},
+    scanRotationIndex: Number.isFinite(Number(state?.scanRotationIndex))
+      ? Math.max(0, Number(state.scanRotationIndex))
+      : 0,
   };
 }
 
@@ -500,6 +508,19 @@ function cleanupSymbolCooldowns() {
     }
   }
   return changed;
+}
+
+function getRotatedScanSymbols() {
+  if (!Array.isArray(SCAN_SYMBOLS) || SCAN_SYMBOLS.length === 0) return [];
+  const total = SCAN_SYMBOLS.length;
+  const batchSize = Math.min(SCAN_ROTATION_BATCH_SIZE, total);
+  const start = riskState.scanRotationIndex % total;
+  const rotated = [];
+  for (let i = 0; i < batchSize; i++) {
+    rotated.push(SCAN_SYMBOLS[(start + i) % total]);
+  }
+  riskState.scanRotationIndex = (start + batchSize) % total;
+  return rotated;
 }
 
 function symbolCooldownAllowsTrading(symbol) {
@@ -1804,7 +1825,12 @@ async function tradingCycle() {
       return;
     }
     const candidates = [];
-    for (const symbol of SCAN_SYMBOLS) {
+    const symbolsToScan = getRotatedScanSymbols();
+    console.log(
+      `[SCAN] Rotating batch ${symbolsToScan.join(", ")} (${symbolsToScan.length}/${SCAN_SYMBOLS.length})`,
+    );
+    saveRiskState();
+    for (const symbol of symbolsToScan) {
       const candidate = await analyzeSymbol(symbol);
       if (candidate) candidates.push(candidate);
     }
@@ -1946,6 +1972,8 @@ TIMEFRAME:
 ${TIMEFRAME}
 HTF:
 ${HTF_TIMEFRAME}
+SCAN ROTATION BATCH:
+${SCAN_ROTATION_BATCH_SIZE}
 MODEL:
 ${GEMINI_MODEL}
 KILL SWITCH:
