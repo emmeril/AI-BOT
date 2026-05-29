@@ -229,29 +229,24 @@ function isCacheEntryValid(entry) {
   return Boolean(entry && entry.expiresAt > Date.now());
 }
 
-function cleanupCaches() {
+function pruneCacheEntries(cache, maxEntries) {
   const now = Date.now();
-  for (const [key, entry] of marketSnapshotCache.entries()) {
+  for (const [key, entry] of cache.entries()) {
     if (!entry?.expiresAt || entry.expiresAt <= now) {
-      marketSnapshotCache.delete(key);
-    }
-  }
-  for (const [key, entry] of aiSignalCache.entries()) {
-    if (!entry?.expiresAt || entry.expiresAt <= now) {
-      aiSignalCache.delete(key);
+      cache.delete(key);
     }
   }
 
-  while (marketSnapshotCache.size > CACHE_MAX_ENTRIES) {
-    const firstKey = marketSnapshotCache.keys().next().value;
+  while (cache.size > maxEntries) {
+    const firstKey = cache.keys().next().value;
     if (firstKey === undefined) break;
-    marketSnapshotCache.delete(firstKey);
+    cache.delete(firstKey);
   }
-  while (aiSignalCache.size > CACHE_MAX_ENTRIES) {
-    const firstKey = aiSignalCache.keys().next().value;
-    if (firstKey === undefined) break;
-    aiSignalCache.delete(firstKey);
-  }
+}
+
+function cleanupCaches() {
+  pruneCacheEntries(marketSnapshotCache, CACHE_MAX_ENTRIES);
+  pruneCacheEntries(aiSignalCache, CACHE_MAX_ENTRIES);
 }
 
 async function retry(fn, retries = 3, delay = 2000) {
@@ -273,6 +268,10 @@ function getNextCandleDelay() {
   return next - now;
 }
 
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
 function killSwitchActive() {
   if (!KILL_SWITCH_ENABLED) return false;
   if (STOP_TRADING) {
@@ -292,6 +291,39 @@ function roundNumber(value, digits = 6) {
   const number = Number(value);
   if (!Number.isFinite(number)) return null;
   return Number(number.toFixed(digits));
+}
+
+function loadJsonFile(filePath, fallbackFactory, warningLabel) {
+  if (!fs.existsSync(filePath)) return fallbackFactory();
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (err) {
+    console.warn(`[WARN] ${warningLabel} reset:`, err.message);
+    return fallbackFactory();
+  }
+}
+
+async function syncTradesForSymbols({ since, onTrade, errorLabel }) {
+  let newTrades = 0;
+  for (const symbol of SCAN_SYMBOLS) {
+    try {
+      const trades = await retry(() =>
+        exchange.fetchMyTrades(symbol, since, PROFIT_SYNC_LIMIT),
+      );
+      const sortedTrades = trades
+        .filter((trade) => !trade.symbol || trade.symbol === symbol)
+        .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
+
+      for (const trade of sortedTrades) {
+        if (onTrade(trade)) {
+          newTrades++;
+        }
+      }
+    } catch (err) {
+      console.warn(`${symbol} ${errorLabel} trade sync skipped: ${err.message}`);
+    }
+  }
+  return newTrades;
 }
 
 function snapshotForExplainLog(snapshot) {
@@ -386,14 +418,13 @@ function normalizeProfitLedger(ledger) {
 }
 
 function loadProfitLedger() {
-  if (!fs.existsSync(PROFIT_LEDGER_PATH)) return createEmptyProfitLedger();
-  try {
-    const raw = fs.readFileSync(PROFIT_LEDGER_PATH, "utf8");
-    return normalizeProfitLedger(JSON.parse(raw));
-  } catch (err) {
-    console.warn("[WARN] Profit ledger reset:", err.message);
-    return createEmptyProfitLedger();
-  }
+  return normalizeProfitLedger(
+    loadJsonFile(
+      PROFIT_LEDGER_PATH,
+      createEmptyProfitLedger,
+      "Profit ledger",
+    ),
+  );
 }
 
 function saveProfitLedger() {
@@ -523,16 +554,9 @@ function normalizeRiskState(state) {
 }
 
 function loadRiskState() {
-  if (!fs.existsSync(RISK_STATE_PATH)) {
-    return createEmptyRiskState();
-  }
-  try {
-    const raw = fs.readFileSync(RISK_STATE_PATH, "utf8");
-    return normalizeRiskState(JSON.parse(raw));
-  } catch (err) {
-    console.warn("[WARN] Risk state reset:", err.message);
-    return createEmptyRiskState();
-  }
+  return normalizeRiskState(
+    loadJsonFile(RISK_STATE_PATH, createEmptyRiskState, "Risk state"),
+  );
 }
 
 function saveRiskState() {
@@ -686,27 +710,11 @@ async function syncRiskState() {
         : dayStart,
     );
 
-    let newTrades = 0;
-    for (const symbol of SCAN_SYMBOLS) {
-      let sortedTrades = [];
-      try {
-        const trades = await retry(() =>
-          exchange.fetchMyTrades(symbol, since, PROFIT_SYNC_LIMIT),
-        );
-        sortedTrades = trades
-          .filter((trade) => !trade.symbol || trade.symbol === symbol)
-          .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
-      } catch (err) {
-        console.warn(`${symbol} risk trade sync skipped: ${err.message}`);
-        continue;
-      }
-
-      for (const trade of sortedTrades) {
-        if (applyTradeToRiskState(trade)) {
-          newTrades++;
-        }
-      }
-    }
+    const newTrades = await syncTradesForSymbols({
+      since,
+      onTrade: applyTradeToRiskState,
+      errorLabel: "risk",
+    });
 
     if (newTrades > 0) {
       saveRiskState();
@@ -800,26 +808,11 @@ async function syncProfitLedger() {
     const since = profitLedger.lastTradeTimestamp
       ? profitLedger.lastTradeTimestamp - 1
       : undefined;
-    let newTrades = 0;
-    for (const symbol of SCAN_SYMBOLS) {
-      let sortedTrades = [];
-      try {
-        const trades = await retry(() =>
-          exchange.fetchMyTrades(symbol, since, PROFIT_SYNC_LIMIT),
-        );
-        sortedTrades = trades
-          .filter((trade) => !trade.symbol || trade.symbol === symbol)
-          .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
-      } catch (err) {
-        console.warn(`${symbol} profit trade sync skipped: ${err.message}`);
-        continue;
-      }
-      for (const trade of sortedTrades) {
-        if (applyTradeToProfitLedger(trade)) {
-          newTrades++;
-        }
-      }
-    }
+    const newTrades = await syncTradesForSymbols({
+      since,
+      onTrade: applyTradeToProfitLedger,
+      errorLabel: "profit",
+    });
     if (newTrades > 0) saveProfitLedger();
     logProfitSummary(newTrades);
   } catch (err) {
@@ -1329,31 +1322,23 @@ function calculateRR(signal, entry, tp, sl) {
 // TP SL
 // ======================================================
 function calculateDynamicTPSL(signal, entry, atr, strength = "WEAK") {
-  let tpMultiplier = ATR_TP_MULTIPLIER;
-
-  if (strength === "STRONG") tpMultiplier = 2.5;
-  if (strength === "EXTREME") tpMultiplier = 3;
-
-  let slMultiplier = 1.5;
-
-  if (strength === "MEDIUM") slMultiplier = 1.8;
-  if (strength === "STRONG") slMultiplier = 2.2;
-  if (strength === "EXTREME") slMultiplier = 2.5;
-
-  let tp;
-  let sl;
-
-  if (signal === "LONG") {
-    tp = entry + atr * tpMultiplier;
-    sl = entry - atr * slMultiplier;
-  } else {
-    tp = entry - atr * tpMultiplier;
-    sl = entry + atr * slMultiplier;
-  }
+  const tpMultipliers = {
+    STRONG: 2.5,
+    EXTREME: 3,
+  };
+  const slMultipliers = {
+    MEDIUM: 1.8,
+    STRONG: 2.2,
+    EXTREME: 2.5,
+  };
+  const normalizedStrength = String(strength || "WEAK").toUpperCase();
+  const tpMultiplier = tpMultipliers[normalizedStrength] || ATR_TP_MULTIPLIER;
+  const slMultiplier = slMultipliers[normalizedStrength] || 1.5;
+  const direction = signal === "LONG" ? 1 : -1;
 
   return {
-    tp,
-    sl,
+    tp: entry + direction * atr * tpMultiplier,
+    sl: entry - direction * atr * slMultiplier,
   };
 }
 
@@ -1361,13 +1346,11 @@ function calculateDynamicTPSL(signal, entry, atr, strength = "WEAK") {
 // CALLBACK
 // ======================================================
 function calculateCallbackRate(atr, price) {
-  let callback = (atr / price) * 100;
-  if (callback < TRAILING_CALLBACK_MIN) {
-    callback = TRAILING_CALLBACK_MIN;
-  }
-  if (callback > TRAILING_CALLBACK_MAX) {
-    callback = TRAILING_CALLBACK_MAX;
-  }
+  const callback = clamp(
+    (atr / price) * 100,
+    TRAILING_CALLBACK_MIN,
+    TRAILING_CALLBACK_MAX,
+  );
   return Number(callback.toFixed(1));
 }
 
