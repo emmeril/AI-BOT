@@ -12,7 +12,6 @@ Bot trading Binance Futures berbasis Node.js yang menggabungkan analisis teknika
 - Mode `LONG_ONLY` untuk membatasi entry hanya ke posisi long.
 - Risk guard: daily loss limit, consecutive loss limit, max notional, risk per trade, dan max open positions.
 - Kill switch lewat environment variable atau file `bot-paused.flag`.
-- Auto recovery protection order untuk posisi terbuka.
 - Stop loss market, partial take profit, dan trailing stop.
 - Profit ledger lokal untuk ringkasan realized PnL.
 - AI explain log untuk audit keputusan sinyal.

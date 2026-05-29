@@ -49,7 +49,6 @@ const KILL_SWITCH_ENABLED = process.env.KILL_SWITCH_ENABLED !== "false";
 const STOP_TRADING = process.env.STOP_TRADING === "true";
 const KILL_SWITCH_FILE = process.env.KILL_SWITCH_FILE || "bot-paused.flag";
 const KILL_SWITCH_PATH = path.resolve(process.cwd(), KILL_SWITCH_FILE);
-const ORDER_RECOVERY_ENABLED = process.env.ORDER_RECOVERY_ENABLED !== "false";
 
 // ======================================================
 // PROFIT TRACKER
@@ -1429,111 +1428,6 @@ async function cancelAllOrders(symbol) {
   }
 }
 
-function normalizeOrderType(order) {
-  return String(order.type || order.info?.type || "").toUpperCase();
-}
-
-function normalizeOrderSide(order) {
-  return String(order.side || order.info?.side || "").toLowerCase();
-}
-
-function isReduceOnlyOrder(order) {
-  return (
-    order.reduceOnly === true ||
-    order.info?.reduceOnly === true ||
-    String(order.info?.reduceOnly || "").toLowerCase() === "true" ||
-    order.info?.closePosition === true ||
-    String(order.info?.closePosition || "").toLowerCase() === "true"
-  );
-}
-
-function isProtectionOrderForPosition(order, position) {
-  const closeSide = position.side === "long" ? "sell" : "buy";
-  const type = normalizeOrderType(order);
-  return (
-    normalizeOrderSide(order) === closeSide &&
-    isReduceOnlyOrder(order) &&
-    ["STOP_MARKET", "TAKE_PROFIT_MARKET", "TRAILING_STOP_MARKET"].includes(type)
-  );
-}
-
-function summarizeProtectionOrders(orders, position) {
-  const protectionOrders = orders.filter((order) =>
-    isProtectionOrderForPosition(order, position),
-  );
-  const typeCounts = protectionOrders.reduce(
-    (counts, order) => {
-      const type = normalizeOrderType(order);
-      counts[type] = (counts[type] || 0) + 1;
-      return counts;
-    },
-    {},
-  );
-
-  return {
-    protectionOrders,
-    hasStopLoss: (typeCounts.STOP_MARKET || 0) >= 1,
-    takeProfitCount: typeCounts.TAKE_PROFIT_MARKET || 0,
-    hasTrailingStop: (typeCounts.TRAILING_STOP_MARKET || 0) >= 1,
-  };
-}
-
-async function recoverPositionProtection(symbol, position) {
-  if (!ORDER_RECOVERY_ENABLED || !position) return;
-
-  const orders = await retry(() => exchange.fetchOpenOrders(symbol));
-  const summary = summarizeProtectionOrders(orders, position);
-  const complete =
-    summary.hasStopLoss &&
-    summary.takeProfitCount >= 2 &&
-    summary.hasTrailingStop;
-
-  if (complete) {
-    console.log(
-      `[RECOVERY] ${symbol} protection OK: SL=1 TP=${summary.takeProfitCount} trailing=1`,
-    );
-    return;
-  }
-
-  console.warn(`
-[RECOVERY] ${symbol} protection incomplete
-Stop loss:
-${summary.hasStopLoss ? "OK" : "MISSING"}
-Take profits:
-${summary.takeProfitCount}/2
-Trailing:
-${summary.hasTrailingStop ? "OK" : "MISSING"}
-
-Rebuilding protection orders...
-`);
-
-  await cancelAllOrders(symbol);
-  const context = await getMarketContext(symbol);
-  const snapshot = await getMarketSnapshot(symbol, context, TIMEFRAME);
-  const slPrice =
-    position.side === "long"
-      ? position.entryPrice - snapshot.atr
-      : position.entryPrice + snapshot.atr;
-
-  await createStopLossOrder(symbol, position, slPrice);
-  await createPartialTPs(symbol, position, position.entryPrice, snapshot.atr);
-  console.log(`[RECOVERY] ${symbol} protection rebuilt`);
-}
-
-async function recoverOpenPositionsProtection(openPositions) {
-  if (!ORDER_RECOVERY_ENABLED) return;
-  for (const position of openPositions) {
-    try {
-      await recoverPositionProtection(position.symbol, position);
-    } catch (err) {
-      console.warn(
-        `[RECOVERY] ${position.symbol} skipped: ${err.message}`,
-      );
-      recordCircuitBreakerError(`recovery ${position.symbol}`, err);
-    }
-  }
-}
-
 // ======================================================
 // OPEN POSITION
 // ======================================================
@@ -1950,7 +1844,6 @@ async function tradingCycle() {
     await syncRiskState();
     const openPositions = await getOpenPositions();
     console.log("OPEN POSITIONS:", openPositions.length ? openPositions : "NONE");
-    await recoverOpenPositionsProtection(openPositions);
     if (killSwitchActive()) {
       console.log("[KILL] Cycle stopped before scanning new entries");
       return;
@@ -2112,8 +2005,6 @@ MODEL:
 ${GEMINI_MODEL}
 KILL SWITCH:
 ${KILL_SWITCH_ENABLED ? `enabled (${KILL_SWITCH_FILE})` : "disabled"}
-ORDER RECOVERY:
-${ORDER_RECOVERY_ENABLED ? "enabled" : "disabled"}
 `);
   await retry(() => exchange.loadMarkets());
   await syncProfitLedger();
