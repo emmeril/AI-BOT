@@ -7,6 +7,7 @@ require("dotenv").config();
 const ccxt = require("ccxt");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 // ======================================================
@@ -33,6 +34,13 @@ const HTF_TIMEFRAME = process.env.HTF_TIMEFRAME || "15m";
 const LOOKBACK_CANDLES = Number(process.env.LOOKBACK_CANDLES || 200);
 const INTERVAL_MINUTES = Number(process.env.INTERVAL_MINUTES || 5);
 const INTERVAL_MS = INTERVAL_MINUTES * 60 * 1000;
+const MARKET_SNAPSHOT_CACHE_ENABLED =
+  process.env.MARKET_SNAPSHOT_CACHE_ENABLED !== "false";
+const AI_SIGNAL_CACHE_ENABLED = process.env.AI_SIGNAL_CACHE_ENABLED !== "false";
+const CACHE_MAX_ENTRIES = Math.max(
+  1,
+  Number(process.env.CACHE_MAX_ENTRIES || 500) || 500,
+);
 
 // ======================================================
 // EMERGENCY CONTROL
@@ -188,6 +196,8 @@ let signalStateBySymbol = {};
 let lastPositionChangeTime = 0;
 let profitLedger = loadProfitLedger();
 let riskState = loadRiskState();
+let marketSnapshotCache = new Map();
+let aiSignalCache = new Map();
 let circuitBreakerState = {
   consecutiveErrors: 0,
   pausedUntil: 0,
@@ -199,6 +209,50 @@ let circuitBreakerState = {
 // ======================================================
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseTimeframeToMs(timeframe) {
+  const text = String(timeframe || "").trim().toLowerCase();
+  const match = text.match(/^(\d+)(m|h|d|w)$/);
+  if (!match) return INTERVAL_MS;
+  const value = Number(match[1]);
+  const unit = match[2];
+  const unitMs = {
+    m: 60 * 1000,
+    h: 60 * 60 * 1000,
+    d: 24 * 60 * 60 * 1000,
+    w: 7 * 24 * 60 * 60 * 1000,
+  }[unit];
+  return value * unitMs;
+}
+
+function isCacheEntryValid(entry) {
+  return Boolean(entry && entry.expiresAt > Date.now());
+}
+
+function cleanupCaches() {
+  const now = Date.now();
+  for (const [key, entry] of marketSnapshotCache.entries()) {
+    if (!entry?.expiresAt || entry.expiresAt <= now) {
+      marketSnapshotCache.delete(key);
+    }
+  }
+  for (const [key, entry] of aiSignalCache.entries()) {
+    if (!entry?.expiresAt || entry.expiresAt <= now) {
+      aiSignalCache.delete(key);
+    }
+  }
+
+  while (marketSnapshotCache.size > CACHE_MAX_ENTRIES) {
+    const firstKey = marketSnapshotCache.keys().next().value;
+    if (firstKey === undefined) break;
+    marketSnapshotCache.delete(firstKey);
+  }
+  while (aiSignalCache.size > CACHE_MAX_ENTRIES) {
+    const firstKey = aiSignalCache.keys().next().value;
+    if (firstKey === undefined) break;
+    aiSignalCache.delete(firstKey);
+  }
 }
 
 async function retry(fn, retries = 3, delay = 2000) {
@@ -833,10 +887,39 @@ function calculateATR(ohlcv) {
 // SNAPSHOT
 // ======================================================
 async function getMarketSnapshot(symbol, context, timeframe = TIMEFRAME) {
+  const cacheKey = `${symbol}|${timeframe}|${LOOKBACK_CANDLES}`;
+  if (MARKET_SNAPSHOT_CACHE_ENABLED) {
+    const cached = marketSnapshotCache.get(cacheKey);
+    if (isCacheEntryValid(cached)) {
+      return {
+        price: context.price,
+        fundingRate: context.fundingRate,
+        candleTimestamp: cached.snapshot.candleTimestamp,
+        expiresAt: cached.snapshot.expiresAt,
+        ema20: cached.snapshot.ema20,
+        ema50: cached.snapshot.ema50,
+        ema20Slope: cached.snapshot.ema20Slope,
+        ema50Slope: cached.snapshot.ema50Slope,
+        emaGap:
+          (Math.abs(cached.snapshot.ema20 - cached.snapshot.ema50) /
+            context.price) *
+          100,
+        rsi: cached.snapshot.rsi,
+        atr: cached.snapshot.atr,
+        volumeChange: cached.snapshot.volumeChange,
+        trend: cached.snapshot.trend,
+      };
+    }
+  }
+
   const ohlcv = await retry(() =>
     exchange.fetchOHLCV(symbol, timeframe, undefined, LOOKBACK_CANDLES),
   );
   const closes = ohlcv.map((c) => c[4]);
+  const latestCandle = ohlcv[ohlcv.length - 1] || [];
+  const candleTimestamp = Number(latestCandle[0] || 0);
+  const timeframeMs = parseTimeframeToMs(timeframe);
+  const expiresAt = candleTimestamp > 0 ? candleTimestamp + timeframeMs : Date.now() + timeframeMs;
   const ema20 = calculateEMA(closes.slice(-20), 20);
   const ema50 = calculateEMA(closes.slice(-50), 50);
   const prevEma20 = calculateEMA(closes.slice(-21, -1), 20);
@@ -851,9 +934,9 @@ async function getMarketSnapshot(symbol, context, timeframe = TIMEFRAME) {
   const trend =
     ema20 > ema50 ? "UPTREND" : ema20 < ema50 ? "DOWNTREND" : "SIDEWAYS";
   const emaGap = (Math.abs(ema20 - ema50) / context.price) * 100;
-  return {
-    price: context.price,
-    fundingRate: context.fundingRate,
+  const baseSnapshot = {
+    candleTimestamp,
+    expiresAt,
     ema20,
     ema50,
     ema20Slope,
@@ -864,6 +947,20 @@ async function getMarketSnapshot(symbol, context, timeframe = TIMEFRAME) {
     volumeChange,
     trend,
   };
+  const snapshot = {
+    price: context.price,
+    fundingRate: context.fundingRate,
+    ...baseSnapshot,
+    emaGap: (Math.abs(ema20 - ema50) / context.price) * 100,
+  };
+  if (MARKET_SNAPSHOT_CACHE_ENABLED) {
+    marketSnapshotCache.set(cacheKey, {
+      snapshot: baseSnapshot,
+      expiresAt,
+    });
+    cleanupCaches();
+  }
+  return snapshot;
 }
 
 // ======================================================
@@ -1028,6 +1125,26 @@ function parseAISignal(text) {
 }
 
 async function getAISignal(symbol, snapshot, htfSnapshot, regimeInfo) {
+  const promptKey = crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify({
+        symbol,
+        longOnly: LONG_ONLY,
+        snapshot,
+        htfSnapshot,
+        regimeInfo,
+      }),
+    )
+    .digest("hex");
+  if (AI_SIGNAL_CACHE_ENABLED) {
+    const cached = aiSignalCache.get(promptKey);
+    if (isCacheEntryValid(cached)) {
+      console.log(`[CACHE] AI hit ${symbol}`);
+      return cached.signal;
+    }
+  }
+
   const allowedSignals = LONG_ONLY ? "LONG, HOLD" : "LONG, SHORT, HOLD";
   const prompt = `
 You are a professional crypto futures trader AI.
@@ -1109,7 +1226,19 @@ RETURN JSON ONLY:
     try {
       const result = await model.generateContent(prompt);
       const text = result.response.text();
-      return parseAISignal(text);
+      const signal = parseAISignal(text);
+      const expiresAt = Math.min(
+        Number(snapshot?.expiresAt || Date.now()),
+        Number(htfSnapshot?.expiresAt || Date.now()),
+      );
+      if (AI_SIGNAL_CACHE_ENABLED) {
+        aiSignalCache.set(promptKey, {
+          signal,
+          expiresAt,
+        });
+        cleanupCaches();
+      }
+      return signal;
     } catch (err) {
       lastError = err;
       console.warn(
@@ -1816,6 +1945,7 @@ async function tradingCycle() {
       return;
     }
     circuitAllowedThisCycle = true;
+    cleanupCaches();
     await syncProfitLedger();
     await syncRiskState();
     const openPositions = await getOpenPositions();
