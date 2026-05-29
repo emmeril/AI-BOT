@@ -121,6 +121,10 @@ const SCAN_ROTATION_BATCH_SIZE = Math.max(
   1,
   Number(process.env.SCAN_ROTATION_BATCH_SIZE || 2),
 );
+const ROTATING_SCAN_ENABLED = SCAN_ROTATION_BATCH_SIZE < SCAN_SYMBOLS.length;
+const EFFECTIVE_REQUIRED_CONFIRMATION = ROTATING_SCAN_ENABLED
+  ? 1
+  : REQUIRED_CONFIRMATION;
 
 // ======================================================
 // AI
@@ -1594,7 +1598,7 @@ function updateSignalConfirmation(symbol, signal, strength) {
   signalStateBySymbol[symbol] = state;
 
   const confirmed =
-    state.confirmCount >= REQUIRED_CONFIRMATION ||
+    state.confirmCount >= EFFECTIVE_REQUIRED_CONFIRMATION ||
     strength === "STRONG" ||
     strength === "EXTREME";
   return {
@@ -1708,7 +1712,7 @@ async function analyzeSymbol(symbol) {
     const confirmation = updateSignalConfirmation(symbol, signal, aiStrength);
     console.log(`
 SIGNAL CONFIRM ${symbol}:
-${confirmation.count}/${REQUIRED_CONFIRMATION}
+${confirmation.count}/${EFFECTIVE_REQUIRED_CONFIRMATION}
 `);
     if (!confirmation.confirmed) {
       console.log(`${symbol} skipped: signal not confirmed`);
