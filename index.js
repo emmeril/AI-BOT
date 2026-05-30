@@ -1215,6 +1215,7 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
       
       // 6. Dynamic TP/SL dan RR
       const { tp, sl } = this._dynamicTPSL(signal, context.price, snapshot.atr, strength);
+      const slDistance = Math.abs(sl - context.price);   // <-- PERUBAHAN: simpan jarak SL
       const rr = this._calculateRR(signal, context.price, tp, sl);
       console.log(`${symbol} RR: ${rr.toFixed(2)}`);
       if (rr < Config.env.minRR) {
@@ -1226,7 +1227,7 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
       const score = this._scoreCandidate(finalConfidence, rr, regimeInfo, strength);
       return {
         symbol, signal, confidence: finalConfidence, strength,
-        context, snapshot, htfSnapshot, regimeInfo, rr, score, tp, sl,
+        context, snapshot, htfSnapshot, regimeInfo, rr, score, tp, sl, slDistance,   // <-- PERUBAHAN: tambahkan slDistance
         aiValidationReason: aiValidation.reason
       };
     } catch (err) {
@@ -1238,7 +1239,7 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
   }
   
   async executeBestCandidate(best, openPositions) {
-    const { symbol, signal, context, snapshot, confidence, strength, rr, tp, sl } = best;
+    const { symbol, signal, context, snapshot, confidence, strength, rr, tp, sl, slDistance } = best;  // <-- PERUBAHAN: ambil slDistance
     const position = openPositions.find(p => p.symbol === symbol);
     if (position && position.side === signal.toLowerCase()) {
       console.log(`${symbol} position already exists`);
@@ -1259,12 +1260,18 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
     if (!newPos) return;
     
     const actualEntry = newPos.entryPrice;
-    const slPrice = signal === "LONG" ? actualEntry - snapshot.atr : actualEntry + snapshot.atr;
-    await this.orderManager.createStopLossOrder(symbol, newPos, slPrice);
+    // <-- PERUBAHAN: hitung SL real berdasarkan slDistance yang sudah disimpan (bukan snapshot.atr)
+    const slPrice = signal === "LONG"
+        ? actualEntry - slDistance
+        : actualEntry + slDistance;
+    const slPricePrecise = this.exchangeClient.priceToPrecision(symbol, slPrice);
+    console.log(`[SL] Real SL from RR calculation: ${slPricePrecise} (distance ${slDistance.toFixed(8)})`);
+    
+    await this.orderManager.createStopLossOrder(symbol, newPos, slPricePrecise);
     await this.orderManager.createPartialTPs(symbol, newPos, actualEntry, snapshot.atr);
     await FonnteAlert.send(this._formatOpenAlert({
       symbol, signal, entryPrice: actualEntry, contracts: newPos.contracts,
-      slPrice, tpPrice: tp, rr, confidence, strength
+      slPrice: slPricePrecise, tpPrice: tp, rr, confidence, strength
     }));
   }
   
