@@ -103,16 +103,30 @@ function calculateEMA(data, period) {
 }
 
 function calculateRSI(closes, period = 14) {
-  if (closes.length <= period) return null;
-  let gains = 0;
-  let losses = 0;
-  for (let i = closes.length - period; i < closes.length; i++) {
+  if (!Array.isArray(closes) || closes.length < period + 1) return null;
+
+  let avgGain = 0;
+  let avgLoss = 0;
+
+  for (let i = 1; i <= period; i++) {
     const diff = closes[i] - closes[i - 1];
-    if (diff >= 0) gains += diff;
-    else losses += Math.abs(diff);
+    if (diff >= 0) avgGain += diff;
+    else avgLoss += Math.abs(diff);
   }
-  if (losses === 0) return 100;
-  const rs = gains / losses;
+
+  avgGain /= period;
+  avgLoss /= period;
+
+  for (let i = period + 1; i < closes.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    const gain = diff > 0 ? diff : 0;
+    const loss = diff < 0 ? Math.abs(diff) : 0;
+    avgGain = ((avgGain * (period - 1)) + gain) / period;
+    avgLoss = ((avgLoss * (period - 1)) + loss) / period;
+  }
+
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
   return 100 - 100 / (1 + rs);
 }
 
@@ -155,7 +169,7 @@ function buildSnapshot(rows, index, price) {
   const prevEma20 = calculateEMA(closes.slice(-21, -1), 20);
   const prevEma50 = calculateEMA(closes.slice(-51, -1), 50);
   const atr = calculateATR(slice.slice(-15), 14);
-  const rsi = calculateRSI(closes.slice(-15), 14);
+  const rsi = calculateRSI(closes, 14);
   if ([ema20, ema50, prevEma20, prevEma50, atr, rsi].some((v) => v === null)) {
     return null;
   }

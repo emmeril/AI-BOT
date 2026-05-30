@@ -293,14 +293,30 @@ class IndicatorCalculator {
   }
   
   static calculateRSI(closes, period = 14) {
-    let gains = 0, losses = 0;
+    if (!Array.isArray(closes) || closes.length < period + 1) return null;
+
+    let avgGain = 0;
+    let avgLoss = 0;
+
     for (let i = 1; i <= period; i++) {
       const diff = closes[i] - closes[i - 1];
-      if (diff >= 0) gains += diff;
-      else losses += Math.abs(diff);
+      if (diff >= 0) avgGain += diff;
+      else avgLoss += Math.abs(diff);
     }
-    if (losses === 0) return 100;
-    const rs = gains / losses;
+
+    avgGain /= period;
+    avgLoss /= period;
+
+    for (let i = period + 1; i < closes.length; i++) {
+      const diff = closes[i] - closes[i - 1];
+      const gain = diff > 0 ? diff : 0;
+      const loss = diff < 0 ? Math.abs(diff) : 0;
+      avgGain = ((avgGain * (period - 1)) + gain) / period;
+      avgLoss = ((avgLoss * (period - 1)) + loss) / period;
+    }
+
+    if (avgLoss === 0) return 100;
+    const rs = avgGain / avgLoss;
     return 100 - 100 / (1 + rs);
   }
   
@@ -360,7 +376,7 @@ class MarketDataService {
     const prevEma50 = IndicatorCalculator.calculateEMA(closes.slice(-51, -1), 50);
     const ema20Slope = ema20 - prevEma20;
     const ema50Slope = ema50 - prevEma50;
-    const rsi = IndicatorCalculator.calculateRSI(closes.slice(-15));
+    const rsi = IndicatorCalculator.calculateRSI(closes);
     const atr = IndicatorCalculator.calculateATR(ohlcv.slice(-15));
     const latestVolume = ohlcv[ohlcv.length - 1][5];
     const prevVolume = ohlcv[ohlcv.length - 2][5];
