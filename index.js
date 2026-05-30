@@ -63,6 +63,11 @@ class Config {
       longOnly: Config._bool("LONG_ONLY", false),
       regimeFilterEnabled: Config._bool("REGIME_FILTER_ENABLED", true),
       allowedMarketRegimes: Config._list("ALLOWED_MARKET_REGIMES", "TRENDING_UP,TRENDING_DOWN").map(r => r.toUpperCase()),
+      breakoutLookbackCandles: Math.max(8, Config._number("BREAKOUT_LOOKBACK_CANDLES", 20)),
+      breakoutBufferPct: Config._number("BREAKOUT_BUFFER_PCT", 0.12) / 100,
+      pullbackEmaTolerancePct: Config._number("PULLBACK_EMA_TOLERANCE_PCT", 0.35) / 100,
+      volumeBreakoutRatio: Math.max(1.05, Config._number("VOLUME_BREAKOUT_RATIO", 1.35)),
+      breakoutRsiMin: Config._number("BREAKOUT_RSI_MIN", 48),
       maxAtrPct: Config._number("MAX_ATR_PCT", 2.5) / 100,
       minAtrPct: Config._number("MIN_ATR_PCT", 0.15) / 100,
       minVolumeChangeForTrend: Config._number("MIN_VOLUME_CHANGE_FOR_TREND", -30),
@@ -389,13 +394,17 @@ class MarketDataService {
     const emaGap = (Math.abs(ema20 - ema50) / context.price) * 100;
 
     const srLookback = Math.min(Config.env.supportResistanceLookback, ohlcv.length);
-    const structureCandles = ohlcv.slice(-srLookback);
+    const breakoutLookback = Math.min(Config.env.breakoutLookbackCandles, Math.max(5, ohlcv.length - 1));
+    const structureCandles = ohlcv.slice(Math.max(0, ohlcv.length - breakoutLookback - 1), -1);
     const highs = structureCandles.map(c => Number(c[2])).filter(Number.isFinite);
     const lows = structureCandles.map(c => Number(c[3])).filter(Number.isFinite);
     const volumes = structureCandles.map(c => Number(c[5])).filter(Number.isFinite);
     const support = lows.length ? Math.min(...lows) : null;
     const resistance = highs.length ? Math.max(...highs) : null;
     const latestClose = Number(closes[closes.length - 1]);
+    const latestHigh = Number(latestCandle[2]);
+    const latestLow = Number(latestCandle[3]);
+    const previousClose = Number((ohlcv[ohlcv.length - 2] || [])[4]);
     const supportDistancePct = Number.isFinite(support) && latestClose > 0 ? ((latestClose - support) / latestClose) * 100 : null;
     const resistanceDistancePct = Number.isFinite(resistance) && latestClose > 0 ? ((resistance - latestClose) / latestClose) * 100 : null;
     const rangeWidthPct = Number.isFinite(support) && Number.isFinite(resistance) && latestClose > 0
@@ -408,11 +417,37 @@ class MarketDataService {
     const volumeRatio = avgVolume && avgVolume > 0 ? latestVolume / avgVolume : null;
     const overextendedMovePct = context.price > 0 ? (Math.abs(context.price - ema20) / context.price) * 100 : 0;
     const overextendedAtrMultiple = atr > 0 ? Math.abs(context.price - ema20) / atr : 0;
+    const breakoutLongDistancePct = Number.isFinite(resistance) && latestClose > resistance
+      ? ((latestClose - resistance) / latestClose) * 100
+      : null;
+    const breakoutShortDistancePct = Number.isFinite(support) && latestClose < support
+      ? ((support - latestClose) / latestClose) * 100
+      : null;
+    const breakoutLong = Number.isFinite(resistance) && Number.isFinite(latestClose)
+      ? latestClose > resistance * (1 + Config.env.breakoutBufferPct)
+      : false;
+    const breakoutShort = Number.isFinite(support) && Number.isFinite(latestClose)
+      ? latestClose < support * (1 - Config.env.breakoutBufferPct)
+      : false;
+    const bosLong = Number.isFinite(resistance) && Number.isFinite(previousClose) && previousClose <= resistance && latestClose > resistance * (1 + Config.env.breakoutBufferPct / 2);
+    const bosShort = Number.isFinite(support) && Number.isFinite(previousClose) && previousClose >= support && latestClose < support * (1 - Config.env.breakoutBufferPct / 2);
+    const pullbackLong = trend === "UPTREND" && Number.isFinite(ema20) && Number.isFinite(latestLow) && Number.isFinite(latestClose)
+      ? latestLow <= ema20 * (1 + Config.env.pullbackEmaTolerancePct) && latestClose >= ema20
+      : false;
+    const pullbackShort = trend === "DOWNTREND" && Number.isFinite(ema20) && Number.isFinite(latestHigh) && Number.isFinite(latestClose)
+      ? latestHigh >= ema20 * (1 - Config.env.pullbackEmaTolerancePct) && latestClose <= ema20
+      : false;
+    const volumeBreakout = Number.isFinite(avgVolume) && avgVolume > 0
+      ? latestVolume >= avgVolume * Config.env.volumeBreakoutRatio
+      : false;
     
     const baseSnapshot = {
       candleTimestamp, expiresAt, ema20, ema50, ema20Slope, ema50Slope, emaGap, rsi, atr, volumeChange, trend,
       support, resistance, supportDistancePct, resistanceDistancePct, rangeWidthPct, rangePositionPct,
-      avgVolume, volumeRatio, overextendedMovePct, overextendedAtrMultiple
+      avgVolume, volumeRatio, overextendedMovePct, overextendedAtrMultiple,
+      breakoutLookback, breakoutLongDistancePct, breakoutShortDistancePct,
+      breakoutLong, breakoutShort, bosLong, bosShort,
+      pullbackLong, pullbackShort, volumeBreakout
     };
     const snapshot = { price: context.price, fundingRate: context.fundingRate, ...baseSnapshot };
     
@@ -875,16 +910,27 @@ class AIValidator {
       : 0;
     const volumeRatio = Number(snapshot?.volumeRatio);
     const overextendedAtrMultiple = Number(snapshot?.overextendedAtrMultiple || 0);
-    const directionalRoomPct = proposedSignal === "LONG"
-      ? Number(snapshot?.resistanceDistancePct)
-      : Number(snapshot?.supportDistancePct);
+    const breakoutSetup = proposedSignal === "LONG"
+      ? Boolean(snapshot?.bosLong || snapshot?.breakoutLong || snapshot?.pullbackLong)
+      : Boolean(snapshot?.bosShort || snapshot?.breakoutShort || snapshot?.pullbackShort);
+    const breakoutDistancePct = proposedSignal === "LONG"
+      ? Number(snapshot?.breakoutLongDistancePct)
+      : Number(snapshot?.breakoutShortDistancePct);
+    const directionalRoomPct = breakoutSetup && Number.isFinite(breakoutDistancePct)
+      ? breakoutDistancePct
+      : proposedSignal === "LONG"
+        ? Number(snapshot?.resistanceDistancePct)
+        : Number(snapshot?.supportDistancePct);
     const effectiveRoomPct = Number.isFinite(directionalRoomPct) ? directionalRoomPct : Infinity;
     const volumeAnomalyRatio = Config.env.maxVolumeAnomalyRatio;
     const riskScore = this._estimateLiquidationRiskScore(snapshot, htfSnapshot, proposedSignal);
     const reasons = [];
 
-    if (Number.isFinite(effectiveRoomPct) && effectiveRoomPct <= Math.max(atrPct * 1.15, 0.35)) {
+    if (Number.isFinite(effectiveRoomPct) && !breakoutSetup && effectiveRoomPct <= Math.max(atrPct * 1.15, 0.35)) {
       reasons.push(`too close to ${proposedSignal === "LONG" ? "resistance" : "support"}`);
+    }
+    if (breakoutSetup && !snapshot?.volumeBreakout) {
+      reasons.push("breakout without volume expansion");
     }
     if (overextendedAtrMultiple >= Config.env.maxOverextendedAtrMultiple || snapshot?.overextendedMovePct >= 2.5) {
       reasons.push("overextended move");
@@ -913,10 +959,17 @@ class AIValidator {
 
     const atrPct = (atr / price) * 100;
     const leveragePressure = Utils.clamp(atrPct * Config.env.leverage * 5.5, 0, 60);
-
-    const directionalRoomPct = proposedSignal === "LONG"
-      ? Number(snapshot?.resistanceDistancePct)
-      : Number(snapshot?.supportDistancePct);
+    const breakoutSetup = proposedSignal === "LONG"
+      ? Boolean(snapshot?.bosLong || snapshot?.breakoutLong || snapshot?.pullbackLong)
+      : Boolean(snapshot?.bosShort || snapshot?.breakoutShort || snapshot?.pullbackShort);
+    const breakoutDistancePct = proposedSignal === "LONG"
+      ? Number(snapshot?.breakoutLongDistancePct)
+      : Number(snapshot?.breakoutShortDistancePct);
+    const directionalRoomPct = breakoutSetup && Number.isFinite(breakoutDistancePct)
+      ? breakoutDistancePct
+      : proposedSignal === "LONG"
+        ? Number(snapshot?.resistanceDistancePct)
+        : Number(snapshot?.supportDistancePct);
     const roomRatio = Number.isFinite(directionalRoomPct) ? directionalRoomPct / Math.max(atrPct, 0.0001) : 0;
     const roomPressure = Number.isFinite(directionalRoomPct)
       ? Utils.clamp((2.25 - roomRatio) * 18, 0, 25)
@@ -929,7 +982,9 @@ class AIValidator {
     );
 
     const overextensionPressure = Utils.clamp(Number(snapshot?.overextendedAtrMultiple || 0) * 6, 0, 15);
-    const trendMismatchPressure = snapshot?.trend && htfSnapshot?.trend && snapshot.trend !== htfSnapshot.trend ? 8 : 0;
+    const trendMismatchPressure = snapshot?.trend && htfSnapshot?.trend && snapshot.trend !== htfSnapshot.trend
+      ? (breakoutSetup ? 2 : 8)
+      : 0;
     const volumeRatio = Number(snapshot?.volumeRatio);
     const volumePressure = Number.isFinite(volumeRatio)
       ? Utils.clamp(Math.abs(1 - volumeRatio) * 8, 0, 10)
@@ -943,6 +998,13 @@ class AIValidator {
     const supportDistance = Number.isFinite(snapshot.supportDistancePct) ? `${snapshot.supportDistancePct.toFixed(2)}%` : "n/a";
     const resistanceDistance = Number.isFinite(snapshot.resistanceDistancePct) ? `${snapshot.resistanceDistancePct.toFixed(2)}%` : "n/a";
     const volumeRatio = Number.isFinite(snapshot.volumeRatio) ? snapshot.volumeRatio.toFixed(2) : "n/a";
+    const breakoutLong = snapshot.breakoutLong ? "yes" : "no";
+    const breakoutShort = snapshot.breakoutShort ? "yes" : "no";
+    const bosLong = snapshot.bosLong ? "yes" : "no";
+    const bosShort = snapshot.bosShort ? "yes" : "no";
+    const pullbackLong = snapshot.pullbackLong ? "yes" : "no";
+    const pullbackShort = snapshot.pullbackShort ? "yes" : "no";
+    const volumeBreakout = snapshot.volumeBreakout ? "yes" : "no";
     const liquidationRiskScore = this._estimateLiquidationRiskScore(snapshot, htfSnapshot, proposedSignal);
     return `You are a validator for a crypto futures trading bot.
 The bot proposes a ${proposedSignal} trade with strength ${proposedStrength}.
@@ -961,6 +1023,10 @@ Sideways gap: ${snapshot.emaGap}%
 Support: ${snapshot.support}, Resistance: ${snapshot.resistance}
 Distance to support: ${supportDistance}, Distance to resistance: ${resistanceDistance}
 Volume ratio vs recent average: ${volumeRatio}
+Breakout long: ${breakoutLong}, breakout short: ${breakoutShort}
+BOS long: ${bosLong}, BOS short: ${bosShort}
+Pullback long: ${pullbackLong}, pullback short: ${pullbackShort}
+Volume breakout: ${volumeBreakout}
 Overextended move: ${snapshot.overextendedMovePct?.toFixed?.(2) ?? snapshot.overextendedMovePct}% or ${snapshot.overextendedAtrMultiple?.toFixed?.(2) ?? snapshot.overextendedAtrMultiple} ATR
 Liquidation risk proxy: ${liquidationRiskScore}/100
 
@@ -1250,6 +1316,18 @@ class OrderManager {
 class MarketRegimeFilter {
   static detect(snapshot, htfSnapshot) {
     const atrPct = snapshot.price > 0 ? snapshot.atr / snapshot.price : 0;
+    const bullishBreakout = htfSnapshot.trend === "UPTREND" && snapshot.volumeBreakout && (
+      snapshot.bosLong || snapshot.breakoutLong || snapshot.pullbackLong
+    );
+    const bearishBreakout = htfSnapshot.trend === "DOWNTREND" && snapshot.volumeBreakout && (
+      snapshot.bosShort || snapshot.breakoutShort || snapshot.pullbackShort
+    );
+    if (bullishBreakout) {
+      return { regime: "TRENDING_UP", allow: true, reason: "Bullish breakout continuation", atrPct };
+    }
+    if (bearishBreakout) {
+      return { regime: "TRENDING_DOWN", allow: true, reason: "Bearish breakout continuation", atrPct };
+    }
     const bullish = snapshot.trend === "UPTREND" && htfSnapshot.trend === "UPTREND" &&
       snapshot.ema20Slope > 0 && htfSnapshot.ema20Slope > 0 &&
       snapshot.volumeChange >= Config.env.minVolumeChangeForTrend;
@@ -1413,8 +1491,14 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
       return { signal: "HOLD", strength: "WEAK", confidence: 0, reason: regimeInfo.reason };
     }
     
-    const { trend, rsi, volumeChange, ema20Slope, ema50Slope, atr, price } = snapshot;
+    const { trend, rsi, volumeChange, ema20Slope, ema50Slope, atr, price, volumeRatio } = snapshot;
     const { trend: htfTrend } = htfSnapshot;
+    const bullishBreakoutSetup = htfTrend === "UPTREND" && snapshot.volumeBreakout && (
+      snapshot.bosLong || snapshot.breakoutLong || snapshot.pullbackLong
+    );
+    const bearishBreakoutSetup = !Config.env.longOnly && htfTrend === "DOWNTREND" && snapshot.volumeBreakout && (
+      snapshot.bosShort || snapshot.breakoutShort || snapshot.pullbackShort
+    );
     
     let signal = "HOLD";
     let strength = "WEAK";
@@ -1428,6 +1512,18 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
       confidence = Math.min(90, 60 + (rsi - 50));
       reason = "Bullish alignment on both timeframes";
     }
+    else if (bullishBreakoutSetup && (rsi >= Config.env.breakoutRsiMin || snapshot.breakoutLong || snapshot.bosLong)) {
+      signal = "LONG";
+      strength = snapshot.bosLong ? "STRONG" : "MEDIUM";
+      const breakoutBonus = snapshot.bosLong ? 14 : (snapshot.breakoutLong ? 10 : 8);
+      const volumeBonus = Number.isFinite(volumeRatio) ? Math.min(12, Math.max(0, (volumeRatio - 1) * 12)) : 0;
+      confidence = Math.min(95, 58 + breakoutBonus + volumeBonus + Math.max(0, rsi - 48));
+      reason = snapshot.bosLong
+        ? "Bullish BOS with volume breakout"
+        : snapshot.breakoutLong
+          ? "Bullish structure breakout with volume support"
+          : "Bullish EMA pullback with volume support";
+    }
     // Sinyal SHORT (hanya jika LONG_ONLY=false)
     else if (!Config.env.longOnly && trend === "DOWNTREND" && htfTrend === "DOWNTREND" && ema20Slope < 0 && rsi < 50) {
       signal = "SHORT";
@@ -1435,12 +1531,24 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
       confidence = Math.min(90, 60 + (50 - rsi));
       reason = "Bearish alignment on both timeframes";
     }
+    else if (bearishBreakoutSetup && (rsi <= (100 - Config.env.breakoutRsiMin) || snapshot.breakoutShort || snapshot.bosShort)) {
+      signal = "SHORT";
+      strength = snapshot.bosShort ? "STRONG" : "MEDIUM";
+      const breakoutBonus = snapshot.bosShort ? 14 : (snapshot.breakoutShort ? 10 : 8);
+      const volumeBonus = Number.isFinite(volumeRatio) ? Math.min(12, Math.max(0, (volumeRatio - 1) * 12)) : 0;
+      confidence = Math.min(95, 58 + breakoutBonus + volumeBonus + Math.max(0, 52 - rsi));
+      reason = snapshot.bosShort
+        ? "Bearish BOS with volume breakout"
+        : snapshot.breakoutShort
+          ? "Bearish structure breakout with volume support"
+          : "Bearish EMA pullback with volume support";
+    }
     else {
       reason = "No clear technical setup";
     }
     
     // Volume filter: tolak jika volume menurun drastis
-    if (signal !== "HOLD" && volumeChange < -40) {
+    if (signal !== "HOLD" && volumeChange < -40 && !snapshot.volumeBreakout) {
       signal = "HOLD";
       reason = `Volume too weak (${volumeChange.toFixed(1)}%)`;
       confidence = 0;
@@ -1465,8 +1573,9 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
       const snapshot = await this.marketData.getMarketSnapshot(symbol, context, Config.env.timeframe);
       const htfSnapshot = await this.marketData.getMarketSnapshot(symbol, context, Config.env.htfTimeframe);
       const regimeInfo = MarketRegimeFilter.detect(snapshot, htfSnapshot);
+      const breakoutSetupPresent = snapshot.bosLong || snapshot.breakoutLong || snapshot.pullbackLong || snapshot.bosShort || snapshot.breakoutShort || snapshot.pullbackShort;
       
-      if (snapshot.emaGap < Config.env.sidewaysEmaGap) {
+      if (snapshot.emaGap < Config.env.sidewaysEmaGap && !breakoutSetupPresent) {
         console.log(`${symbol} skipped: sideways (EMA gap ${snapshot.emaGap.toFixed(2)}%)`);
         return null;
       }

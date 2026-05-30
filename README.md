@@ -172,12 +172,17 @@ MIN_AI_CONFIDENCE=65
 ALLOWED_AI_STRENGTHS=MEDIUM,STRONG,EXTREME
 AI_RESPONSE_RETRIES=2
 SUPPORT_RESISTANCE_LOOKBACK=20
+BREAKOUT_LOOKBACK_CANDLES=20
+BREAKOUT_BUFFER_PCT=0.12
+PULLBACK_EMA_TOLERANCE_PCT=0.35
+VOLUME_BREAKOUT_RATIO=1.35
+BREAKOUT_RSI_MIN=48
 MAX_VOLUME_ANOMALY_RATIO=1.8
 MAX_OVEREXTENDED_ATR_MULTIPLE=2.2
 MAX_LIQUIDATION_RISK_SCORE=70
 ```
 
-AI validator sekarang tidak hanya melihat tren dan funding, tapi juga support/resistance, overextension, volume anomaly, dan liquidation risk proxy. Itu bikin acceptance rate jauh lebih ketat dan lebih susah dibohongi oleh setup yang cuma "kelihatan rapi" di permukaan.
+AI validator sekarang tidak hanya melihat tren dan funding, tapi juga support/resistance, breakout structure, BOS, pullback EMA20, overextension, volume anomaly, dan liquidation risk proxy. Itu bikin acceptance rate lebih adaptif untuk setup meme coin yang sering meledak cepat, tapi tetap ketahan oleh risk filter.
 
 ### Kill Switch
 
