@@ -19,7 +19,6 @@ class Config {
       symbols: Config._parseSymbols(),
       maxOpenPositions: Config._number("MAX_OPEN_POSITIONS", 1),
       leverage: Config._number("LEVERAGE", 10),
-      orderSizeUsdt: Config._number("ORDER_SIZE_USDT", 5),
       timeframe: Config._string("TIMEFRAME", "5m"),
       htfTimeframe: Config._string("HTF_TIMEFRAME", "15m"),
       lookbackCandles: Config._number("LOOKBACK_CANDLES", 200),
@@ -858,15 +857,63 @@ class OrderManager {
     this.lastPositionChangeTime = 0;
   }
   
-  async calculateContracts(symbol, price) {
+  async calculateContracts(symbol, entryPrice, stopLossPrice) {
     const market = this.exchange.getMarket(symbol);
-    const targetNotional = Config.env.orderSizeUsdt * Config.env.leverage;
-    const maxNotional = Config.env.maxPositionNotionalUsdt > 0 ? Math.min(targetNotional, Config.env.maxPositionNotionalUsdt) : targetNotional;
-    const minCost = market?.limits?.cost?.min || 5;
-    const minAmount = market?.limits?.amount?.min || 0;
-    const finalNotional = Math.max(minCost, maxNotional);
-    const contracts = Math.max(finalNotional / price, minAmount);
-    return Number(this.exchange.amountToPrecision(symbol, contracts));
+    const stopDistance = Math.abs(Number(entryPrice) - Number(stopLossPrice));
+    if (!Number.isFinite(stopDistance) || stopDistance <= 0) {
+      throw new Error(`Invalid stop distance for ${symbol}`);
+    }
+
+    const equity = await this._getAccountEquity();
+    const riskAmount = equity * Config.env.riskPerTradePct;
+    if (!Number.isFinite(riskAmount) || riskAmount <= 0) {
+      throw new Error(`Invalid risk amount for ${symbol}`);
+    }
+
+    const rawContracts = riskAmount / stopDistance;
+    const precisionContracts = Number(this.exchange.amountToPrecision(symbol, rawContracts));
+    if (!Number.isFinite(precisionContracts) || precisionContracts <= 0) {
+      throw new Error(`Calculated contract size is invalid for ${symbol}`);
+    }
+
+    const minAmount = Number(market?.limits?.amount?.min || 0);
+    const minCost = Number(market?.limits?.cost?.min || 0);
+    const notional = precisionContracts * entryPrice;
+
+    if (minAmount > 0 && precisionContracts < minAmount) {
+      throw new Error(`Calculated amount ${precisionContracts} is below minimum amount ${minAmount}`);
+    }
+
+    if (minCost > 0 && notional < minCost) {
+      throw new Error(`Calculated notional ${notional.toFixed(4)} USDT is below minimum cost ${minCost}`);
+    }
+
+    let finalContracts = precisionContracts;
+    if (Config.env.maxPositionNotionalUsdt > 0) {
+      const maxContracts = Config.env.maxPositionNotionalUsdt / entryPrice;
+      finalContracts = Math.min(finalContracts, maxContracts);
+    }
+
+    finalContracts = Number(this.exchange.amountToPrecision(symbol, finalContracts));
+    if (!Number.isFinite(finalContracts) || finalContracts <= 0) {
+      throw new Error(`Final contract size is invalid for ${symbol}`);
+    }
+
+    const finalNotional = finalContracts * entryPrice;
+    if (minAmount > 0 && finalContracts < minAmount) {
+      throw new Error(`Final amount ${finalContracts} is below minimum amount ${minAmount}`);
+    }
+    if (minCost > 0 && finalNotional < minCost) {
+      throw new Error(`Final notional ${finalNotional.toFixed(4)} USDT is below minimum cost ${minCost}`);
+    }
+
+    return {
+      contracts: finalContracts,
+      riskAmount,
+      stopDistance,
+      estimatedRisk: finalContracts * stopDistance,
+      notional: finalNotional
+    };
   }
   
   calculateRequiredMargin(amount, price) {
@@ -893,17 +940,21 @@ class OrderManager {
     return open;
   }
   
-  async openPosition(symbol, signal, price) {
+  async openPosition(symbol, signal, price, stopLossPrice) {
     await this.exchange.setLeverage(Config.env.leverage, symbol);
     const side = signal === "LONG" ? "buy" : "sell";
-    const amount = await this.calculateContracts(symbol, price);
+    if (stopLossPrice === null || stopLossPrice === undefined) {
+      throw new Error(`Missing stopLossPrice for risk-based sizing on ${symbol}`);
+    }
+    const sizing = await this.calculateContracts(symbol, price, stopLossPrice);
+    const amount = sizing.contracts;
     const requiredMargin = this.calculateRequiredMargin(amount, price);
     const balance = await this._getAvailableBalance();
     if (balance < requiredMargin) {
       console.warn(`[BLOCK] Insufficient balance: free ${balance.toFixed(4)} USDT, need ${requiredMargin.toFixed(4)}`);
       return null;
     }
-    console.log(`\n[OPEN] ${signal}\nContracts: ${amount}\nNotional: ${(amount*price).toFixed(4)} USDT\nRequired margin: ${requiredMargin.toFixed(4)} USDT`);
+    console.log(`\n[OPEN] ${signal}\nContracts: ${amount}\nNotional: ${sizing.notional.toFixed(4)} USDT\nRisk target: ${sizing.riskAmount.toFixed(4)} USDT\nEstimated SL risk: ${sizing.estimatedRisk.toFixed(4)} USDT\nRequired margin: ${requiredMargin.toFixed(4)} USDT`);
     const order = await this.exchange.createMarketOrder(symbol, side, amount);
     console.log(`[OK] Order: ${order.id}`);
     this.lastPositionChangeTime = Date.now();
@@ -1021,6 +1072,11 @@ class OrderManager {
     const balance = await this.exchange.fetchBalance();
     return Number(balance?.USDT?.free || 0);
   }
+
+  async _getAccountEquity() {
+    const balance = await this.exchange.fetchBalance();
+    return Number(balance?.USDT?.total || balance?.USDT?.free || 0);
+  }
   
   canReverse(position, now) {
     const cooldownMs = Config.env.reversalCooldownMinutes * 60 * 1000;
@@ -1124,7 +1180,7 @@ class SmartTradingBot {
 Symbols: ${Config.env.symbols.join(", ")}
 Max positions: ${Config.env.maxOpenPositions}
 Leverage: ${Config.env.leverage}x
-Order size: ${Config.env.orderSizeUsdt} USDT
+Risk per trade: ${(Config.env.riskPerTradePct * 100).toFixed(2)}%
 Timeframes: ${Config.env.timeframe} / ${Config.env.htfTimeframe}
 Rotation batch: ${Config.env.scanRotationBatchSize}
 Model: ${Config.env.geminiModel}
@@ -1345,7 +1401,7 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
     
     if (position) await this.orderManager.closePosition(symbol, position);
     await this.orderManager.cancelAllOrders(symbol);
-    const newPos = await this.orderManager.openPosition(symbol, signal, context.price);
+    const newPos = await this.orderManager.openPosition(symbol, signal, context.price, sl);
     if (!newPos) return;
     
     const actualEntry = newPos.entryPrice;
