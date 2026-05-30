@@ -155,9 +155,14 @@ MAX_DAILY_LOSS_PCT=3
 MAX_DAILY_LOSS_USDT=0
 MAX_CONSECUTIVE_LOSSES=3
 MAX_POSITION_NOTIONAL_USDT=1000
+MAX_NOTIONAL_BY_BALANCE_PCT=80
 MIN_RR=1.5
 BREAK_EVEN_PROTECTION_ENABLED=true
 ```
+
+`MAX_NOTIONAL_BY_BALANCE_PCT` membatasi notional posisi berdasarkan free balance dan leverage.
+Contoh `80` berarti bot hanya boleh memakai hingga 80% dari kapasitas notional teoritis
+`free_balance * leverage`, supaya masih ada ruang untuk fee dan buffer maintenance margin.
 
 ### AI Filter
 

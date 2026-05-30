@@ -45,6 +45,7 @@ class Config {
       maxDailyLossUsdt: Config._number("MAX_DAILY_LOSS_USDT", 0),
       maxConsecutiveLosses: Config._number("MAX_CONSECUTIVE_LOSSES", 3),
       maxPositionNotionalUsdt: Config._number("MAX_POSITION_NOTIONAL_USDT", 0),
+      maxNotionalByBalancePct: Config._number("MAX_NOTIONAL_BY_BALANCE_PCT", 80) / 100,
       
       atrTpMultiplier: Config._number("ATR_TP_MULTIPLIER", 1.8),
       trailingCallbackMin: Config._number("TRAILING_CALLBACK_MIN", 0.3),
@@ -864,7 +865,9 @@ class OrderManager {
       throw new Error(`Invalid stop distance for ${symbol}`);
     }
 
-    const equity = await this._getAccountEquity();
+    const balance = await this.exchange.fetchBalance();
+    const freeBalance = Number(balance?.USDT?.free || 0);
+    const equity = Number(balance?.USDT?.total || freeBalance || 0);
     const riskAmount = equity * Config.env.riskPerTradePct;
     if (!Number.isFinite(riskAmount) || riskAmount <= 0) {
       throw new Error(`Invalid risk amount for ${symbol}`);
@@ -888,9 +891,21 @@ class OrderManager {
       throw new Error(`Calculated notional ${notional.toFixed(4)} USDT is below minimum cost ${minCost}`);
     }
 
+    const maxNotionalByBalance = Config.env.maxNotionalByBalancePct > 0
+      ? freeBalance * Config.env.leverage * Config.env.maxNotionalByBalancePct
+      : 0;
+
     let finalContracts = precisionContracts;
+    const notionalCaps = [];
     if (Config.env.maxPositionNotionalUsdt > 0) {
-      const maxContracts = Config.env.maxPositionNotionalUsdt / entryPrice;
+      notionalCaps.push(Config.env.maxPositionNotionalUsdt);
+    }
+    if (maxNotionalByBalance > 0) {
+      notionalCaps.push(maxNotionalByBalance);
+    }
+    if (notionalCaps.length > 0) {
+      const cappedNotional = Math.min(...notionalCaps);
+      const maxContracts = cappedNotional / entryPrice;
       finalContracts = Math.min(finalContracts, maxContracts);
     }
 
@@ -912,7 +927,9 @@ class OrderManager {
       riskAmount,
       stopDistance,
       estimatedRisk: finalContracts * stopDistance,
-      notional: finalNotional
+      notional: finalNotional,
+      freeBalance,
+      maxNotionalByBalance
     };
   }
   
@@ -949,12 +966,15 @@ class OrderManager {
     const sizing = await this.calculateContracts(symbol, price, stopLossPrice);
     const amount = sizing.contracts;
     const requiredMargin = this.calculateRequiredMargin(amount, price);
-    const balance = await this._getAvailableBalance();
+    const balance = sizing.freeBalance;
     if (balance < requiredMargin) {
       console.warn(`[BLOCK] Insufficient balance: free ${balance.toFixed(4)} USDT, need ${requiredMargin.toFixed(4)}`);
       return null;
     }
-    console.log(`\n[OPEN] ${signal}\nContracts: ${amount}\nNotional: ${sizing.notional.toFixed(4)} USDT\nRisk target: ${sizing.riskAmount.toFixed(4)} USDT\nEstimated SL risk: ${sizing.estimatedRisk.toFixed(4)} USDT\nRequired margin: ${requiredMargin.toFixed(4)} USDT`);
+    const balanceCapNote = sizing.maxNotionalByBalance > 0
+      ? `\nBalance cap: ${sizing.maxNotionalByBalance.toFixed(4)} USDT`
+      : "";
+    console.log(`\n[OPEN] ${signal}\nContracts: ${amount}\nNotional: ${sizing.notional.toFixed(4)} USDT\nRisk target: ${sizing.riskAmount.toFixed(4)} USDT\nEstimated SL risk: ${sizing.estimatedRisk.toFixed(4)} USDT\nRequired margin: ${requiredMargin.toFixed(4)} USDT${balanceCapNote}`);
     const order = await this.exchange.createMarketOrder(symbol, side, amount);
     console.log(`[OK] Order: ${order.id}`);
     this.lastPositionChangeTime = Date.now();
