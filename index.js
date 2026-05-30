@@ -66,6 +66,10 @@ class Config {
       maxAtrPct: Config._number("MAX_ATR_PCT", 2.5) / 100,
       minAtrPct: Config._number("MIN_ATR_PCT", 0.15) / 100,
       minVolumeChangeForTrend: Config._number("MIN_VOLUME_CHANGE_FOR_TREND", -30),
+      supportResistanceLookback: Math.max(5, Config._number("SUPPORT_RESISTANCE_LOOKBACK", 20)),
+      maxVolumeAnomalyRatio: Math.max(1.1, Config._number("MAX_VOLUME_ANOMALY_RATIO", 1.8)),
+      maxOverextendedAtrMultiple: Math.max(0.5, Config._number("MAX_OVEREXTENDED_ATR_MULTIPLE", 2.2)),
+      maxLiquidationRiskScore: Config._number("MAX_LIQUIDATION_RISK_SCORE", 70),
       symbolCooldownEnabled: Config._bool("SYMBOL_COOLDOWN_ENABLED", true),
       symbolCooldownMinutes: Config._number("SYMBOL_COOLDOWN_MINUTES", 30),
       symbolErrorCooldownMinutes: Config._number("SYMBOL_ERROR_COOLDOWN_MINUTES", 5),
@@ -383,8 +387,33 @@ class MarketDataService {
     const volumeChange = prevVolume ? ((latestVolume - prevVolume) / prevVolume) * 100 : 0;
     const trend = ema20 > ema50 ? "UPTREND" : ema20 < ema50 ? "DOWNTREND" : "SIDEWAYS";
     const emaGap = (Math.abs(ema20 - ema50) / context.price) * 100;
+
+    const srLookback = Math.min(Config.env.supportResistanceLookback, ohlcv.length);
+    const structureCandles = ohlcv.slice(-srLookback);
+    const highs = structureCandles.map(c => Number(c[2])).filter(Number.isFinite);
+    const lows = structureCandles.map(c => Number(c[3])).filter(Number.isFinite);
+    const volumes = structureCandles.map(c => Number(c[5])).filter(Number.isFinite);
+    const support = lows.length ? Math.min(...lows) : null;
+    const resistance = highs.length ? Math.max(...highs) : null;
+    const latestClose = Number(closes[closes.length - 1]);
+    const supportDistancePct = Number.isFinite(support) && latestClose > 0 ? ((latestClose - support) / latestClose) * 100 : null;
+    const resistanceDistancePct = Number.isFinite(resistance) && latestClose > 0 ? ((resistance - latestClose) / latestClose) * 100 : null;
+    const rangeWidthPct = Number.isFinite(support) && Number.isFinite(resistance) && latestClose > 0
+      ? ((resistance - support) / latestClose) * 100
+      : null;
+    const rangePositionPct = Number.isFinite(support) && Number.isFinite(resistance) && resistance > support
+      ? Utils.clamp(((latestClose - support) / (resistance - support)) * 100, 0, 100)
+      : null;
+    const avgVolume = volumes.length ? volumes.reduce((sum, value) => sum + value, 0) / volumes.length : null;
+    const volumeRatio = avgVolume && avgVolume > 0 ? latestVolume / avgVolume : null;
+    const overextendedMovePct = context.price > 0 ? (Math.abs(context.price - ema20) / context.price) * 100 : 0;
+    const overextendedAtrMultiple = atr > 0 ? Math.abs(context.price - ema20) / atr : 0;
     
-    const baseSnapshot = { candleTimestamp, expiresAt, ema20, ema50, ema20Slope, ema50Slope, emaGap, rsi, atr, volumeChange, trend };
+    const baseSnapshot = {
+      candleTimestamp, expiresAt, ema20, ema50, ema20Slope, ema50Slope, emaGap, rsi, atr, volumeChange, trend,
+      support, resistance, supportDistancePct, resistanceDistancePct, rangeWidthPct, rangePositionPct,
+      avgVolume, volumeRatio, overextendedMovePct, overextendedAtrMultiple
+    };
     const snapshot = { price: context.price, fundingRate: context.fundingRate, ...baseSnapshot };
     
     if (Config.env.marketSnapshotCacheEnabled) {
@@ -811,6 +840,15 @@ class AIValidator {
       console.log(`[CACHE] AI validation hit for ${symbol}`);
       return cached;
     }
+
+    const localValidation = this._localValidationCheck(
+      symbol, snapshot, htfSnapshot, regimeInfo, proposedSignal, proposedStrength
+    );
+    if (!localValidation.valid) {
+      const expiresAt = Math.min(snapshot?.expiresAt || Date.now(), htfSnapshot?.expiresAt || Date.now());
+      this.marketData.cacheAISignal(cacheKey, localValidation, expiresAt);
+      return localValidation;
+    }
     
     const prompt = this._buildValidationPrompt(symbol, snapshot, htfSnapshot, regimeInfo, proposedSignal, proposedStrength);
     let lastError = null;
@@ -830,9 +868,82 @@ class AIValidator {
     }
     return { valid: false, confidence: 0, reason: `Fallback: ${lastError?.message}` };
   }
+
+  _localValidationCheck(symbol, snapshot, htfSnapshot, regimeInfo, proposedSignal, proposedStrength) {
+    const atrPct = snapshot?.price > 0 && Number.isFinite(snapshot?.atr)
+      ? (snapshot.atr / snapshot.price) * 100
+      : 0;
+    const volumeRatio = Number(snapshot?.volumeRatio);
+    const overextendedAtrMultiple = Number(snapshot?.overextendedAtrMultiple || 0);
+    const directionalRoomPct = proposedSignal === "LONG"
+      ? Number(snapshot?.resistanceDistancePct)
+      : Number(snapshot?.supportDistancePct);
+    const effectiveRoomPct = Number.isFinite(directionalRoomPct) ? directionalRoomPct : Infinity;
+    const volumeAnomalyRatio = Config.env.maxVolumeAnomalyRatio;
+    const riskScore = this._estimateLiquidationRiskScore(snapshot, htfSnapshot, proposedSignal);
+    const reasons = [];
+
+    if (Number.isFinite(effectiveRoomPct) && effectiveRoomPct <= Math.max(atrPct * 1.15, 0.35)) {
+      reasons.push(`too close to ${proposedSignal === "LONG" ? "resistance" : "support"}`);
+    }
+    if (overextendedAtrMultiple >= Config.env.maxOverextendedAtrMultiple || snapshot?.overextendedMovePct >= 2.5) {
+      reasons.push("overextended move");
+    }
+    if (Number.isFinite(volumeRatio) && (volumeRatio >= volumeAnomalyRatio || volumeRatio <= (1 / volumeAnomalyRatio))) {
+      reasons.push("volume anomaly");
+    }
+    if (riskScore >= Config.env.maxLiquidationRiskScore) {
+      reasons.push(`liquidation risk ${riskScore}/100`);
+    }
+    if (reasons.length > 0) {
+      return {
+        valid: false,
+        confidence: 0,
+        reason: `${symbol} blocked: ${reasons.join(", ")}`
+      };
+    }
+
+    return { valid: true, confidence: 100, reason: "Local risk checks passed" };
+  }
+
+  _estimateLiquidationRiskScore(snapshot, htfSnapshot, proposedSignal) {
+    const price = Number(snapshot?.price || 0);
+    const atr = Number(snapshot?.atr || 0);
+    if (price <= 0 || atr <= 0) return 100;
+
+    const atrPct = (atr / price) * 100;
+    const leveragePressure = Utils.clamp(atrPct * Config.env.leverage * 5.5, 0, 60);
+
+    const directionalRoomPct = proposedSignal === "LONG"
+      ? Number(snapshot?.resistanceDistancePct)
+      : Number(snapshot?.supportDistancePct);
+    const roomRatio = Number.isFinite(directionalRoomPct) ? directionalRoomPct / Math.max(atrPct, 0.0001) : 0;
+    const roomPressure = Number.isFinite(directionalRoomPct)
+      ? Utils.clamp((2.25 - roomRatio) * 18, 0, 25)
+      : 10;
+
+    const fundingPressure = Utils.clamp(
+      (Math.abs(Number(snapshot?.fundingRate || 0)) / Math.max(Config.env.maxFundingRate, 0.000001)) * 15,
+      0,
+      15
+    );
+
+    const overextensionPressure = Utils.clamp(Number(snapshot?.overextendedAtrMultiple || 0) * 6, 0, 15);
+    const trendMismatchPressure = snapshot?.trend && htfSnapshot?.trend && snapshot.trend !== htfSnapshot.trend ? 8 : 0;
+    const volumeRatio = Number(snapshot?.volumeRatio);
+    const volumePressure = Number.isFinite(volumeRatio)
+      ? Utils.clamp(Math.abs(1 - volumeRatio) * 8, 0, 10)
+      : 0;
+
+    return Math.round(Math.min(100, leveragePressure + roomPressure + fundingPressure + overextensionPressure + trendMismatchPressure + volumePressure));
+  }
   
   _buildValidationPrompt(symbol, snapshot, htfSnapshot, regimeInfo, proposedSignal, proposedStrength) {
     const atrPct = (snapshot.atr / snapshot.price) * 100;
+    const supportDistance = Number.isFinite(snapshot.supportDistancePct) ? `${snapshot.supportDistancePct.toFixed(2)}%` : "n/a";
+    const resistanceDistance = Number.isFinite(snapshot.resistanceDistancePct) ? `${snapshot.resistanceDistancePct.toFixed(2)}%` : "n/a";
+    const volumeRatio = Number.isFinite(snapshot.volumeRatio) ? snapshot.volumeRatio.toFixed(2) : "n/a";
+    const liquidationRiskScore = this._estimateLiquidationRiskScore(snapshot, htfSnapshot, proposedSignal);
     return `You are a validator for a crypto futures trading bot.
 The bot proposes a ${proposedSignal} trade with strength ${proposedStrength}.
 Your job: Decide if this trade is safe and logical based on market conditions.
@@ -847,8 +958,21 @@ RSI: ${snapshot.rsi}, Volume change: ${snapshot.volumeChange}%
 Funding rate: ${snapshot.fundingRate}
 ATR pct: ${atrPct.toFixed(2)}%
 Sideways gap: ${snapshot.emaGap}%
+Support: ${snapshot.support}, Resistance: ${snapshot.resistance}
+Distance to support: ${supportDistance}, Distance to resistance: ${resistanceDistance}
+Volume ratio vs recent average: ${volumeRatio}
+Overextended move: ${snapshot.overextendedMovePct?.toFixed?.(2) ?? snapshot.overextendedMovePct}% or ${snapshot.overextendedAtrMultiple?.toFixed?.(2) ?? snapshot.overextendedAtrMultiple} ATR
+Liquidation risk proxy: ${liquidationRiskScore}/100
 
-ONLY reject if: extreme volatility, contradictory trends, abnormal funding, or clear reversal pattern.`;
+Reject if any of these are true:
+- extreme volatility
+- contradictory trends
+- abnormal funding
+- clear reversal pattern
+- price is too close to support/resistance for the proposed direction
+- the move is overextended
+- volume is anomalous versus recent average
+- liquidation risk proxy is high`;
   }
   
   _parseValidation(text) {
