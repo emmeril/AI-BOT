@@ -171,6 +171,9 @@ AI_FILTER_ENABLED=true
 MIN_AI_CONFIDENCE=65
 ALLOWED_AI_STRENGTHS=MEDIUM,STRONG,EXTREME
 AI_RESPONSE_RETRIES=2
+EMA20_LOOKBACK=120
+EMA50_LOOKBACK=150
+ATR_PERIOD=28
 SUPPORT_RESISTANCE_LOOKBACK=20
 BREAKOUT_LOOKBACK_CANDLES=20
 BREAKOUT_BUFFER_PCT=0.12
@@ -182,7 +185,7 @@ MAX_OVEREXTENDED_ATR_MULTIPLE=2.2
 MAX_LIQUIDATION_RISK_SCORE=70
 ```
 
-AI validator sekarang tidak hanya melihat tren dan funding, tapi juga support/resistance, breakout structure, BOS, pullback EMA20, overextension, volume anomaly, dan liquidation risk proxy. Itu bikin acceptance rate lebih adaptif untuk setup meme coin yang sering meledak cepat, tapi tetap ketahan oleh risk filter.
+AI validator sekarang tidak hanya melihat tren dan funding, tapi juga support/resistance, breakout structure, BOS, pullback EMA20, overextension, volume anomaly, dan liquidation risk proxy. EMA dihitung dengan warm-up lebih panjang, dan ATR dibuat lebih halus untuk mengurangi noise pada meme coin yang volatil.
 
 ### Kill Switch
 

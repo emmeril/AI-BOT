@@ -22,6 +22,9 @@ class Config {
       timeframe: Config._string("TIMEFRAME", "5m"),
       htfTimeframe: Config._string("HTF_TIMEFRAME", "15m"),
       lookbackCandles: Config._number("LOOKBACK_CANDLES", 200),
+      ema20Lookback: Math.max(20, Config._number("EMA20_LOOKBACK", 120)),
+      ema50Lookback: Math.max(50, Config._number("EMA50_LOOKBACK", 150)),
+      atrPeriod: Math.max(14, Config._number("ATR_PERIOD", 28)),
       intervalMinutes: Config._number("INTERVAL_MINUTES", 5),
       scanRotationBatchSize: Math.max(1, Config._number("SCAN_ROTATION_BATCH_SIZE", 2)),
       
@@ -293,6 +296,7 @@ class ExchangeClient {
 // ======================================================
 class IndicatorCalculator {
   static calculateEMA(data, period) {
+    if (!Array.isArray(data) || data.length === 0) return null;
     const k = 2 / (period + 1);
     let ema = data[0];
     for (let i = 1; i < data.length; i++) {
@@ -330,6 +334,7 @@ class IndicatorCalculator {
   }
   
   static calculateATR(ohlcv) {
+    if (!Array.isArray(ohlcv) || ohlcv.length < 2) return null;
     const trs = [];
     for (let i = 1; i < ohlcv.length; i++) {
       const prevClose = ohlcv[i - 1][4];
@@ -338,6 +343,7 @@ class IndicatorCalculator {
       const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
       trs.push(tr);
     }
+    if (!trs.length) return null;
     return trs.reduce((a, b) => a + b, 0) / trs.length;
   }
 }
@@ -379,14 +385,14 @@ class MarketDataService {
     const timeframeMs = Utils.parseTimeframeToMs(timeframe);
     const expiresAt = candleTimestamp > 0 ? candleTimestamp + timeframeMs : Date.now() + timeframeMs;
     
-    const ema20 = IndicatorCalculator.calculateEMA(closes.slice(-20), 20);
-    const ema50 = IndicatorCalculator.calculateEMA(closes.slice(-50), 50);
-    const prevEma20 = IndicatorCalculator.calculateEMA(closes.slice(-21, -1), 20);
-    const prevEma50 = IndicatorCalculator.calculateEMA(closes.slice(-51, -1), 50);
+    const ema20 = IndicatorCalculator.calculateEMA(closes.slice(-Config.env.ema20Lookback), 20);
+    const ema50 = IndicatorCalculator.calculateEMA(closes.slice(-Config.env.ema50Lookback), 50);
+    const prevEma20 = IndicatorCalculator.calculateEMA(closes.slice(-(Config.env.ema20Lookback + 1), -1), 20);
+    const prevEma50 = IndicatorCalculator.calculateEMA(closes.slice(-(Config.env.ema50Lookback + 1), -1), 50);
     const ema20Slope = ema20 - prevEma20;
     const ema50Slope = ema50 - prevEma50;
     const rsi = IndicatorCalculator.calculateRSI(closes);
-    const atr = IndicatorCalculator.calculateATR(ohlcv.slice(-15));
+    const atr = IndicatorCalculator.calculateATR(ohlcv.slice(-Config.env.atrPeriod));
     const latestVolume = ohlcv[ohlcv.length - 1][5];
     const prevVolume = ohlcv[ohlcv.length - 2][5];
     const volumeChange = prevVolume ? ((latestVolume - prevVolume) / prevVolume) * 100 : 0;
