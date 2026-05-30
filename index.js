@@ -1,8 +1,7 @@
 // ======================================================
 // SMART BINANCE AI FUTURES BOT
-// FULL SMART VERSION
-// MTF + AI + ANTI WHIPSAW + STOP MARKET
 // ======================================================
+
 require("dotenv").config();
 const ccxt = require("ccxt");
 const fs = require("fs");
@@ -11,208 +10,118 @@ const crypto = require("crypto");
 const https = require("https");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-function envValue(key, fallback) {
-  const value = process.env[key];
-  return value === undefined || value === "" ? fallback : value;
-}
-
-function envNumber(key, fallback) {
-  const parsed = Number(envValue(key, fallback));
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function envBoolean(key, fallback = true) {
-  const value = process.env[key];
-  if (value === undefined || value === "") return fallback;
-  return value !== "false";
-}
-
-function envTrue(key) {
-  return process.env[key] === "true";
-}
-
-function envList(key, fallback) {
-  return String(envValue(key, fallback))
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-}
-
-function resolveProjectPath(fileName) {
-  return path.resolve(process.cwd(), fileName);
-}
-
-function classifyVolumeChange(volumeChange) {
-  const value = Number(volumeChange);
-  if (!Number.isFinite(value)) return "UNKNOWN";
-  if (value <= -80) return "SEVERE_DRY_UP";
-  if (value <= -40) return "HEAVY_DRY_UP";
-  if (value < 15) return "NEUTRAL";
-  if (value < 50) return "SUPPORTIVE";
-  return "SURGE";
-}
-
 // ======================================================
-// CONFIG
+// CONFIGURATION (all environment variables)
 // ======================================================
-const DEFAULT_MEME_SYMBOLS =
-  "DOGE/USDT:USDT,1000SHIB/USDT:USDT,1000PEPE/USDT:USDT,1000FLOKI/USDT:USDT,1000BONK/USDT:USDT";
-const SYMBOL_INPUT = envValue(
-  "SYMBOLS",
-  envValue("MEME_SYMBOLS", envValue("SYMBOL", DEFAULT_MEME_SYMBOLS)),
-);
-const SYMBOLS = envList("SYMBOLS", SYMBOL_INPUT);
-const SCAN_SYMBOLS = SYMBOLS.length > 0 ? SYMBOLS : envList("MEME_SYMBOLS", DEFAULT_MEME_SYMBOLS);
-const MAX_OPEN_POSITIONS = envNumber("MAX_OPEN_POSITIONS", 1);
-const LEVERAGE = envNumber("LEVERAGE", 10);
-const ORDER_SIZE_USDT = envNumber("ORDER_SIZE_USDT", 5);
-const TIMEFRAME = envValue("TIMEFRAME", "5m");
-const HTF_TIMEFRAME = envValue("HTF_TIMEFRAME", "15m");
-const LOOKBACK_CANDLES = envNumber("LOOKBACK_CANDLES", 200);
-const INTERVAL_MINUTES = envNumber("INTERVAL_MINUTES", 5);
-const INTERVAL_MS = INTERVAL_MINUTES * 60 * 1000;
-const MARKET_SNAPSHOT_CACHE_ENABLED = envBoolean(
-  "MARKET_SNAPSHOT_CACHE_ENABLED",
-);
-const AI_SIGNAL_CACHE_ENABLED = envBoolean("AI_SIGNAL_CACHE_ENABLED");
-const CACHE_MAX_ENTRIES = Math.max(
-  1,
-  envNumber("CACHE_MAX_ENTRIES", 500) || 500,
-);
+const config = {
+  // Symbols & trading limits
+  defaultMemeSymbols: "DOGE/USDT:USDT,1000SHIB/USDT:USDT,1000PEPE/USDT:USDT,1000FLOKI/USDT:USDT,1000BONK/USDT:USDT",
+  get symbols() {
+    const input = process.env.SYMBOLS || process.env.MEME_SYMBOLS || process.env.SYMBOL || this.defaultMemeSymbols;
+    return input.split(",").map(s => s.trim()).filter(Boolean);
+  },
+  maxOpenPositions: Number(process.env.MAX_OPEN_POSITIONS) || 1,
+  leverage: Number(process.env.LEVERAGE) || 10,
+  orderSizeUsdt: Number(process.env.ORDER_SIZE_USDT) || 5,
+  timeframe: process.env.TIMEFRAME || "5m",
+  htfTimeframe: process.env.HTF_TIMEFRAME || "15m",
+  lookbackCandles: Number(process.env.LOOKBACK_CANDLES) || 200,
+  intervalMinutes: Number(process.env.INTERVAL_MINUTES) || 5,
+  scanRotationBatchSize: Math.max(1, Number(process.env.SCAN_ROTATION_BATCH_SIZE) || 2),
 
-// ======================================================
-// EMERGENCY CONTROL
-// ======================================================
-const KILL_SWITCH_ENABLED = envBoolean("KILL_SWITCH_ENABLED");
-const STOP_TRADING = envTrue("STOP_TRADING");
-const KILL_SWITCH_FILE = envValue("KILL_SWITCH_FILE", "bot-paused.flag");
-const KILL_SWITCH_PATH = resolveProjectPath(KILL_SWITCH_FILE);
+  // Caching
+  marketSnapshotCacheEnabled: process.env.MARKET_SNAPSHOT_CACHE_ENABLED !== "false",
+  aiSignalCacheEnabled: process.env.AI_SIGNAL_CACHE_ENABLED !== "false",
+  cacheMaxEntries: Math.max(1, Number(process.env.CACHE_MAX_ENTRIES) || 500),
 
-// ======================================================
-// PROFIT TRACKER
-// ======================================================
-const PROFIT_TRACKER_ENABLED = envBoolean("PROFIT_TRACKER_ENABLED");
-const PROFIT_TRACKER_FILE = envValue("PROFIT_TRACKER_FILE", "profit-ledger.json");
-const PROFIT_SYNC_LIMIT = envNumber("PROFIT_SYNC_LIMIT", 100);
-const PROFIT_LEDGER_PATH = resolveProjectPath(PROFIT_TRACKER_FILE);
-const RISK_STATE_FILE = envValue("RISK_STATE_FILE", "risk-state.json");
-const RISK_STATE_PATH = resolveProjectPath(RISK_STATE_FILE);
+  // Emergency controls
+  killSwitchEnabled: process.env.KILL_SWITCH_ENABLED !== "false",
+  stopTrading: process.env.STOP_TRADING === "true",
+  killSwitchFile: process.env.KILL_SWITCH_FILE || "bot-paused.flag",
 
-// ======================================================
-// RISK
-// ======================================================
-const MAX_FUNDING_RATE = envNumber("MAX_FUNDING_RATE", 0.1) / 100;
-const MIN_RR = envNumber("MIN_RR", 1.5);
-const RISK_PER_TRADE_PCT = envNumber("RISK_PER_TRADE_PCT", 1) / 100;
-const MAX_DAILY_LOSS_PCT = envNumber("MAX_DAILY_LOSS_PCT", 3) / 100;
-const MAX_DAILY_LOSS_USDT = envNumber("MAX_DAILY_LOSS_USDT", 0);
-const MAX_CONSECUTIVE_LOSSES = envNumber("MAX_CONSECUTIVE_LOSSES", 3);
-const MAX_POSITION_NOTIONAL_USDT = envNumber(
-  "MAX_POSITION_NOTIONAL_USDT",
-  ORDER_SIZE_USDT * LEVERAGE,
-);
+  // Profit tracking
+  profitTrackerEnabled: process.env.PROFIT_TRACKER_ENABLED !== "false",
+  profitTrackerFile: process.env.PROFIT_TRACKER_FILE || "profit-ledger.json",
+  profitSyncLimit: Number(process.env.PROFIT_SYNC_LIMIT) || 100,
 
-// ======================================================
-// ATR
-// ======================================================
-const ATR_TP_MULTIPLIER = envNumber("ATR_TP_MULTIPLIER", 1.8);
+  // Risk parameters
+  maxFundingRate: (Number(process.env.MAX_FUNDING_RATE) || 0.1) / 100,
+  minRr: Number(process.env.MIN_RR) || 1.5,
+  riskPerTradePct: (Number(process.env.RISK_PER_TRADE_PCT) || 1) / 100,
+  maxDailyLossPct: (Number(process.env.MAX_DAILY_LOSS_PCT) || 3) / 100,
+  maxDailyLossUsdt: Number(process.env.MAX_DAILY_LOSS_USDT) || 0,
+  maxConsecutiveLosses: Number(process.env.MAX_CONSECUTIVE_LOSSES) || 3,
+  maxPositionNotionalUsdt: Number(process.env.MAX_POSITION_NOTIONAL_USDT) || (Number(process.env.ORDER_SIZE_USDT) || 5) * (Number(process.env.LEVERAGE) || 10),
+
+  // ATR & trailing
+  atrTpMultiplier: Number(process.env.ATR_TP_MULTIPLIER) || 1.8,
+  trailingCallbackMin: Number(process.env.TRAILING_CALLBACK_MIN) || 0.3,
+  trailingCallbackMax: Number(process.env.TRAILING_CALLBACK_MAX) || 1.5,
+
+  // Partial TP
+  tp1Percent: Number(process.env.TP1_PERCENT) || 30,
+  tp2Percent: Number(process.env.TP2_PERCENT) || 40,
+  tp1Rr: Number(process.env.TP1_RR) || 1.0,
+  tp2Rr: Number(process.env.TP2_RR) || 2.0,
+
+  // Filters
+  requiredConfirmations: Number(process.env.REQUIRED_CONFIRMATION) || 2,
+  sidewaysEmaGap: Number(process.env.SIDEWAYS_EMA_GAP) || 0.04,
+  reversalCooldownMinutes: Number(process.env.REVERSAL_COOLDOWN_MINUTES) || 10,
+  longOnly: process.env.LONG_ONLY !== "false",
+  regimeFilterEnabled: process.env.REGIME_FILTER_ENABLED !== "false",
+  allowedMarketRegimes: (process.env.ALLOWED_MARKET_REGIMES || "TRENDING_UP,TRENDING_DOWN").split(",").map(r => r.trim().toUpperCase()),
+  maxAtrPct: (Number(process.env.MAX_ATR_PCT) || 2.5) / 100,
+  minAtrPct: (Number(process.env.MIN_ATR_PCT) || 0.15) / 100,
+  minVolumeChangeForTrend: Number(process.env.MIN_VOLUME_CHANGE_FOR_TREND) || -20,
+  symbolCooldownEnabled: process.env.SYMBOL_COOLDOWN_ENABLED !== "false",
+  symbolCooldownMinutes: Number(process.env.SYMBOL_COOLDOWN_MINUTES) || 30,
+  symbolErrorCooldownMinutes: Number(process.env.SYMBOL_ERROR_COOLDOWN_MINUTES) || 5,
+
+  // AI
+  geminiModel: process.env.GEMINI_MODEL || "gemini-1.5-flash-lite",
+  aiFilterEnabled: process.env.AI_FILTER_ENABLED !== "false",
+  minAiConfidence: Number(process.env.MIN_AI_CONFIDENCE) || 65,
+  allowedAiStrengths: (process.env.ALLOWED_AI_STRENGTHS || "MEDIUM,STRONG,EXTREME").split(",").map(s => s.trim().toUpperCase()),
+  aiResponseRetries: Number(process.env.AI_RESPONSE_RETRIES) || 2,
+  aiExplainLogEnabled: process.env.AI_EXPLAIN_LOG_ENABLED !== "false",
+  aiExplainLogFile: process.env.AI_EXPLAIN_LOG_FILE || "ai-explain-log.jsonl",
+  aiExplainLogMaxLines: Number(process.env.AI_EXPLAIN_LOG_MAX_LINES) || 5000,
+
+  // Circuit breaker
+  circuitBreakerEnabled: process.env.CIRCUIT_BREAKER_ENABLED !== "false",
+  circuitBreakerMaxErrors: Number(process.env.CIRCUIT_BREAKER_MAX_ERRORS) || 5,
+  circuitBreakerPauseMinutes: Number(process.env.CIRCUIT_BREAKER_PAUSE_MINUTES) || 15,
+
+  // Alerts
+  fonnteEnabled: process.env.FONNTE_ENABLED !== "false",
+  fonnteToken: process.env.FONNTE_TOKEN || "",
+  fonnteTarget: process.env.FONNTE_TARGET || "",
+  fonnteApiUrl: process.env.FONNTE_API_URL || "https://api.fonnte.com/send",
+  fonnteCountryCode: process.env.FONNTE_COUNTRY_CODE || "62",
+
+  // Paths
+  riskStateFile: process.env.RISK_STATE_FILE || "risk-state.json",
+};
+
+// Derived config
+config.intervalMs = config.intervalMinutes * 60 * 1000;
+config.scanSymbols = config.symbols;
+config.rotatingScanEnabled = config.scanRotationBatchSize < config.scanSymbols.length;
+config.effectiveRequiredConfirmations = config.rotatingScanEnabled ? 1 : config.requiredConfirmations;
+config.killSwitchPath = path.resolve(process.cwd(), config.killSwitchFile);
+config.profitLedgerPath = path.resolve(process.cwd(), config.profitTrackerFile);
+config.riskStatePath = path.resolve(process.cwd(), config.riskStateFile);
+config.aiExplainLogPath = path.resolve(process.cwd(), config.aiExplainLogFile);
 
 // ======================================================
-// TRAILING
-// ======================================================
-const TRAILING_CALLBACK_MIN = envNumber("TRAILING_CALLBACK_MIN", 0.3);
-const TRAILING_CALLBACK_MAX = envNumber("TRAILING_CALLBACK_MAX", 1.5);
-
-// ======================================================
-// PARTIAL TP
-// ======================================================
-const TP1_PERCENT = envNumber("TP1_PERCENT", 30);
-const TP2_PERCENT = envNumber("TP2_PERCENT", 40);
-const TP1_RR = envNumber("TP1_RR", 1.0);
-const TP2_RR = envNumber("TP2_RR", 2.0);
-
-// ======================================================
-// FILTER
-// ======================================================
-const REQUIRED_CONFIRMATION = envNumber("REQUIRED_CONFIRMATION", 2);
-const SIDEWAYS_EMA_GAP = envNumber("SIDEWAYS_EMA_GAP", 0.04);
-const REVERSAL_COOLDOWN_MINUTES = envNumber("REVERSAL_COOLDOWN_MINUTES", 10);
-const LONG_ONLY = envBoolean("LONG_ONLY");
-const REGIME_FILTER_ENABLED = envBoolean("REGIME_FILTER_ENABLED");
-const ALLOWED_MARKET_REGIMES = envList(
-  "ALLOWED_MARKET_REGIMES",
-  "TRENDING_UP,TRENDING_DOWN",
-).map((regime) => regime.toUpperCase());
-const MAX_ATR_PCT = envNumber("MAX_ATR_PCT", 2.5) / 100;
-const MIN_ATR_PCT = envNumber("MIN_ATR_PCT", 0.15) / 100;
-const MIN_VOLUME_CHANGE_FOR_TREND = envNumber(
-  "MIN_VOLUME_CHANGE_FOR_TREND",
-  -30,
-);
-const SYMBOL_COOLDOWN_ENABLED = envBoolean("SYMBOL_COOLDOWN_ENABLED");
-const SYMBOL_COOLDOWN_MINUTES = envNumber("SYMBOL_COOLDOWN_MINUTES", 30);
-const SYMBOL_ERROR_COOLDOWN_MINUTES = envNumber(
-  "SYMBOL_ERROR_COOLDOWN_MINUTES",
-  5,
-);
-const SCAN_ROTATION_BATCH_SIZE = Math.max(1, envNumber("SCAN_ROTATION_BATCH_SIZE", 2));
-const ROTATING_SCAN_ENABLED = SCAN_ROTATION_BATCH_SIZE < SCAN_SYMBOLS.length;
-const EFFECTIVE_REQUIRED_CONFIRMATION = ROTATING_SCAN_ENABLED
-  ? 1
-  : REQUIRED_CONFIRMATION;
-
-// ======================================================
-// AI
-// ======================================================
-const GEMINI_MODEL = envValue("GEMINI_MODEL", "gemini-1.5-flash-lite");
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({
-  model: GEMINI_MODEL,
-});
-const AI_FILTER_ENABLED = envBoolean("AI_FILTER_ENABLED");
-const MIN_AI_CONFIDENCE = envNumber("MIN_AI_CONFIDENCE", 65);
-const ALLOWED_AI_STRENGTHS = envList(
-  "ALLOWED_AI_STRENGTHS",
-  "MEDIUM,STRONG,EXTREME",
-).map((strength) => strength.toUpperCase());
-const AI_RESPONSE_RETRIES = envNumber("AI_RESPONSE_RETRIES", 2);
-const AI_EXPLAIN_LOG_ENABLED = envBoolean("AI_EXPLAIN_LOG_ENABLED");
-const AI_EXPLAIN_LOG_FILE = envValue("AI_EXPLAIN_LOG_FILE", "ai-explain-log.jsonl");
-const AI_EXPLAIN_LOG_MAX_LINES = envNumber("AI_EXPLAIN_LOG_MAX_LINES", 5000);
-const AI_EXPLAIN_LOG_PATH = resolveProjectPath(AI_EXPLAIN_LOG_FILE);
-
-// ======================================================
-// CIRCUIT BREAKER
-// ======================================================
-const CIRCUIT_BREAKER_ENABLED = envBoolean("CIRCUIT_BREAKER_ENABLED");
-const CIRCUIT_BREAKER_MAX_ERRORS = envNumber("CIRCUIT_BREAKER_MAX_ERRORS", 5);
-const CIRCUIT_BREAKER_PAUSE_MINUTES = envNumber(
-  "CIRCUIT_BREAKER_PAUSE_MINUTES",
-  15,
-);
-
-// ======================================================
-// FONNTE ALERT
-// ======================================================
-const FONNTE_ENABLED = envBoolean("FONNTE_ENABLED");
-const FONNTE_TOKEN = envValue("FONNTE_TOKEN", "");
-const FONNTE_TARGET = envValue("FONNTE_TARGET", "");
-const FONNTE_API_URL = envValue(
-  "FONNTE_API_URL",
-  "https://api.fonnte.com/send",
-);
-const FONNTE_COUNTRY_CODE = envValue("FONNTE_COUNTRY_CODE", "62");
-
-// ======================================================
-// EXCHANGE
+// EXCHANGE SETUP
 // ======================================================
 const exchange = new ccxt.binance({
   apiKey: process.env.EXCHANGE_API_KEY,
   secret: process.env.EXCHANGE_SECRET,
   enableRateLimit: true,
-  options: {
-    defaultType: "future",
-  },
+  options: { defaultType: "future" },
 });
 if (process.env.EXCHANGE_DEMO === "true") {
   exchange.enable_demo_trading(true);
@@ -220,13 +129,11 @@ if (process.env.EXCHANGE_DEMO === "true") {
 }
 
 // ======================================================
-// GLOBAL
+// GLOBAL STATE
 // ======================================================
 let isTrading = false;
 let signalStateBySymbol = {};
 let lastPositionChangeTime = 0;
-let profitLedger = loadProfitLedger();
-let riskState = loadRiskState();
 let marketSnapshotCache = new Map();
 let aiSignalCache = new Map();
 let fonnteAlertWarningShown = false;
@@ -237,401 +144,161 @@ let circuitBreakerState = {
 };
 
 // ======================================================
-// UTILS
+// UTILITY FUNCTIONS
 // ======================================================
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const roundNumber = (value, digits = 6) => {
+  const num = Number(value);
+  return Number.isFinite(num) ? Number(num.toFixed(digits)) : null;
+};
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+const isCacheValid = (entry) => entry && entry.expiresAt > Date.now();
 
-function parseTimeframeToMs(timeframe) {
-  const text = String(timeframe || "").trim().toLowerCase();
-  const match = text.match(/^(\d+)(m|h|d|w)$/);
-  if (!match) return INTERVAL_MS;
-  const value = Number(match[1]);
-  const unit = match[2];
-  const unitMs = {
-    m: 60 * 1000,
-    h: 60 * 60 * 1000,
-    d: 24 * 60 * 60 * 1000,
-    w: 7 * 24 * 60 * 60 * 1000,
-  }[unit];
-  return value * unitMs;
-}
-
-function isCacheEntryValid(entry) {
-  return Boolean(entry && entry.expiresAt > Date.now());
-}
-
-function pruneCacheEntries(cache, maxEntries) {
+const pruneCache = (cache, maxEntries) => {
   const now = Date.now();
   for (const [key, entry] of cache.entries()) {
-    if (!entry?.expiresAt || entry.expiresAt <= now) {
-      cache.delete(key);
-    }
+    if (!entry?.expiresAt || entry.expiresAt <= now) cache.delete(key);
   }
-
   while (cache.size > maxEntries) {
     const firstKey = cache.keys().next().value;
-    if (firstKey === undefined) break;
-    cache.delete(firstKey);
+    if (firstKey) cache.delete(firstKey);
   }
-}
+};
 
-function cleanupCaches() {
-  pruneCacheEntries(marketSnapshotCache, CACHE_MAX_ENTRIES);
-  pruneCacheEntries(aiSignalCache, CACHE_MAX_ENTRIES);
-}
+const cleanupCaches = () => {
+  pruneCache(marketSnapshotCache, config.cacheMaxEntries);
+  pruneCache(aiSignalCache, config.cacheMaxEntries);
+};
 
-async function retry(fn, retries = 3, delay = 2000) {
+const retry = async (fn, retries = 3, delay = 2000) => {
   for (let i = 0; i < retries; i++) {
     try {
       return await fn();
     } catch (err) {
-      const last = i === retries - 1;
+      if (i === retries - 1) throw err;
       console.warn(`[WARN] Retry ${i + 1}/${retries}:`, err.message);
-      if (last) throw err;
       await sleep(delay);
     }
   }
-}
+};
 
-function shouldSendFonnteAlerts() {
-  return Boolean(FONNTE_ENABLED && FONNTE_TOKEN && FONNTE_TARGET);
-}
-
-function postFormUrlEncoded(urlString, formBody, token) {
-  return new Promise((resolve, reject) => {
-    const url = new URL(urlString);
-    const request = https.request(
-      {
-        method: "POST",
-        hostname: url.hostname,
-        port: url.port || 443,
-        path: `${url.pathname}${url.search}`,
-        headers: {
-          Authorization: token,
-          "Content-Type": "application/x-www-form-urlencoded",
-          "Content-Length": Buffer.byteLength(formBody),
-        },
-      },
-      (response) => {
-        let data = "";
-        response.on("data", (chunk) => {
-          data += chunk;
-        });
-        response.on("end", () => {
-          resolve({
-            statusCode: response.statusCode || 0,
-            body: data,
-          });
-        });
-      },
-    );
-
-    request.on("error", reject);
-    request.write(formBody);
-    request.end();
-  });
-}
-
-function formatTradeOpenAlert({
-  symbol,
-  signal,
-  entryPrice,
-  contracts,
-  slPrice,
-  tpPrice,
-  rr,
-  confidence,
-  strength,
-}) {
-  return [
-    "[TRADE OPEN]",
-    `Symbol: ${symbol}`,
-    `Side: ${signal}`,
-    `Entry: ${roundNumber(entryPrice, 10)}`,
-    `Contracts: ${roundNumber(contracts, 8)}`,
-    `SL: ${roundNumber(slPrice, 10)}`,
-    `TP: ${roundNumber(tpPrice, 10)}`,
-    `RR: ${roundNumber(rr, 2)}`,
-    `Confidence: ${confidence ?? "-"}`,
-    `Strength: ${strength || "-"}`,
-  ].join("\n");
-}
-
-function formatTradeCloseAlert(trade, realizedPnl, fee, netProfit) {
-  return [
-    "[TRADE CLOSE]",
-    `Symbol: ${trade.symbol || "-"}`,
-    `Side: ${String(trade.side || "-").toUpperCase()}`,
-    `Time: ${trade.datetime || new Date(trade.timestamp || Date.now()).toISOString()}`,
-    `Realized PnL: ${roundNumber(realizedPnl, 6)} USDT`,
-    `Fee: ${roundNumber(fee, 6)} USDT`,
-    `Net Profit: ${roundNumber(netProfit, 6)} USDT`,
-  ].join("\n");
-}
-
-async function sendFonnteAlert(message) {
-  if (!shouldSendFonnteAlerts()) {
-    if (FONNTE_ENABLED && !fonnteAlertWarningShown) {
-      fonnteAlertWarningShown = true;
-      console.warn(
-        "[FONNTE] Alert skipped: set FONNTE_TOKEN and FONNTE_TARGET to enable trade alerts",
-      );
-    }
-    return false;
-  }
-
-  try {
-    const formBody = new URLSearchParams({
-      target: FONNTE_TARGET,
-      message,
-      countryCode: String(FONNTE_COUNTRY_CODE),
-    }).toString();
-
-    const response = await postFormUrlEncoded(
-      FONNTE_API_URL,
-      formBody,
-      FONNTE_TOKEN,
-    );
-
-    let payload = null;
-    try {
-      payload = JSON.parse(response.body);
-    } catch {
-      payload = null;
-    }
-
-    const success =
-      response.statusCode >= 200 &&
-      response.statusCode < 300 &&
-      payload?.status !== false &&
-      payload?.Status !== false;
-
-    if (!success) {
-      console.warn(
-        `[FONNTE] Alert failed (${response.statusCode}): ${response.body || "empty response"}`,
-      );
-      return false;
-    }
-
-    console.log("[FONNTE] Trade alert sent");
-    return true;
-  } catch (err) {
-    console.warn(`[FONNTE] Alert error: ${err.message}`);
-    return false;
-  }
-}
-
-function getNextCandleDelay() {
-  const now = Date.now();
-  const next = Math.ceil(now / INTERVAL_MS) * INTERVAL_MS;
-  return next - now;
-}
-
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
-}
-
-function killSwitchActive() {
-  if (!KILL_SWITCH_ENABLED) return false;
-  if (STOP_TRADING) {
-    console.warn("[KILL] STOP_TRADING=true, new entries are disabled");
+const killSwitchActive = () => {
+  if (!config.killSwitchEnabled) return false;
+  if (config.stopTrading) {
+    console.warn("[KILL] STOP_TRADING=true, new entries disabled");
     return true;
   }
-  if (fs.existsSync(KILL_SWITCH_PATH)) {
-    console.warn(
-      `[KILL] ${KILL_SWITCH_FILE} exists, new entries are disabled`,
-    );
+  if (fs.existsSync(config.killSwitchPath)) {
+    console.warn(`[KILL] ${config.killSwitchFile} exists, new entries disabled`);
     return true;
   }
   return false;
-}
+};
 
-function roundNumber(value, digits = 6) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return null;
-  return Number(number.toFixed(digits));
-}
-
-function loadJsonFile(filePath, fallbackFactory, warningLabel) {
+const loadJsonFile = (filePath, fallbackFactory) => {
   if (!fs.existsSync(filePath)) return fallbackFactory();
   try {
     return JSON.parse(fs.readFileSync(filePath, "utf8"));
   } catch (err) {
-    console.warn(`[WARN] ${warningLabel} reset:`, err.message);
+    console.warn(`[WARN] Failed to load ${filePath}:`, err.message);
     return fallbackFactory();
   }
-}
+};
 
-async function syncTradesForSymbols({ since, onTrade, errorLabel }) {
-  let newTrades = 0;
-  for (const symbol of SCAN_SYMBOLS) {
-    try {
-      const trades = await retry(() =>
-        exchange.fetchMyTrades(symbol, since, PROFIT_SYNC_LIMIT),
-      );
-      const sortedTrades = trades
-        .filter((trade) => !trade.symbol || trade.symbol === symbol)
-        .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
+// ======================================================
+// ALERTS (Fonnte)
+// ======================================================
+const shouldSendFonnteAlerts = () => config.fonnteEnabled && config.fonnteToken && config.fonnteTarget;
 
-      for (const trade of sortedTrades) {
-        if (await onTrade(trade)) {
-          newTrades++;
-        }
-      }
-    } catch (err) {
-      console.warn(`${symbol} ${errorLabel} trade sync skipped: ${err.message}`);
+const postFormUrlEncoded = (urlString, formBody, token) => new Promise((resolve, reject) => {
+  const url = new URL(urlString);
+  const request = https.request({
+    method: "POST",
+    hostname: url.hostname,
+    port: url.port || 443,
+    path: `${url.pathname}${url.search}`,
+    headers: {
+      Authorization: token,
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Content-Length": Buffer.byteLength(formBody),
+    },
+  }, (response) => {
+    let data = "";
+    response.on("data", chunk => data += chunk);
+    response.on("end", () => resolve({ statusCode: response.statusCode || 0, body: data }));
+  });
+  request.on("error", reject);
+  request.write(formBody);
+  request.end();
+});
+
+const sendFonnteAlert = async (message) => {
+  if (!shouldSendFonnteAlerts()) {
+    if (config.fonnteEnabled && !fonnteAlertWarningShown) {
+      fonnteAlertWarningShown = true;
+      console.warn("[FONNTE] Alert skipped: missing FONNTE_TOKEN or FONNTE_TARGET");
     }
-  }
-  return newTrades;
-}
-
-function snapshotForExplainLog(snapshot) {
-  if (!snapshot) return null;
-  return {
-    price: roundNumber(snapshot.price, 10),
-    fundingRate: roundNumber(snapshot.fundingRate, 8),
-    trend: snapshot.trend,
-    ema20: roundNumber(snapshot.ema20, 10),
-    ema50: roundNumber(snapshot.ema50, 10),
-    ema20Slope: roundNumber(snapshot.ema20Slope, 10),
-    ema50Slope: roundNumber(snapshot.ema50Slope, 10),
-    emaGap: roundNumber(snapshot.emaGap, 4),
-    rsi: roundNumber(snapshot.rsi, 2),
-    atr: roundNumber(snapshot.atr, 10),
-    volumeChange: roundNumber(snapshot.volumeChange, 2),
-  };
-}
-
-function pruneAIExplainLogIfNeeded() {
-  if (!AI_EXPLAIN_LOG_MAX_LINES || AI_EXPLAIN_LOG_MAX_LINES <= 0) return;
-  if (!fs.existsSync(AI_EXPLAIN_LOG_PATH)) return;
-  const lines = fs
-    .readFileSync(AI_EXPLAIN_LOG_PATH, "utf8")
-    .split(/\r?\n/)
-    .filter(Boolean);
-  if (lines.length <= AI_EXPLAIN_LOG_MAX_LINES) return;
-  fs.writeFileSync(
-    AI_EXPLAIN_LOG_PATH,
-    `${lines.slice(-AI_EXPLAIN_LOG_MAX_LINES).join("\n")}\n`,
-  );
-}
-
-function logAIExplainDecision(event) {
-  if (!AI_EXPLAIN_LOG_ENABLED) return;
-  try {
-    const entry = {
-      timestamp: new Date().toISOString(),
-      bot: "smart-binance-ai-futures-bot",
-      timeframe: TIMEFRAME,
-      htfTimeframe: HTF_TIMEFRAME,
-      longOnly: LONG_ONLY,
-      minAiConfidence: MIN_AI_CONFIDENCE,
-      allowedAiStrengths: ALLOWED_AI_STRENGTHS,
-      minRR: MIN_RR,
-      ...event,
-      snapshot: snapshotForExplainLog(event.snapshot),
-      htfSnapshot: snapshotForExplainLog(event.htfSnapshot),
-    };
-    fs.appendFileSync(AI_EXPLAIN_LOG_PATH, `${JSON.stringify(entry)}\n`);
-    pruneAIExplainLogIfNeeded();
-  } catch (err) {
-    console.warn(`[WARN] Failed to write AI explain log: ${err.message}`);
-  }
-}
-
-function createEmptyProfitLedger() {
-  const now = new Date().toISOString();
-  return {
-    symbol: SCAN_SYMBOLS.join(","),
-    startedAt: now,
-    updatedAt: now,
-    lastTradeTimestamp: Date.now(),
-    processedTradeIds: [],
-    totals: {
-      grossRealizedPnl: 0,
-      fees: 0,
-      netProfit: 0,
-      tradeCount: 0,
-      profitEvents: 0,
-      lossEvents: 0,
-    },
-    recentTrades: [],
-  };
-}
-
-function normalizeProfitLedger(ledger) {
-  const empty = createEmptyProfitLedger();
-  return {
-    ...empty,
-    ...ledger,
-    symbol: ledger.symbol || SCAN_SYMBOLS.join(","),
-    processedTradeIds: Array.isArray(ledger.processedTradeIds)
-      ? ledger.processedTradeIds
-      : [],
-    totals: {
-      ...empty.totals,
-      ...(ledger.totals || {}),
-    },
-    recentTrades: Array.isArray(ledger.recentTrades) ? ledger.recentTrades : [],
-  };
-}
-
-function loadProfitLedger() {
-  return normalizeProfitLedger(
-    loadJsonFile(
-      PROFIT_LEDGER_PATH,
-      createEmptyProfitLedger,
-      "Profit ledger",
-    ),
-  );
-}
-
-function saveProfitLedger() {
-  profitLedger.updatedAt = new Date().toISOString();
-  fs.writeFileSync(PROFIT_LEDGER_PATH, JSON.stringify(profitLedger, null, 2));
-}
-
-function tradeIdOf(trade) {
-  return String(
-    trade.id ||
-      trade.info?.id ||
-      `${trade.timestamp}-${trade.order}-${trade.side}-${trade.amount}-${trade.price}`,
-  );
-}
-
-function numberFromTrade(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : 0;
-}
-
-function getRealizedPnl(trade) {
-  return numberFromTrade(
-    trade.info?.realizedPnl || trade.info?.realizedProfit || trade.realizedPnl,
-  );
-}
-
-function getTradeFee(trade) {
-  const feeCost = numberFromTrade(trade.fee?.cost);
-  if (feeCost > 0) return feeCost;
-  return Math.abs(numberFromTrade(trade.info?.commission));
-}
-
-function applyTradeToProfitLedger(trade) {
-  const id = tradeIdOf(trade);
-  if (profitLedger.processedTradeIds.includes(id)) {
     return false;
   }
+  try {
+    const formBody = new URLSearchParams({
+      target: config.fonnteTarget,
+      message,
+      countryCode: String(config.fonnteCountryCode),
+    }).toString();
+    const response = await postFormUrlEncoded(config.fonnteApiUrl, formBody, config.fonnteToken);
+    let payload = null;
+    try { payload = JSON.parse(response.body); } catch { /* ignore */ }
+    const success = response.statusCode >= 200 && response.statusCode < 300 && payload?.status !== false && payload?.Status !== false;
+    if (!success) console.warn(`[FONNTE] Alert failed (${response.statusCode}): ${response.body || "empty"}`);
+    else console.log("[FONNTE] Trade alert sent");
+    return success;
+  } catch (err) {
+    console.warn(`[FONNTE] Alert error: ${err.message}`);
+    return false;
+  }
+};
+
+const formatTradeOpenAlert = ({ symbol, signal, entryPrice, contracts, slPrice, tpPrice, rr, confidence, strength }) =>
+  `[TRADE OPEN]\nSymbol: ${symbol}\nSide: ${signal}\nEntry: ${roundNumber(entryPrice, 10)}\nContracts: ${roundNumber(contracts, 8)}\nSL: ${roundNumber(slPrice, 10)}\nTP: ${roundNumber(tpPrice, 10)}\nRR: ${roundNumber(rr, 2)}\nConfidence: ${confidence ?? "-"}\nStrength: ${strength || "-"}`;
+
+const formatTradeCloseAlert = (trade, realizedPnl, fee, netProfit) =>
+  `[TRADE CLOSE]\nSymbol: ${trade.symbol || "-"}\nSide: ${String(trade.side || "-").toUpperCase()}\nTime: ${trade.datetime || new Date(trade.timestamp || Date.now()).toISOString()}\nRealized PnL: ${roundNumber(realizedPnl, 6)} USDT\nFee: ${roundNumber(fee, 6)} USDT\nNet Profit: ${roundNumber(netProfit, 6)} USDT`;
+
+// ======================================================
+// PROFIT LEDGER
+// ======================================================
+let profitLedger;
+
+const createEmptyProfitLedger = () => ({
+  symbol: config.scanSymbols.join(","),
+  startedAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+  lastTradeTimestamp: Date.now(),
+  processedTradeIds: [],
+  totals: { grossRealizedPnl: 0, fees: 0, netProfit: 0, tradeCount: 0, profitEvents: 0, lossEvents: 0 },
+  recentTrades: [],
+});
+
+const normalizeProfitLedger = (ledger) => ({ ...createEmptyProfitLedger(), ...ledger, processedTradeIds: Array.isArray(ledger?.processedTradeIds) ? ledger.processedTradeIds : [], totals: { ...createEmptyProfitLedger().totals, ...(ledger?.totals || {}) }, recentTrades: Array.isArray(ledger?.recentTrades) ? ledger.recentTrades : [] });
+
+const loadProfitLedger = () => normalizeProfitLedger(loadJsonFile(config.profitLedgerPath, createEmptyProfitLedger));
+const saveProfitLedger = () => { profitLedger.updatedAt = new Date().toISOString(); fs.writeFileSync(config.profitLedgerPath, JSON.stringify(profitLedger, null, 2)); };
+
+const tradeIdOf = (trade) => String(trade.id || trade.info?.id || `${trade.timestamp}-${trade.order}-${trade.side}-${trade.amount}-${trade.price}`);
+const numberFromTrade = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
+const getRealizedPnl = (trade) => numberFromTrade(trade.info?.realizedPnl || trade.info?.realizedProfit || trade.realizedPnl);
+const getTradeFee = (trade) => { const fee = numberFromTrade(trade.fee?.cost); return fee > 0 ? fee : Math.abs(numberFromTrade(trade.info?.commission)); };
+
+const applyTradeToProfitLedger = (trade) => {
+  const id = tradeIdOf(trade);
+  if (profitLedger.processedTradeIds.includes(id)) return false;
   const realizedPnl = getRealizedPnl(trade);
   const fee = getTradeFee(trade);
   const netProfit = realizedPnl - fee;
   profitLedger.processedTradeIds.push(id);
   profitLedger.processedTradeIds = profitLedger.processedTradeIds.slice(-1000);
-  profitLedger.lastTradeTimestamp = Math.max(
-    Number(profitLedger.lastTradeTimestamp || 0),
-    Number(trade.timestamp || 0),
-  );
+  profitLedger.lastTradeTimestamp = Math.max(Number(profitLedger.lastTradeTimestamp || 0), Number(trade.timestamp || 0));
   profitLedger.totals.grossRealizedPnl += realizedPnl;
   profitLedger.totals.fees += fee;
   profitLedger.totals.netProfit += netProfit;
@@ -639,440 +306,247 @@ function applyTradeToProfitLedger(trade) {
   if (netProfit > 0) profitLedger.totals.profitEvents++;
   if (netProfit < 0) profitLedger.totals.lossEvents++;
   profitLedger.recentTrades.unshift({
-    id,
-    symbol: trade.symbol,
-    time:
-      trade.datetime || new Date(trade.timestamp || Date.now()).toISOString(),
-    side: trade.side,
-    price: numberFromTrade(trade.price),
-    amount: numberFromTrade(trade.amount),
-    realizedPnl,
-    fee,
-    netProfit,
-    order: trade.order || trade.info?.orderId,
+    id, symbol: trade.symbol, time: trade.datetime || new Date(trade.timestamp || Date.now()).toISOString(),
+    side: trade.side, price: numberFromTrade(trade.price), amount: numberFromTrade(trade.amount),
+    realizedPnl, fee, netProfit, order: trade.order || trade.info?.orderId,
   });
   profitLedger.recentTrades = profitLedger.recentTrades.slice(0, 30);
   return true;
-}
+};
 
-function logProfitSummary(newTrades = 0) {
-  const totals = profitLedger.totals;
-  console.log(`
-[PROFIT] Summary
+const syncTradesForSymbols = async ({ since, onTrade }) => {
+  let newTrades = 0;
+  for (const symbol of config.scanSymbols) {
+    try {
+      const trades = await retry(() => exchange.fetchMyTrades(symbol, since, config.profitSyncLimit));
+      const sorted = trades.filter(t => !t.symbol || t.symbol === symbol).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+      for (const trade of sorted) if (await onTrade(trade)) newTrades++;
+    } catch (err) {
+      console.warn(`${symbol} trade sync skipped: ${err.message}`);
+    }
+  }
+  return newTrades;
+};
 
-New trades synced:
-${newTrades}
+const syncProfitLedger = async () => {
+  if (!config.profitTrackerEnabled) return;
+  try {
+    const since = profitLedger.lastTradeTimestamp ? profitLedger.lastTradeTimestamp - 1 : undefined;
+    const newTrades = await syncTradesForSymbols({ since, onTrade: applyTradeToProfitLedger });
+    if (newTrades > 0) saveProfitLedger();
+    const totals = profitLedger.totals;
+    console.log(`\n[PROFIT] Summary\nNew trades: ${newTrades}\nGross PnL: ${totals.grossRealizedPnl.toFixed(6)} USDT\nFees: ${totals.fees.toFixed(6)} USDT\nNet Profit: ${totals.netProfit.toFixed(6)} USDT\nWin/Loss: ${totals.profitEvents}/${totals.lossEvents}\n`);
+  } catch (err) {
+    console.warn("[WARN] Profit sync skipped:", err.message);
+  }
+};
 
-Gross realized PnL:
-${totals.grossRealizedPnl.toFixed(6)} USDT
+// ======================================================
+// RISK STATE
+// ======================================================
+let riskState;
 
-Fees:
-${totals.fees.toFixed(6)} USDT
+const getUtcDayKey = (timestamp = Date.now()) => new Date(timestamp).toISOString().slice(0, 10);
+const createEmptyRiskState = () => ({ dayKey: null, dayStartEquity: 0, dailyNetPnL: 0, consecutiveLosses: 0, processedTradeIds: [], symbolCooldowns: {}, scanRotationIndex: 0, lastSyncedAt: 0, updatedAt: new Date().toISOString() });
+const normalizeRiskState = (state) => ({ ...createEmptyRiskState(), ...state, processedTradeIds: Array.isArray(state?.processedTradeIds) ? state.processedTradeIds : [], symbolCooldowns: state?.symbolCooldowns && typeof state.symbolCooldowns === "object" ? state.symbolCooldowns : {}, scanRotationIndex: Number.isFinite(Number(state?.scanRotationIndex)) ? Math.max(0, Number(state.scanRotationIndex)) : 0 });
+const loadRiskState = () => normalizeRiskState(loadJsonFile(config.riskStatePath, createEmptyRiskState));
+const saveRiskState = () => { riskState.updatedAt = new Date().toISOString(); fs.writeFileSync(config.riskStatePath, JSON.stringify(riskState, null, 2)); };
 
-TOTAL NET PROFIT:
-${totals.netProfit.toFixed(6)} USDT
+const setSymbolCooldown = (symbol, minutes, reason) => {
+  if (!config.symbolCooldownEnabled || minutes <= 0 || !symbol) return;
+  riskState.symbolCooldowns[symbol] = { until: Date.now() + minutes * 60 * 1000, reason, updatedAt: new Date().toISOString() };
+  console.warn(`[COOLDOWN] ${symbol} paused for ${minutes}m: ${reason}`);
+};
 
-Profit/loss events:
-${totals.profitEvents}/${totals.lossEvents}
-`);
-}
-
-function getUtcDayKey(timestamp = Date.now()) {
-  return new Date(timestamp).toISOString().slice(0, 10);
-}
-
-function createEmptyRiskState() {
-  const now = new Date().toISOString();
-  return {
-    dayKey: null,
-    dayStartEquity: 0,
-    dailyNetPnL: 0,
-    consecutiveLosses: 0,
-    processedTradeIds: [],
-    symbolCooldowns: {},
-    scanRotationIndex: 0,
-    lastSyncedAt: 0,
-    updatedAt: now,
-  };
-}
-
-function normalizeRiskState(state) {
-  const empty = createEmptyRiskState();
-  return {
-    ...empty,
-    ...state,
-    processedTradeIds: Array.isArray(state?.processedTradeIds)
-      ? state.processedTradeIds
-      : [],
-    symbolCooldowns:
-      state?.symbolCooldowns && typeof state.symbolCooldowns === "object"
-        ? state.symbolCooldowns
-        : {},
-    scanRotationIndex: Number.isFinite(Number(state?.scanRotationIndex))
-      ? Math.max(0, Number(state.scanRotationIndex))
-      : 0,
-  };
-}
-
-function loadRiskState() {
-  return normalizeRiskState(
-    loadJsonFile(RISK_STATE_PATH, createEmptyRiskState, "Risk state"),
-  );
-}
-
-function saveRiskState() {
-  riskState.updatedAt = new Date().toISOString();
-  fs.writeFileSync(RISK_STATE_PATH, JSON.stringify(riskState, null, 2));
-}
-
-function setSymbolCooldown(symbol, minutes, reason) {
-  if (!SYMBOL_COOLDOWN_ENABLED || minutes <= 0 || !symbol) return;
-  riskState.symbolCooldowns = riskState.symbolCooldowns || {};
-  const until = Date.now() + minutes * 60 * 1000;
-  riskState.symbolCooldowns[symbol] = {
-    until,
-    reason,
-    updatedAt: new Date().toISOString(),
-  };
-  console.warn(
-    `[COOLDOWN] ${symbol} paused for ${minutes}m: ${reason}`,
-  );
-}
-
-function cleanupSymbolCooldowns() {
-  if (!riskState.symbolCooldowns) return false;
-  const now = Date.now();
+const cleanupSymbolCooldowns = () => {
   let changed = false;
-  for (const [symbol, cooldown] of Object.entries(riskState.symbolCooldowns)) {
+  const now = Date.now();
+  for (const [symbol, cooldown] of Object.entries(riskState.symbolCooldowns || {})) {
     if (!cooldown?.until || Number(cooldown.until) <= now) {
       delete riskState.symbolCooldowns[symbol];
       changed = true;
     }
   }
   return changed;
-}
+};
 
-function getRotatedScanSymbols() {
-  if (!Array.isArray(SCAN_SYMBOLS) || SCAN_SYMBOLS.length === 0) return [];
-  const total = SCAN_SYMBOLS.length;
-  const batchSize = Math.min(SCAN_ROTATION_BATCH_SIZE, total);
-  const start = riskState.scanRotationIndex % total;
-  const rotated = [];
-  for (let i = 0; i < batchSize; i++) {
-    rotated.push(SCAN_SYMBOLS[(start + i) % total]);
-  }
-  riskState.scanRotationIndex = (start + batchSize) % total;
-  return rotated;
-}
-
-function symbolCooldownAllowsTrading(symbol) {
-  if (!SYMBOL_COOLDOWN_ENABLED) return true;
+const symbolCooldownAllowsTrading = (symbol) => {
+  if (!config.symbolCooldownEnabled) return true;
   const cooldown = riskState.symbolCooldowns?.[symbol];
   if (!cooldown) return true;
-  const remainingMs = Number(cooldown.until || 0) - Date.now();
-  if (remainingMs <= 0) {
+  if (Number(cooldown.until) <= Date.now()) {
     delete riskState.symbolCooldowns[symbol];
     saveRiskState();
     return true;
   }
-  const remainingMinutes = Math.ceil(remainingMs / 60000);
-  console.log(
-    `[COOLDOWN] ${symbol} skipped for ${remainingMinutes}m: ${cooldown.reason}`,
-  );
+  console.log(`[COOLDOWN] ${symbol} skipped: ${cooldown.reason}`);
   return false;
-}
+};
 
-async function getAccountEquity() {
+const getRotatedScanSymbols = () => {
+  if (!config.scanSymbols.length) return [];
+  const total = config.scanSymbols.length;
+  const batchSize = Math.min(config.scanRotationBatchSize, total);
+  const start = riskState.scanRotationIndex % total;
+  const rotated = [];
+  for (let i = 0; i < batchSize; i++) rotated.push(config.scanSymbols[(start + i) % total]);
+  riskState.scanRotationIndex = (start + batchSize) % total;
+  return rotated;
+};
+
+const getAccountEquity = async () => {
   const balance = await retry(() => exchange.fetchBalance());
   return Number(balance?.USDT?.total || balance?.USDT?.free || 0);
-}
+};
 
-function isRealizedTrade(trade) {
-  const realizedPnl = getRealizedPnl(trade);
-  return Math.abs(realizedPnl) > 0.0000001;
-}
+const isRealizedTrade = (trade) => Math.abs(getRealizedPnl(trade)) > 0.0000001;
 
-async function applyTradeToRiskState(trade) {
+const applyTradeToRiskState = async (trade) => {
   const id = tradeIdOf(trade);
-  if (riskState.processedTradeIds.includes(id)) {
-    return false;
-  }
-
+  if (riskState.processedTradeIds.includes(id)) return false;
   const realizedPnl = getRealizedPnl(trade);
   const fee = getTradeFee(trade);
   const netProfit = realizedPnl - fee;
-
   riskState.processedTradeIds.push(id);
   riskState.processedTradeIds = riskState.processedTradeIds.slice(-1000);
-  riskState.lastSyncedAt = Math.max(
-    Number(riskState.lastSyncedAt || 0),
-    Number(trade.timestamp || 0),
-  );
+  riskState.lastSyncedAt = Math.max(Number(riskState.lastSyncedAt || 0), Number(trade.timestamp || 0));
   riskState.dailyNetPnL += netProfit;
-
   if (isRealizedTrade(trade)) {
     if (netProfit < 0) {
       riskState.consecutiveLosses += 1;
-      setSymbolCooldown(
-        trade.symbol,
-        SYMBOL_COOLDOWN_MINUTES,
-        `realized loss ${netProfit.toFixed(6)} USDT`,
-      );
+      setSymbolCooldown(trade.symbol, config.symbolCooldownMinutes, `realized loss ${netProfit.toFixed(6)} USDT`);
     } else if (netProfit > 0) {
       riskState.consecutiveLosses = 0;
     }
-
-    await sendFonnteAlert(
-      formatTradeCloseAlert(trade, realizedPnl, fee, netProfit),
-    );
+    await sendFonnteAlert(formatTradeCloseAlert(trade, realizedPnl, fee, netProfit));
   }
-
   return true;
-}
+};
 
-function getDailyLossLimit() {
-  if (riskState.dayStartEquity <= 0) {
-    return MAX_DAILY_LOSS_USDT > 0 ? MAX_DAILY_LOSS_USDT : Infinity;
-  }
-  const percentLimit = riskState.dayStartEquity * MAX_DAILY_LOSS_PCT;
-  if (MAX_DAILY_LOSS_USDT > 0) {
-    return Math.min(percentLimit, MAX_DAILY_LOSS_USDT);
-  }
-  return percentLimit;
-}
+const getDailyLossLimit = () => {
+  if (riskState.dayStartEquity <= 0) return config.maxDailyLossUsdt > 0 ? config.maxDailyLossUsdt : Infinity;
+  const percentLimit = riskState.dayStartEquity * config.maxDailyLossPct;
+  return config.maxDailyLossUsdt > 0 ? Math.min(percentLimit, config.maxDailyLossUsdt) : percentLimit;
+};
 
-function resetDailyRiskState(dayKey, equity) {
-  riskState = {
-    ...createEmptyRiskState(),
-    dayKey,
-    dayStartEquity: equity,
-  };
-  saveRiskState();
-}
+const resetDailyRiskState = (dayKey, equity) => { riskState = { ...createEmptyRiskState(), dayKey, dayStartEquity: equity }; saveRiskState(); };
+const ensureDailyRiskState = (dayKey, equity) => {
+  if (riskState.dayKey !== dayKey) resetDailyRiskState(dayKey, equity);
+  else if (!riskState.dayStartEquity && equity > 0) { riskState.dayStartEquity = equity; saveRiskState(); }
+};
 
-function ensureDailyRiskState(dayKey, equity) {
-  if (riskState.dayKey !== dayKey) {
-    resetDailyRiskState(dayKey, equity);
-    return;
-  }
-  if (!riskState.dayStartEquity && equity > 0) {
-    riskState.dayStartEquity = equity;
-    saveRiskState();
-  }
-}
-
-async function syncRiskState() {
+const syncRiskState = async () => {
   try {
     const equity = await getAccountEquity();
     const dayKey = getUtcDayKey();
     ensureDailyRiskState(dayKey, equity);
-
     const dayStart = new Date(`${dayKey}T00:00:00.000Z`).getTime();
-    const since = Math.max(
-      dayStart,
-      Number(riskState.lastSyncedAt || 0) > 0
-        ? Number(riskState.lastSyncedAt) - 1
-        : dayStart,
-    );
-
-    const newTrades = await syncTradesForSymbols({
-      since,
-      onTrade: applyTradeToRiskState,
-      errorLabel: "risk",
-    });
-
-    if (newTrades > 0) {
-      saveRiskState();
-    }
-
-    console.log(`
-[RISK] Summary
-
-Day equity start:
-${riskState.dayStartEquity.toFixed(2)} USDT
-
-Daily net PnL:
-${riskState.dailyNetPnL.toFixed(2)} USDT
-
-Consecutive losses:
-${riskState.consecutiveLosses}
-`);
+    const since = Math.max(dayStart, riskState.lastSyncedAt > 0 ? riskState.lastSyncedAt - 1 : dayStart);
+    const newTrades = await syncTradesForSymbols({ since, onTrade: applyTradeToRiskState });
+    if (newTrades > 0) saveRiskState();
+    console.log(`\n[RISK] Summary\nDay equity start: ${riskState.dayStartEquity.toFixed(2)} USDT\nDaily net PnL: ${riskState.dailyNetPnL.toFixed(2)} USDT\nConsecutive losses: ${riskState.consecutiveLosses}\n`);
   } catch (err) {
     console.warn("[WARN] Risk sync skipped:", err.message);
   }
-}
+};
 
-function riskGateAllowsTrading() {
-  if (cleanupSymbolCooldowns()) {
-    saveRiskState();
-  }
-
+const riskGateAllowsTrading = () => {
+  if (cleanupSymbolCooldowns()) saveRiskState();
   const dailyLossLimit = getDailyLossLimit();
   if (dailyLossLimit > 0 && riskState.dailyNetPnL <= -dailyLossLimit) {
-    console.warn(
-      `[BLOCK] Daily loss limit reached: ${riskState.dailyNetPnL.toFixed(2)} / -${dailyLossLimit.toFixed(2)} USDT`,
-    );
+    console.warn(`[BLOCK] Daily loss limit reached: ${riskState.dailyNetPnL.toFixed(2)} / -${dailyLossLimit.toFixed(2)} USDT`);
     return false;
   }
-
-  if (
-    MAX_CONSECUTIVE_LOSSES > 0 &&
-    riskState.consecutiveLosses >= MAX_CONSECUTIVE_LOSSES
-  ) {
-    console.warn(
-      `[BLOCK] Consecutive loss limit reached: ${riskState.consecutiveLosses}/${MAX_CONSECUTIVE_LOSSES}`,
-    );
+  if (config.maxConsecutiveLosses > 0 && riskState.consecutiveLosses >= config.maxConsecutiveLosses) {
+    console.warn(`[BLOCK] Consecutive loss limit reached: ${riskState.consecutiveLosses}/${config.maxConsecutiveLosses}`);
     return false;
   }
-
   return true;
-}
+};
 
-function circuitBreakerAllowsTrading() {
-  if (!CIRCUIT_BREAKER_ENABLED) return true;
-  const remainingMs = circuitBreakerState.pausedUntil - Date.now();
-  if (remainingMs <= 0) return true;
-
-  const remainingMinutes = Math.ceil(remainingMs / 60000);
-  console.warn(
-    `[CIRCUIT] Trading paused for ${remainingMinutes}m after ${circuitBreakerState.consecutiveErrors} consecutive errors. Last error: ${circuitBreakerState.lastError}`,
-  );
+// ======================================================
+// CIRCUIT BREAKER
+// ======================================================
+const circuitBreakerAllowsTrading = () => {
+  if (!config.circuitBreakerEnabled) return true;
+  const remaining = circuitBreakerState.pausedUntil - Date.now();
+  if (remaining <= 0) return true;
+  console.warn(`[CIRCUIT] Trading paused for ${Math.ceil(remaining / 60000)}m after ${circuitBreakerState.consecutiveErrors} errors. Last: ${circuitBreakerState.lastError}`);
   return false;
-}
+};
 
-function recordCircuitBreakerSuccess() {
-  if (!CIRCUIT_BREAKER_ENABLED) return;
-  if (circuitBreakerState.consecutiveErrors > 0) {
-    console.log("[CIRCUIT] Error streak cleared");
-  }
+const recordCircuitBreakerSuccess = () => {
+  if (!config.circuitBreakerEnabled) return;
+  if (circuitBreakerState.consecutiveErrors > 0) console.log("[CIRCUIT] Error streak cleared");
   circuitBreakerState.consecutiveErrors = 0;
   circuitBreakerState.lastError = null;
-}
+};
 
-function recordCircuitBreakerError(source, err) {
-  if (!CIRCUIT_BREAKER_ENABLED) return;
+const recordCircuitBreakerError = (source, err) => {
+  if (!config.circuitBreakerEnabled) return;
   circuitBreakerState.consecutiveErrors += 1;
   circuitBreakerState.lastError = `${source}: ${err?.message || err}`;
-
-  console.warn(
-    `[CIRCUIT] Error ${circuitBreakerState.consecutiveErrors}/${CIRCUIT_BREAKER_MAX_ERRORS} from ${source}: ${err?.message || err}`,
-  );
-
-  if (circuitBreakerState.consecutiveErrors >= CIRCUIT_BREAKER_MAX_ERRORS) {
-    circuitBreakerState.pausedUntil =
-      Date.now() + CIRCUIT_BREAKER_PAUSE_MINUTES * 60 * 1000;
-    console.warn(
-      `[CIRCUIT] Trading paused for ${CIRCUIT_BREAKER_PAUSE_MINUTES}m`,
-    );
+  console.warn(`[CIRCUIT] Error ${circuitBreakerState.consecutiveErrors}/${config.circuitBreakerMaxErrors} from ${source}: ${err?.message || err}`);
+  if (circuitBreakerState.consecutiveErrors >= config.circuitBreakerMaxErrors) {
+    circuitBreakerState.pausedUntil = Date.now() + config.circuitBreakerPauseMinutes * 60 * 1000;
+    console.warn(`[CIRCUIT] Trading paused for ${config.circuitBreakerPauseMinutes}m`);
   }
-}
-
-async function syncProfitLedger() {
-  if (!PROFIT_TRACKER_ENABLED) return;
-  try {
-    const since = profitLedger.lastTradeTimestamp
-      ? profitLedger.lastTradeTimestamp - 1
-      : undefined;
-    const newTrades = await syncTradesForSymbols({
-      since,
-      onTrade: applyTradeToProfitLedger,
-      errorLabel: "profit",
-    });
-    if (newTrades > 0) saveProfitLedger();
-    logProfitSummary(newTrades);
-  } catch (err) {
-    console.warn("[WARN] Profit sync skipped:", err.message);
-  }
-}
+};
 
 // ======================================================
-// MARKET
+// MARKET DATA & INDICATORS
 // ======================================================
-async function getMarketContext(symbol) {
-  const [ticker, funding] = await Promise.all([
-    retry(() => exchange.fetchTicker(symbol)),
-    retry(() => exchange.fetchFundingRate(symbol)),
-  ]);
-  return {
-    price: Number(ticker.last),
-    fundingRate: Number(funding.fundingRate || 0),
-  };
-}
+const parseTimeframeToMs = (timeframe) => {
+  const match = String(timeframe || "").toLowerCase().match(/^(\d+)(m|h|d|w)$/);
+  if (!match) return config.intervalMs;
+  const value = Number(match[1]);
+  const unit = match[2];
+  const unitMs = { m: 60 * 1000, h: 60 * 60 * 1000, d: 24 * 60 * 60 * 1000, w: 7 * 24 * 60 * 60 * 1000 }[unit];
+  return value * unitMs;
+};
 
-// ======================================================
-// INDICATORS
-// ======================================================
-function calculateEMA(data, period) {
+const calculateEMA = (data, period) => {
   const k = 2 / (period + 1);
   let ema = data[0];
-  for (let i = 1; i < data.length; i++) {
-    ema = data[i] * k + ema * (1 - k);
-  }
+  for (let i = 1; i < data.length; i++) ema = data[i] * k + ema * (1 - k);
   return ema;
-}
+};
 
-function calculateRSI(closes, period = 14) {
-  let gains = 0;
-  let losses = 0;
+const calculateRSI = (closes, period = 14) => {
+  let gains = 0, losses = 0;
   for (let i = 1; i <= period; i++) {
     const diff = closes[i] - closes[i - 1];
     if (diff >= 0) gains += diff;
     else losses += Math.abs(diff);
   }
   if (losses === 0) return 100;
-  const rs = gains / losses;
-  return 100 - 100 / (1 + rs);
-}
+  return 100 - 100 / (1 + gains / losses);
+};
 
-function calculateATR(ohlcv) {
-  let trs = [];
+const calculateATR = (ohlcv) => {
+  const trs = [];
   for (let i = 1; i < ohlcv.length; i++) {
     const prevClose = ohlcv[i - 1][4];
     const high = ohlcv[i][2];
     const low = ohlcv[i][3];
-    const tr = Math.max(
-      high - low,
-      Math.abs(high - prevClose),
-      Math.abs(low - prevClose),
-    );
-    trs.push(tr);
+    trs.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
   }
   return trs.reduce((a, b) => a + b, 0) / trs.length;
-}
+};
 
-// ======================================================
-// SNAPSHOT
-// ======================================================
-async function getMarketSnapshot(symbol, context, timeframe = TIMEFRAME) {
-  const cacheKey = `${symbol}|${timeframe}|${LOOKBACK_CANDLES}`;
-  if (MARKET_SNAPSHOT_CACHE_ENABLED) {
+const getMarketContext = async (symbol) => {
+  const [ticker, funding] = await Promise.all([retry(() => exchange.fetchTicker(symbol)), retry(() => exchange.fetchFundingRate(symbol))]);
+  return { price: Number(ticker.last), fundingRate: Number(funding.fundingRate || 0) };
+};
+
+const getMarketSnapshot = async (symbol, context, timeframe = config.timeframe) => {
+  const cacheKey = `${symbol}|${timeframe}|${config.lookbackCandles}`;
+  if (config.marketSnapshotCacheEnabled) {
     const cached = marketSnapshotCache.get(cacheKey);
-    if (isCacheEntryValid(cached)) {
-      return {
-        price: context.price,
-        fundingRate: context.fundingRate,
-        candleTimestamp: cached.snapshot.candleTimestamp,
-        expiresAt: cached.snapshot.expiresAt,
-        ema20: cached.snapshot.ema20,
-        ema50: cached.snapshot.ema50,
-        ema20Slope: cached.snapshot.ema20Slope,
-        ema50Slope: cached.snapshot.ema50Slope,
-        emaGap:
-          (Math.abs(cached.snapshot.ema20 - cached.snapshot.ema50) /
-            context.price) *
-          100,
-        rsi: cached.snapshot.rsi,
-        atr: cached.snapshot.atr,
-        volumeChange: cached.snapshot.volumeChange,
-        trend: cached.snapshot.trend,
-      };
-    }
+    if (isCacheValid(cached)) return { price: context.price, fundingRate: context.fundingRate, ...cached.snapshot };
   }
-
-  const ohlcv = await retry(() =>
-    exchange.fetchOHLCV(symbol, timeframe, undefined, LOOKBACK_CANDLES),
-  );
-  const closes = ohlcv.map((c) => c[4]);
+  const ohlcv = await retry(() => exchange.fetchOHLCV(symbol, timeframe, undefined, config.lookbackCandles));
+  const closes = ohlcv.map(c => c[4]);
   const latestCandle = ohlcv[ohlcv.length - 1] || [];
   const candleTimestamp = Number(latestCandle[0] || 0);
   const timeframeMs = parseTimeframeToMs(timeframe);
@@ -1081,1133 +555,456 @@ async function getMarketSnapshot(symbol, context, timeframe = TIMEFRAME) {
   const ema50 = calculateEMA(closes.slice(-50), 50);
   const prevEma20 = calculateEMA(closes.slice(-21, -1), 20);
   const prevEma50 = calculateEMA(closes.slice(-51, -1), 50);
-  const ema20Slope = ema20 - prevEma20;
-  const ema50Slope = ema50 - prevEma50;
-  const rsi = calculateRSI(closes.slice(-15));
-  const atr = calculateATR(ohlcv.slice(-15));
-  const latestVolume = ohlcv[ohlcv.length - 1][5];
-  const prevVolume = ohlcv[ohlcv.length - 2][5];
-  const volumeChange = prevVolume
-    ? ((latestVolume - prevVolume) / prevVolume) * 100
-    : 0;
-  const trend =
-    ema20 > ema50 ? "UPTREND" : ema20 < ema50 ? "DOWNTREND" : "SIDEWAYS";
-  const emaGap = (Math.abs(ema20 - ema50) / context.price) * 100;
-  const baseSnapshot = {
-    candleTimestamp,
-    expiresAt,
-    ema20,
-    ema50,
-    ema20Slope,
-    ema50Slope,
-    emaGap,
-    rsi,
-    atr,
-    volumeChange,
-    trend,
+  const snapshotBase = {
+    candleTimestamp, expiresAt,
+    ema20, ema50,
+    ema20Slope: ema20 - prevEma20,
+    ema50Slope: ema50 - prevEma50,
+    emaGap: (Math.abs(ema20 - ema50) / context.price) * 100,
+    rsi: calculateRSI(closes.slice(-15)),
+    atr: calculateATR(ohlcv.slice(-15)),
+    volumeChange: (ohlcv[ohlcv.length - 1][5] / (ohlcv[ohlcv.length - 2]?.[5] || 1) - 1) * 100,
+    trend: ema20 > ema50 ? "UPTREND" : ema20 < ema50 ? "DOWNTREND" : "SIDEWAYS",
   };
-  const snapshot = {
-    price: context.price,
-    fundingRate: context.fundingRate,
-    ...baseSnapshot,
-  };
-  if (MARKET_SNAPSHOT_CACHE_ENABLED) {
-    marketSnapshotCache.set(cacheKey, {
-      snapshot: baseSnapshot,
-      expiresAt,
-    });
+  const snapshot = { price: context.price, fundingRate: context.fundingRate, ...snapshotBase };
+  if (config.marketSnapshotCacheEnabled) {
+    marketSnapshotCache.set(cacheKey, { snapshot: snapshotBase, expiresAt });
     cleanupCaches();
   }
   return snapshot;
-}
+};
 
 // ======================================================
 // MARKET REGIME
 // ======================================================
-function detectMarketRegime(snapshot, htfSnapshot) {
+const detectMarketRegime = (snapshot, htfSnapshot) => {
   const atrPct = snapshot.price > 0 ? snapshot.atr / snapshot.price : 0;
-  const bullishAlignment =
-    snapshot.trend === "UPTREND" &&
-    htfSnapshot.trend === "UPTREND" &&
-    snapshot.ema20Slope > 0 &&
-    htfSnapshot.ema20Slope > 0 &&
-    snapshot.volumeChange >= MIN_VOLUME_CHANGE_FOR_TREND;
-  const bearishAlignment =
-    snapshot.trend === "DOWNTREND" &&
-    htfSnapshot.trend === "DOWNTREND" &&
-    snapshot.ema20Slope < 0 &&
-    htfSnapshot.ema20Slope < 0 &&
-    snapshot.volumeChange >= MIN_VOLUME_CHANGE_FOR_TREND;
-  const sideways =
-    snapshot.emaGap < SIDEWAYS_EMA_GAP ||
-    (Math.abs(snapshot.ema20Slope) < snapshot.atr * 0.02 &&
-      Math.abs(snapshot.ema50Slope) < snapshot.atr * 0.02 &&
-      Math.abs(htfSnapshot.ema20Slope) < htfSnapshot.atr * 0.02) ||
-    (snapshot.rsi >= 45 && snapshot.rsi <= 55 && atrPct < MIN_ATR_PCT);
-  const volatile = atrPct >= MAX_ATR_PCT;
+  const bullishAlignment = snapshot.trend === "UPTREND" && htfSnapshot.trend === "UPTREND" && snapshot.ema20Slope > 0 && htfSnapshot.ema20Slope > 0 && snapshot.volumeChange >= config.minVolumeChangeForTrend;
+  const bearishAlignment = snapshot.trend === "DOWNTREND" && htfSnapshot.trend === "DOWNTREND" && snapshot.ema20Slope < 0 && htfSnapshot.ema20Slope < 0 && snapshot.volumeChange >= config.minVolumeChangeForTrend;
+  const sideways = snapshot.emaGap < config.sidewaysEmaGap || (Math.abs(snapshot.ema20Slope) < snapshot.atr * 0.02 && Math.abs(snapshot.ema50Slope) < snapshot.atr * 0.02 && Math.abs(htfSnapshot.ema20Slope) < htfSnapshot.atr * 0.02) || (snapshot.rsi >= 45 && snapshot.rsi <= 55 && atrPct < config.minAtrPct);
+  const volatile = atrPct >= config.maxAtrPct;
+  if (sideways) return { regime: "CHOPPY", allow: false, reason: "Ranging or too weak", atrPct };
+  if (volatile && !bullishAlignment && !bearishAlignment) return { regime: "HIGH_VOLATILITY", allow: false, reason: "Elevated ATR without clean direction", atrPct };
+  if (bullishAlignment) return { regime: "TRENDING_UP", allow: true, reason: "Bullish alignment", atrPct };
+  if (bearishAlignment) return { regime: "TRENDING_DOWN", allow: true, reason: "Bearish alignment", atrPct };
+  return { regime: volatile ? "VOLATILE_MIXED" : "MIXED", allow: false, reason: "Unclean trend structure", atrPct };
+};
 
-  if (sideways) {
-    return {
-      regime: "CHOPPY",
-      allow: false,
-      reason: "Market is ranging or too weak for trend execution.",
-      atrPct,
-    };
-  }
-
-  if (volatile && !bullishAlignment && !bearishAlignment) {
-    return {
-      regime: "HIGH_VOLATILITY",
-      allow: false,
-      reason: "ATR is elevated without clean directional alignment.",
-      atrPct,
-    };
-  }
-
-  if (bullishAlignment) {
-    return {
-      regime: "TRENDING_UP",
-      allow: true,
-      reason: "Higher timeframe and momentum are aligned bullishly.",
-      atrPct,
-    };
-  }
-
-  if (bearishAlignment) {
-    return {
-      regime: "TRENDING_DOWN",
-      allow: true,
-      reason: "Higher timeframe and momentum are aligned bearishly.",
-      atrPct,
-    };
-  }
-
-  return {
-    regime: volatile ? "VOLATILE_MIXED" : "MIXED",
-    allow: false,
-    reason: "Trend structure is not clean enough for execution.",
-    atrPct,
-  };
-}
-
-function regimeFilterSafe(regimeInfo) {
-  if (!REGIME_FILTER_ENABLED) return true;
-  if (!regimeInfo.allow) {
-    console.warn(`[WARN] Regime blocked: ${regimeInfo.regime}`);
-    return false;
-  }
-  if (
-    ALLOWED_MARKET_REGIMES.length > 0 &&
-    !ALLOWED_MARKET_REGIMES.includes(regimeInfo.regime)
-  ) {
-    console.warn(`[WARN] Regime not allowed: ${regimeInfo.regime}`);
-    return false;
-  }
+const regimeFilterSafe = (regimeInfo) => {
+  if (!config.regimeFilterEnabled) return true;
+  if (!regimeInfo.allow) { console.warn(`[WARN] Regime blocked: ${regimeInfo.regime}`); return false; }
+  if (config.allowedMarketRegimes.length && !config.allowedMarketRegimes.includes(regimeInfo.regime)) { console.warn(`[WARN] Regime not allowed: ${regimeInfo.regime}`); return false; }
   return true;
-}
+};
 
 // ======================================================
 // AI SIGNAL
 // ======================================================
-function createHoldAISignal(reason) {
-  return {
-    signal: "HOLD",
-    strength: "WEAK",
-    confidence: 0,
-    tradeAllowed: false,
-    reason,
-  };
-}
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const aiModel = genAI.getGenerativeModel({ model: config.geminiModel });
 
-function extractJsonObject(text) {
-  const cleaned = String(text || "")
-    .replace(/```json/gi, "")
-    .replace(/```/g, "")
-    .trim();
+const createHoldAISignal = (reason) => ({ signal: "HOLD", strength: "WEAK", confidence: 0, tradeAllowed: false, reason });
+
+const extractJsonObject = (text) => {
+  const cleaned = String(text || "").replace(/```json/gi, "").replace(/```/g, "").trim();
   const start = cleaned.indexOf("{");
   const end = cleaned.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) {
-    throw new Error("AI response does not contain a JSON object");
-  }
+  if (start === -1 || end === -1 || end <= start) throw new Error("AI response does not contain a JSON object");
   return cleaned.slice(start, end + 1);
-}
+};
 
-function normalizeAIStrength(value) {
-  const strength = String(value || "WEAK").trim().toUpperCase();
-  const aliases = {
-    LOW: "WEAK",
-    MILD: "WEAK",
-    MODERATE: "MEDIUM",
-    HIGH: "STRONG",
-    VERY_HIGH: "EXTREME",
-    VERYHIGH: "EXTREME",
-  };
+const normalizeAIStrength = (value) => {
+  const strength = String(value || "WEAK").toUpperCase();
+  const aliases = { LOW: "WEAK", MILD: "WEAK", MODERATE: "MEDIUM", HIGH: "STRONG", VERY_HIGH: "EXTREME", VERYHIGH: "EXTREME" };
   return aliases[strength] || strength;
-}
+};
 
-function normalizeAISignal(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error("AI response is not an object");
-  }
-
-  const signal = String(raw.signal || "").trim().toUpperCase();
+const normalizeAISignal = (raw) => {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("AI response is not an object");
+  const signal = String(raw.signal || "").toUpperCase();
   const strength = normalizeAIStrength(raw.strength);
   const confidence = Number(raw.confidence);
-  const tradeAllowed =
-    typeof raw.tradeAllowed === "boolean"
-      ? raw.tradeAllowed
-      : signal !== "HOLD";
-  const reason = String(raw.reason || "No reason provided.").trim();
+  const tradeAllowed = typeof raw.tradeAllowed === "boolean" ? raw.tradeAllowed : signal !== "HOLD";
+  const reason = String(raw.reason || "").trim().slice(0, 500);
+  if (!["LONG", "SHORT", "HOLD"].includes(signal)) throw new Error(`Invalid AI signal: ${raw.signal}`);
+  if (!["WEAK", "MEDIUM", "STRONG", "EXTREME"].includes(strength)) throw new Error(`Invalid AI strength: ${raw.strength}`);
+  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 100) throw new Error(`Invalid AI confidence: ${raw.confidence}`);
+  return { signal, strength, confidence, tradeAllowed, reason };
+};
 
-  if (!["LONG", "SHORT", "HOLD"].includes(signal)) {
-    throw new Error(`Invalid AI signal: ${raw.signal}`);
-  }
-  if (!["WEAK", "MEDIUM", "STRONG", "EXTREME"].includes(strength)) {
-    throw new Error(`Invalid AI strength: ${raw.strength}`);
-  }
-  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 100) {
-    throw new Error(`Invalid AI confidence: ${raw.confidence}`);
-  }
+const parseAISignal = (text) => normalizeAISignal(JSON.parse(extractJsonObject(text)));
 
-  return {
-    signal,
-    strength,
-    confidence,
-    tradeAllowed,
-    reason: reason.slice(0, 500),
-  };
-}
+const buildAISignalPrompt = ({ symbol, snapshot, htfSnapshot, regimeInfo }) => {
+  const allowedSignals = config.longOnly ? "LONG, HOLD" : "LONG, SHORT, HOLD";
+  const allowedDirection = config.longOnly ? "LONG" : "LONG or SHORT";
+  return `You are a professional crypto futures trader AI.
 
-function parseAISignal(text) {
-  return normalizeAISignal(JSON.parse(extractJsonObject(text)));
-}
-
-function buildAISignalPrompt({
-  symbol,
-  snapshot,
-  htfSnapshot,
-  regimeInfo,
-  longOnly,
-}) {
-  const allowedSignals = longOnly ? "LONG, HOLD" : "LONG, SHORT, HOLD";
-  const allowedDirection = longOnly ? "LONG" : "LONG or SHORT";
-  const volumeContext = classifyVolumeChange(snapshot.volumeChange);
-
-  return `
-You are a professional crypto futures trader AI.
-
-Your job is to determine:
-
-- LONG
-- SHORT
-- HOLD
+Your job is to determine: LONG, SHORT, or HOLD.
 
 RULES:
-
 - Prioritize HOLD during sideways markets.
 - Do NOT reverse positions too easily.
-- Avoid fake breakouts.
-- Avoid overtrading.
+- Avoid fake breakouts and overtrading.
 - Use higher timeframe as main trend filter.
-- If the regime is TRENDING_UP or TRENDING_DOWN, prefer the aligned direction unless the structure is clearly broken.
-- A moderate volume dip is not a veto by itself. Only treat volume as a strong warning when it is a SEVERE_DRY_UP.
-- Use HOLD when the regime is MIXED/CHOPPY or when trend alignment is missing.
 - Only give ${allowedDirection} if probability is high.
-- Ignore weak momentum setups.
 - Allowed output signals: ${allowedSignals}
-- Allowed output strengths: WEAK, MEDIUM, STRONG, EXTREME
-- Use WEAK instead of LOW.
-- Market regime: ${regimeInfo.regime}
-- Regime guidance: ${regimeInfo.reason}
-- Volume context: ${volumeContext}
+- Allowed strengths: WEAK, MEDIUM, STRONG, EXTREME (use WEAK instead of LOW).
+- Market regime: ${regimeInfo.regime} - ${regimeInfo.reason}
 
 MARKET DATA:
-
-SYMBOL:
-${symbol}
-
-PRICE:
-${snapshot.price}
-
-LOW TF TREND:
-${snapshot.trend}
-
-HIGH TF TREND:
-${htfSnapshot.trend}
-
-EMA20:
-${snapshot.ema20}
-
-EMA50:
-${snapshot.ema50}
-
-EMA20 SLOPE:
-${snapshot.ema20Slope}
-
-EMA50 SLOPE:
-${snapshot.ema50Slope}
-
-EMA GAP:
-${snapshot.emaGap}
-
-RSI:
-${snapshot.rsi}
-
-ATR:
-${snapshot.atr}
-
-VOLUME CHANGE:
-${snapshot.volumeChange}
-
-FUNDING RATE:
-${snapshot.fundingRate}
+Symbol: ${symbol}
+Price: ${snapshot.price}
+Low TF Trend: ${snapshot.trend}
+High TF Trend: ${htfSnapshot.trend}
+EMA20: ${snapshot.ema20}
+EMA50: ${snapshot.ema50}
+EMA20 Slope: ${snapshot.ema20Slope}
+EMA50 Slope: ${snapshot.ema50Slope}
+EMA Gap: ${snapshot.emaGap}
+RSI: ${snapshot.rsi}
+ATR: ${snapshot.atr}
+Volume Change: ${snapshot.volumeChange}
+Funding Rate: ${snapshot.fundingRate}
 
 RETURN JSON ONLY:
-
 {
-  "signal":"LONG",
-  "strength":"MEDIUM",
-  "confidence":75,
-  "tradeAllowed":true,
-  "reason":"Strong bullish trend confirmation."
-}
-`;
-}
+  "signal": "LONG",
+  "strength": "MEDIUM",
+  "confidence": 75,
+  "tradeAllowed": true,
+  "reason": "Strong bullish trend confirmation."
+}`;
+};
 
-async function getAISignal(symbol, snapshot, htfSnapshot, regimeInfo) {
-  const promptKey = crypto
-    .createHash("sha256")
-    .update(
-      JSON.stringify({
-        symbol,
-        longOnly: LONG_ONLY,
-        snapshot,
-        htfSnapshot,
-        regimeInfo,
-      }),
-    )
-    .digest("hex");
-  if (AI_SIGNAL_CACHE_ENABLED) {
+const getAISignal = async (symbol, snapshot, htfSnapshot, regimeInfo) => {
+  const promptKey = crypto.createHash("sha256").update(JSON.stringify({ symbol, longOnly: config.longOnly, snapshot, htfSnapshot, regimeInfo })).digest("hex");
+  if (config.aiSignalCacheEnabled) {
     const cached = aiSignalCache.get(promptKey);
-    if (isCacheEntryValid(cached)) {
-      console.log(`[CACHE] AI hit ${symbol}`);
-      return cached.signal;
-    }
+    if (isCacheValid(cached)) { console.log(`[CACHE] AI hit ${symbol}`); return cached.signal; }
   }
-
-  const prompt = buildAISignalPrompt({
-    symbol,
-    snapshot,
-    htfSnapshot,
-    regimeInfo,
-    longOnly: LONG_ONLY,
-  });
+  const prompt = buildAISignalPrompt({ symbol, snapshot, htfSnapshot, regimeInfo });
   let lastError = null;
-  for (let attempt = 1; attempt <= AI_RESPONSE_RETRIES + 1; attempt++) {
+  for (let attempt = 1; attempt <= config.aiResponseRetries + 1; attempt++) {
     try {
-      const result = await model.generateContent(prompt);
-      const text = result.response.text();
-      const signal = parseAISignal(text);
-      const expiresAt = Math.min(
-        Number(snapshot?.expiresAt || Date.now()),
-        Number(htfSnapshot?.expiresAt || Date.now()),
-      );
-      if (AI_SIGNAL_CACHE_ENABLED) {
-        aiSignalCache.set(promptKey, {
-          signal,
-          expiresAt,
-        });
-        cleanupCaches();
-      }
+      const result = await aiModel.generateContent(prompt);
+      const signal = parseAISignal(result.response.text());
+      const expiresAt = Math.min(Number(snapshot?.expiresAt || Date.now()), Number(htfSnapshot?.expiresAt || Date.now()));
+      if (config.aiSignalCacheEnabled) { aiSignalCache.set(promptKey, { signal, expiresAt }); cleanupCaches(); }
       return signal;
     } catch (err) {
       lastError = err;
-      console.warn(
-        `[WARN] AI response invalid for ${symbol} (${attempt}/${AI_RESPONSE_RETRIES + 1}): ${err.message}`,
-      );
-      if (attempt <= AI_RESPONSE_RETRIES) {
-        await sleep(1000 * attempt);
-      }
+      console.warn(`[WARN] AI response invalid for ${symbol} (${attempt}/${config.aiResponseRetries + 1}): ${err.message}`);
+      if (attempt <= config.aiResponseRetries) await sleep(1000 * attempt);
     }
   }
+  recordCircuitBreakerError(`AI response for ${symbol}`, lastError || new Error("unknown AI response error"));
+  return createHoldAISignal(`AI fallback: ${lastError?.message || "unknown error"}`);
+};
 
-  recordCircuitBreakerError(
-    `AI response for ${symbol}`,
-    lastError || new Error("unknown AI response error"),
-  );
-
-  return createHoldAISignal(
-    `AI response fallback to HOLD: ${lastError?.message || "unknown error"}`,
-  );
-}
+const aiFilterSafe = (ai) => {
+  if (!config.aiFilterEnabled) return true;
+  const strength = String(ai.strength || "").toUpperCase();
+  const confidence = Number(ai.confidence || 0);
+  if (ai.tradeAllowed === false) { console.warn("[WARN] AI filter: tradeAllowed=false"); return false; }
+  if (!config.allowedAiStrengths.includes(strength)) { console.warn(`[WARN] AI filter: strength ${strength}`); return false; }
+  if (confidence < config.minAiConfidence) { console.warn(`[WARN] AI filter: confidence ${confidence}/${config.minAiConfidence}`); return false; }
+  return true;
+};
 
 // ======================================================
-// POSITION
+// POSITION MANAGEMENT
 // ======================================================
-async function getCurrentPosition(symbol) {
+const getCurrentPosition = async (symbol) => {
   const positions = await retry(() => exchange.fetchPositions([symbol]));
-  const pos = positions.find(
-    (p) => p.symbol === symbol && Number(p.contracts) > 0,
-  );
+  const pos = positions.find(p => p.symbol === symbol && Number(p.contracts) > 0);
   if (!pos) return null;
-  return {
-    side: pos.side,
-    symbol: pos.symbol,
-    contracts: Number(pos.contracts),
-    entryPrice: Number(pos.entryPrice),
-  };
-}
+  return { side: pos.side, symbol: pos.symbol, contracts: Number(pos.contracts), entryPrice: Number(pos.entryPrice) };
+};
 
-async function getOpenPositions() {
-  const openPositions = [];
-  for (const symbol of SCAN_SYMBOLS) {
+const getOpenPositions = async () => {
+  const open = [];
+  for (const symbol of config.scanSymbols) {
     try {
-      const position = await getCurrentPosition(symbol);
-      if (position) openPositions.push(position);
-    } catch (err) {
-      console.warn(`${symbol} position check skipped: ${err.message}`);
-    }
+      const pos = await getCurrentPosition(symbol);
+      if (pos) open.push(pos);
+    } catch (err) { console.warn(`${symbol} position check: ${err.message}`); }
   }
-  return openPositions;
-}
+  return open;
+};
 
-// ======================================================
-// BALANCE
-// ======================================================
-async function getAvailableBalance() {
+const getAvailableBalance = async () => {
   const balance = await retry(() => exchange.fetchBalance());
   return Number(balance?.USDT?.free || 0);
-}
+};
 
-// ======================================================
-// CONTRACTS
-// ======================================================
-async function calculateContracts(symbol, price) {
+const calculateContracts = async (symbol, price) => {
   const market = exchange.markets[symbol];
-  const targetNotional = ORDER_SIZE_USDT * LEVERAGE;
-  const maxNotional = Math.min(targetNotional, MAX_POSITION_NOTIONAL_USDT);
+  const targetNotional = config.orderSizeUsdt * config.leverage;
+  const maxNotional = Math.min(targetNotional, config.maxPositionNotionalUsdt);
   const minCost = market?.limits?.cost?.min || 5;
   const minAmount = market?.limits?.amount?.min || 0;
   const finalNotional = Math.max(minCost, maxNotional);
   const finalContracts = Math.max(finalNotional / price, minAmount);
   return Number(exchange.amountToPrecision(symbol, finalContracts));
-}
+};
 
-function calculateRequiredMargin(amount, price) {
-  return (amount * price) / LEVERAGE;
-}
+const calculateRequiredMargin = (amount, price) => (amount * price) / config.leverage;
 
-// ======================================================
-// RR
-// ======================================================
-function calculateRR(signal, entry, tp, sl) {
-  if (signal === "LONG") {
-    return (tp - entry) / (entry - sl);
-  }
-  return (entry - tp) / (sl - entry);
-}
+const calculateRR = (signal, entry, tp, sl) => signal === "LONG" ? (tp - entry) / (entry - sl) : (entry - tp) / (sl - entry);
 
-// ======================================================
-// TP SL
-// ======================================================
-function calculateDynamicTPSL(signal, entry, atr, strength = "WEAK") {
-  const tpMultipliers = {
-    STRONG: 2.5,
-    EXTREME: 3,
-  };
-  const slMultipliers = {
-    MEDIUM: 1.8,
-    STRONG: 2.2,
-    EXTREME: 2.5,
-  };
-  const normalizedStrength = String(strength || "WEAK").toUpperCase();
-  const tpMultiplier = tpMultipliers[normalizedStrength] || ATR_TP_MULTIPLIER;
-  const slMultiplier = slMultipliers[normalizedStrength] || 1.5;
+const calculateDynamicTPSL = (signal, entry, atr, strength = "WEAK") => {
+  const tpMultipliers = { STRONG: 2.5, EXTREME: 3 };
+  const slMultipliers = { MEDIUM: 1.8, STRONG: 2.2, EXTREME: 2.5 };
+  const normStrength = String(strength).toUpperCase();
+  const tpMulti = tpMultipliers[normStrength] || config.atrTpMultiplier;
+  const slMulti = slMultipliers[normStrength] || 1.5;
   const direction = signal === "LONG" ? 1 : -1;
+  return { tp: entry + direction * atr * tpMulti, sl: entry - direction * atr * slMulti };
+};
 
-  return {
-    tp: entry + direction * atr * tpMultiplier,
-    sl: entry - direction * atr * slMultiplier,
-  };
-}
+const calculateCallbackRate = (atr, price) => clamp((atr / price) * 100, config.trailingCallbackMin, config.trailingCallbackMax);
 
-// ======================================================
-// CALLBACK
-// ======================================================
-function calculateCallbackRate(atr, price) {
-  const callback = clamp(
-    (atr / price) * 100,
-    TRAILING_CALLBACK_MIN,
-    TRAILING_CALLBACK_MAX,
-  );
-  return Number(callback.toFixed(1));
-}
+const fundingSafe = (signal, fundingRate) => !((signal === "LONG" && fundingRate > config.maxFundingRate) || (signal === "SHORT" && fundingRate < -config.maxFundingRate));
 
-// ======================================================
-// FUNDING FILTER
-// ======================================================
-function fundingSafe(signal, fundingRate) {
-  if (signal === "LONG" && fundingRate > MAX_FUNDING_RATE) {
-    return false;
-  }
-  if (signal === "SHORT" && fundingRate < -MAX_FUNDING_RATE) {
-    return false;
-  }
-  return true;
-}
-
-// ======================================================
-// AI FILTER
-// ======================================================
-function aiFilterSafe(ai) {
-  if (!AI_FILTER_ENABLED) return true;
-  const strength = String(ai.strength || "").toUpperCase();
-  const confidence = Number(ai.confidence || 0);
-  const tradeAllowed = ai.tradeAllowed !== false;
-  if (!tradeAllowed) {
-    console.warn("[WARN] AI filter blocked: tradeAllowed=false");
-    return false;
-  }
-  if (!ALLOWED_AI_STRENGTHS.includes(strength)) {
-    console.warn(`[WARN] AI filter blocked: strength ${strength || "UNKNOWN"}`);
-    return false;
-  }
-  if (confidence < MIN_AI_CONFIDENCE) {
-    console.warn(
-      `[WARN] AI filter blocked: confidence ${confidence}/${MIN_AI_CONFIDENCE}`,
-    );
-    return false;
-  }
-  return true;
-}
-
-// ======================================================
-// CANCEL
-// ======================================================
-async function cancelAllOrders(symbol) {
+const cancelAllOrders = async (symbol) => {
   try {
     const orders = await retry(() => exchange.fetchOpenOrders(symbol));
-    for (const o of orders) {
-      try {
-        await retry(() => exchange.cancelOrder(o.id, symbol));
-        console.log(`[CANCEL] Order ${o.id}`);
-      } catch (err) {
-        console.error(err.message);
-      }
-    }
-  } catch (err) {
-    console.error(err.message);
-  }
-}
+    for (const o of orders) await retry(() => exchange.cancelOrder(o.id, symbol)).catch(console.error);
+  } catch (err) { console.error(err.message); }
+};
 
-// ======================================================
-// OPEN POSITION
-// ======================================================
-async function openPosition(symbol, signal, context) {
-  await retry(() => exchange.setLeverage(LEVERAGE, symbol));
+const openPosition = async (symbol, signal, context) => {
+  await retry(() => exchange.setLeverage(config.leverage, symbol));
   const side = signal === "LONG" ? "buy" : "sell";
   const amount = await calculateContracts(symbol, context.price);
-  const notional = amount * context.price;
   const requiredMargin = calculateRequiredMargin(amount, context.price);
   const balance = await getAvailableBalance();
   if (balance < requiredMargin) {
-    console.warn(
-      `[BLOCK] Balance insufficient: free ${balance.toFixed(4)} USDT, required margin ${requiredMargin.toFixed(4)} USDT`,
-    );
+    console.warn(`[BLOCK] Balance insufficient: free ${balance.toFixed(4)} USDT, required ${requiredMargin.toFixed(4)} USDT`);
     return null;
   }
-  console.log(`
-[OPEN] ${signal}
-
-Contracts:
-${amount}
-Notional:
-${notional.toFixed(4)} USDT
-Required margin:
-${requiredMargin.toFixed(4)} USDT
-`);
-  const order = await retry(() =>
-    exchange.createMarketOrder(symbol, side, amount),
-  );
-  console.log(`
-[OK] Order:
-${order.id}
-`);
+  console.log(`\n[OPEN] ${signal}\nContracts: ${amount}\nNotional: ${(amount * context.price).toFixed(4)} USDT\nMargin: ${requiredMargin.toFixed(4)} USDT`);
+  const order = await retry(() => exchange.createMarketOrder(symbol, side, amount));
+  console.log(`[OK] Order: ${order.id}`);
   lastPositionChangeTime = Date.now();
   await sleep(3000);
-  return await getCurrentPosition(symbol);
-}
+  return getCurrentPosition(symbol);
+};
 
-// ======================================================
-// CLOSE POSITION
-// ======================================================
-async function closePosition(symbol, position) {
+const closePosition = async (symbol, position) => {
   const side = position.side === "long" ? "sell" : "buy";
-  await retry(() =>
-    exchange.createMarketOrder(symbol, side, position.contracts, {
-      reduceOnly: true,
-    }),
-  );
+  await retry(() => exchange.createMarketOrder(symbol, side, position.contracts, { reduceOnly: true }));
   await cancelAllOrders(symbol);
   console.log("[CLOSE] Position closed");
-}
+};
 
-// ======================================================
-// STOP LOSS MARKET (NEW)
-// ======================================================
-async function createStopLossOrder(symbol, position, slPrice) {
+const createStopLossOrder = async (symbol, position, slPrice) => {
   const side = position.side === "long" ? "sell" : "buy";
   const stopPrice = exchange.priceToPrecision(symbol, slPrice);
-  console.log(`
-[SL] Create stop loss market
-Side: ${side}
-Mode: close remaining position
-Stop trigger: ${stopPrice}
-`);
-  await retry(() =>
-    exchange.createOrder(symbol, "STOP_MARKET", side, undefined, undefined, {
-      stopPrice: stopPrice,
-      closePosition: true,
-      workingType: "MARK_PRICE",
-    }),
-  );
-  console.log("[OK] Stop loss order active");
-}
+  console.log(`\n[SL] Stop loss market\nSide: ${side}\nTrigger: ${stopPrice}`);
+  await retry(() => exchange.createOrder(symbol, "STOP_MARKET", side, undefined, undefined, { stopPrice: stopPrice, closePosition: true, workingType: "MARK_PRICE" }));
+  console.log("[OK] Stop loss active");
+};
 
-// ======================================================
-// PARTIAL TP
-// ======================================================
-async function createPartialTPs(symbol, position, entryPrice, atr) {
+const createPartialTPs = async (symbol, position, entryPrice, atr) => {
   const side = position.side === "long" ? "sell" : "buy";
   const isLong = position.side === "long";
-  const totalContracts = position.contracts;
-  const tp1Qty = Number(
-    exchange.amountToPrecision(symbol, totalContracts * (TP1_PERCENT / 100)),
-  );
-  const tp2Qty = Number(
-    exchange.amountToPrecision(symbol, totalContracts * (TP2_PERCENT / 100)),
-  );
-  const runnerQty = Number(
-    exchange.amountToPrecision(symbol, totalContracts - tp1Qty - tp2Qty),
-  );
-  let tp1Price;
-  let tp2Price;
-  if (isLong) {
-    tp1Price = entryPrice + atr * TP1_RR;
-    tp2Price = entryPrice + atr * TP2_RR;
-  } else {
-    tp1Price = entryPrice - atr * TP1_RR;
-    tp2Price = entryPrice - atr * TP2_RR;
-  }
-  tp1Price = Number(exchange.priceToPrecision(symbol, tp1Price));
-  tp2Price = Number(exchange.priceToPrecision(symbol, tp2Price));
-  console.log(`
-[TP] TP1:
-${tp1Price}
-
-[TP] TP2:
-${tp2Price}
-`);
-  if (tp1Qty > 0) {
-    await retry(() =>
-      exchange.createOrder(
-        symbol,
-        "TAKE_PROFIT_MARKET",
-        side,
-        tp1Qty,
-        undefined,
-        {
-          stopPrice: tp1Price,
-          reduceOnly: true,
-          workingType: "MARK_PRICE",
-        },
-      ),
-    );
-    console.log(
-      `[OK] TP1 created:
-${tp1Qty}`,
-    );
-  }
-  if (tp2Qty > 0) {
-    await retry(() =>
-      exchange.createOrder(
-        symbol,
-        "TAKE_PROFIT_MARKET",
-        side,
-        tp2Qty,
-        undefined,
-        {
-          stopPrice: tp2Price,
-          reduceOnly: true,
-          workingType: "MARK_PRICE",
-        },
-      ),
-    );
-    console.log(
-      `[OK] TP2 created:
-${tp2Qty}`,
-    );
-  }
+  const total = position.contracts;
+  const tp1Qty = Number(exchange.amountToPrecision(symbol, total * (config.tp1Percent / 100)));
+  const tp2Qty = Number(exchange.amountToPrecision(symbol, total * (config.tp2Percent / 100)));
+  const runnerQty = Number(exchange.amountToPrecision(symbol, total - tp1Qty - tp2Qty));
+  const tp1Price = Number(exchange.priceToPrecision(symbol, entryPrice + (isLong ? atr * config.tp1Rr : -atr * config.tp1Rr)));
+  const tp2Price = Number(exchange.priceToPrecision(symbol, entryPrice + (isLong ? atr * config.tp2Rr : -atr * config.tp2Rr)));
+  console.log(`\n[TP] TP1: ${tp1Price}\n[TP] TP2: ${tp2Price}`);
+  if (tp1Qty > 0) await retry(() => exchange.createOrder(symbol, "TAKE_PROFIT_MARKET", side, tp1Qty, undefined, { stopPrice: tp1Price, reduceOnly: true, workingType: "MARK_PRICE" })).then(() => console.log(`[OK] TP1: ${tp1Qty}`));
+  if (tp2Qty > 0) await retry(() => exchange.createOrder(symbol, "TAKE_PROFIT_MARKET", side, tp2Qty, undefined, { stopPrice: tp2Price, reduceOnly: true, workingType: "MARK_PRICE" })).then(() => console.log(`[OK] TP2: ${tp2Qty}`));
   if (runnerQty > 0) {
     const callbackRate = calculateCallbackRate(atr, entryPrice);
-    await retry(() =>
-      exchange.createOrder(
-        symbol,
-        "TRAILING_STOP_MARKET",
-        side,
-        runnerQty,
-        undefined,
-        {
-          callbackRate,
-          reduceOnly: true,
-          workingType: "MARK_PRICE",
-        },
-      ),
-    );
-    console.log(`
-[TRAILING] Runner trailing active
-
-Qty:
-${runnerQty}
-
-Callback:
-${callbackRate}%
-`);
+    await retry(() => exchange.createOrder(symbol, "TRAILING_STOP_MARKET", side, runnerQty, undefined, { callbackRate, reduceOnly: true, workingType: "MARK_PRICE" }));
+    console.log(`\n[TRAILING] Runner: ${runnerQty} qty, callback ${callbackRate}%`);
   }
-}
+};
 
 // ======================================================
-// TRADING
+// SIGNAL CONFIRMATION & SCORING
 // ======================================================
-function updateSignalConfirmation(symbol, signal, strength) {
-  const state = signalStateBySymbol[symbol] || {
-    lastSignal: null,
-    confirmCount: 0,
-  };
-  if (state.lastSignal === signal) {
-    state.confirmCount += 1;
-  } else {
-    state.lastSignal = signal;
-    state.confirmCount = 1;
-  }
+const updateSignalConfirmation = (symbol, signal, strength) => {
+  const state = signalStateBySymbol[symbol] || { lastSignal: null, confirmCount: 0 };
+  if (state.lastSignal === signal) state.confirmCount += 1;
+  else { state.lastSignal = signal; state.confirmCount = 1; }
   signalStateBySymbol[symbol] = state;
+  const confirmed = state.confirmCount >= config.effectiveRequiredConfirmations || strength === "STRONG" || strength === "EXTREME";
+  return { count: state.confirmCount, confirmed };
+};
 
-  const confirmed =
-    state.confirmCount >= EFFECTIVE_REQUIRED_CONFIRMATION ||
-    strength === "STRONG" ||
-    strength === "EXTREME";
-  return {
-    count: state.confirmCount,
-    confirmed,
-  };
-}
+const scoreCandidate = (ai, rr, regimeInfo) => {
+  const strengthBonus = { MEDIUM: 5, STRONG: 15, EXTREME: 25 }[String(ai.strength).toUpperCase()] || 0;
+  return (ai.confidence || 0) + strengthBonus + Math.min(rr, 3) * 10 + (regimeInfo.allow ? 10 : 0);
+};
 
-function scoreCandidate(ai, rr, regimeInfo) {
-  const strength = String(ai.strength || "").toUpperCase();
-  const strengthBonus = {
-    MEDIUM: 5,
-    STRONG: 15,
-    EXTREME: 25,
-  }[strength] || 0;
-  const confidence = Number(ai.confidence || 0);
-  const rrBonus = Math.min(rr, 3) * 10;
-  const trendBonus = regimeInfo.allow ? 10 : 0;
-  return confidence + strengthBonus + rrBonus + trendBonus;
-}
+// ======================================================
+// AI EXPLAIN LOG
+// ======================================================
+const snapshotForExplainLog = (snapshot) => snapshot ? {
+  price: roundNumber(snapshot.price, 10),
+  fundingRate: roundNumber(snapshot.fundingRate, 8),
+  trend: snapshot.trend,
+  ema20: roundNumber(snapshot.ema20, 10),
+  ema50: roundNumber(snapshot.ema50, 10),
+  ema20Slope: roundNumber(snapshot.ema20Slope, 10),
+  ema50Slope: roundNumber(snapshot.ema50Slope, 10),
+  emaGap: roundNumber(snapshot.emaGap, 4),
+  rsi: roundNumber(snapshot.rsi, 2),
+  atr: roundNumber(snapshot.atr, 10),
+  volumeChange: roundNumber(snapshot.volumeChange, 2),
+} : null;
 
-async function analyzeSymbol(symbol) {
+const pruneAIExplainLog = () => {
+  if (!config.aiExplainLogMaxLines || config.aiExplainLogMaxLines <= 0) return;
+  if (!fs.existsSync(config.aiExplainLogPath)) return;
+  const lines = fs.readFileSync(config.aiExplainLogPath, "utf8").split(/\r?\n/).filter(Boolean);
+  if (lines.length > config.aiExplainLogMaxLines) fs.writeFileSync(config.aiExplainLogPath, `${lines.slice(-config.aiExplainLogMaxLines).join("\n")}\n`);
+};
+
+const logAIExplainDecision = (event) => {
+  if (!config.aiExplainLogEnabled) return;
   try {
-    console.log(`
-========== SCAN ${symbol} ==========
-`);
-    if (!symbolCooldownAllowsTrading(symbol)) {
-      return null;
-    }
+    const entry = { timestamp: new Date().toISOString(), bot: "smart-binance-ai-futures-bot", timeframe: config.timeframe, htfTimeframe: config.htfTimeframe, longOnly: config.longOnly, minAiConfidence: config.minAiConfidence, allowedAiStrengths: config.allowedAiStrengths, minRR: config.minRr, ...event, snapshot: snapshotForExplainLog(event.snapshot), htfSnapshot: snapshotForExplainLog(event.htfSnapshot) };
+    fs.appendFileSync(config.aiExplainLogPath, `${JSON.stringify(entry)}\n`);
+    pruneAIExplainLog();
+  } catch (err) { console.warn(`[WARN] AI explain log error: ${err.message}`); }
+};
 
+// ======================================================
+// TRADING CYCLE - SYMBOL ANALYSIS
+// ======================================================
+const analyzeSymbol = async (symbol) => {
+  try {
+    console.log(`\n========== SCAN ${symbol} ==========`);
+    if (!symbolCooldownAllowsTrading(symbol)) return null;
     const context = await getMarketContext(symbol);
-    const snapshot = await getMarketSnapshot(symbol, context, TIMEFRAME);
-    const htfSnapshot = await getMarketSnapshot(symbol, context, HTF_TIMEFRAME);
+    const snapshot = await getMarketSnapshot(symbol, context, config.timeframe);
+    const htfSnapshot = await getMarketSnapshot(symbol, context, config.htfTimeframe);
     const regimeInfo = detectMarketRegime(snapshot, htfSnapshot);
-    const logScanDecision = (event) =>
-      logAIExplainDecision({
-        symbol,
-        snapshot,
-        htfSnapshot,
-        regimeInfo,
-        ...event,
-      });
-
-    if (snapshot.emaGap < SIDEWAYS_EMA_GAP) {
-      console.log(`${symbol} skipped: sideways market`);
-      logScanDecision({
-        outcome: "REJECTED_BEFORE_AI",
-        stage: "sideways_filter",
-        rejectReason: "EMA gap below sideways threshold.",
-      });
-      return null;
-    }
-
-    if (!regimeFilterSafe(regimeInfo)) {
-      console.log(`${symbol} skipped: ${regimeInfo.reason}`);
-      logScanDecision({
-        outcome: "REJECTED_BEFORE_AI",
-        stage: "regime_filter",
-        rejectReason: regimeInfo.reason,
-      });
-      return null;
-    }
-
+    const logReject = (stage, reason, extra = {}) => logAIExplainDecision({ symbol, snapshot, htfSnapshot, regimeInfo, outcome: "REJECTED_BEFORE_AI", stage, rejectReason: reason, ...extra });
+    if (snapshot.emaGap < config.sidewaysEmaGap) { logReject("sideways_filter", "EMA gap below threshold"); return null; }
+    if (!regimeFilterSafe(regimeInfo)) { logReject("regime_filter", regimeInfo.reason); return null; }
     console.log(`Asking Gemini for ${symbol}...`);
     const ai = await getAISignal(symbol, snapshot, htfSnapshot, regimeInfo);
     console.log(ai);
-
     const signal = ai.signal?.toUpperCase();
-    const aiStrength = String(ai.strength || "").toUpperCase();
-    if (!["LONG", "SHORT", "HOLD"].includes(signal)) {
-      console.warn(`${symbol} skipped: invalid AI signal`);
-      logScanDecision({
-        outcome: "REJECTED_AFTER_AI",
-        stage: "ai_signal_validation",
-        ai,
-        rejectReason: "Invalid AI signal.",
-      });
-      return null;
-    }
-    if (signal === "HOLD") {
-      console.log(`${symbol} skipped: HOLD`);
-      logScanDecision({
-        outcome: "REJECTED_AFTER_AI",
-        stage: "ai_hold",
-        ai,
-        rejectReason: ai.reason || "AI returned HOLD.",
-      });
-      return null;
-    }
-    if (LONG_ONLY && signal === "SHORT") {
-      console.log(`${symbol} skipped: SHORT ignored in LONG ONLY mode`);
-      logScanDecision({
-        outcome: "REJECTED_AFTER_AI",
-        stage: "long_only_filter",
-        ai,
-        rejectReason: "AI returned SHORT while LONG_ONLY mode is active.",
-      });
-      return null;
-    }
-    if (!aiFilterSafe(ai)) {
-      console.log(`${symbol} skipped: AI filter`);
-      logScanDecision({
-        outcome: "REJECTED_AFTER_AI",
-        stage: "ai_filter",
-        ai,
-        rejectReason: "AI did not pass confidence, strength, or tradeAllowed filter.",
-      });
-      return null;
-    }
-
+    const aiStrength = String(ai.strength).toUpperCase();
+    if (!["LONG", "SHORT", "HOLD"].includes(signal)) { logAIExplainDecision({ symbol, snapshot, htfSnapshot, regimeInfo, outcome: "REJECTED_AFTER_AI", stage: "ai_signal_validation", ai, rejectReason: "Invalid AI signal" }); return null; }
+    if (signal === "HOLD") { logAIExplainDecision({ symbol, snapshot, htfSnapshot, regimeInfo, outcome: "REJECTED_AFTER_AI", stage: "ai_hold", ai, rejectReason: ai.reason }); return null; }
+    if (config.longOnly && signal === "SHORT") { logAIExplainDecision({ symbol, snapshot, htfSnapshot, regimeInfo, outcome: "REJECTED_AFTER_AI", stage: "long_only_filter", ai, rejectReason: "SHORT ignored in LONG_ONLY mode" }); return null; }
+    if (!aiFilterSafe(ai)) { logAIExplainDecision({ symbol, snapshot, htfSnapshot, regimeInfo, outcome: "REJECTED_AFTER_AI", stage: "ai_filter", ai, rejectReason: "AI confidence/strength/tradeAllowed failed" }); return null; }
     const confirmation = updateSignalConfirmation(symbol, signal, aiStrength);
-    console.log(`
-SIGNAL CONFIRM ${symbol}:
-${confirmation.count}/${EFFECTIVE_REQUIRED_CONFIRMATION}
-`);
-    if (!confirmation.confirmed) {
-      console.log(`${symbol} skipped: signal not confirmed`);
-      logScanDecision({
-        outcome: "REJECTED_AFTER_AI",
-        stage: "signal_confirmation",
-        ai,
-        confirmation,
-        rejectReason: "Signal did not reach required confirmation count.",
-      });
-      return null;
-    }
-
-    if (!fundingSafe(signal, context.fundingRate)) {
-      console.warn(`${symbol} skipped: funding unsafe`);
-      logScanDecision({
-        outcome: "REJECTED_AFTER_AI",
-        stage: "funding_filter",
-        ai,
-        confirmation,
-        rejectReason: "Funding rate is unsafe for the AI signal direction.",
-      });
-      return null;
-    }
-
-    const dynamicTPSL = calculateDynamicTPSL(
-      signal,
-      context.price,
-      snapshot.atr,
-      aiStrength,
-    );
-    const rr = calculateRR(
-      signal,
-      context.price,
-      dynamicTPSL.tp,
-      dynamicTPSL.sl,
-    );
+    console.log(`\nSIGNAL CONFIRM ${symbol}: ${confirmation.count}/${config.effectiveRequiredConfirmations}`);
+    if (!confirmation.confirmed) { logAIExplainDecision({ symbol, snapshot, htfSnapshot, regimeInfo, outcome: "REJECTED_AFTER_AI", stage: "signal_confirmation", ai, confirmation, rejectReason: "Not enough confirmations" }); return null; }
+    if (!fundingSafe(signal, context.fundingRate)) { logAIExplainDecision({ symbol, snapshot, htfSnapshot, regimeInfo, outcome: "REJECTED_AFTER_AI", stage: "funding_filter", ai, confirmation, rejectReason: "Funding rate unsafe" }); return null; }
+    const dynamicTPSL = calculateDynamicTPSL(signal, context.price, snapshot.atr, aiStrength);
+    const rr = calculateRR(signal, context.price, dynamicTPSL.tp, dynamicTPSL.sl);
     console.log(`${symbol} RR: ${rr.toFixed(2)}`);
-    if (rr < MIN_RR) {
-      console.warn(`${symbol} skipped: RR too low`);
-      logScanDecision({
-        outcome: "REJECTED_AFTER_AI",
-        stage: "rr_filter",
-        ai,
-        confirmation,
-        rr: roundNumber(rr, 4),
-        tp: roundNumber(dynamicTPSL.tp, 10),
-        sl: roundNumber(dynamicTPSL.sl, 10),
-        rejectReason: "Risk/reward is below MIN_RR.",
-      });
-      return null;
-    }
-
+    if (rr < config.minRr) { logAIExplainDecision({ symbol, snapshot, htfSnapshot, regimeInfo, outcome: "REJECTED_AFTER_AI", stage: "rr_filter", ai, confirmation, rr: roundNumber(rr, 4), rejectReason: `RR ${rr.toFixed(2)} < ${config.minRr}` }); return null; }
     const score = scoreCandidate(ai, rr, regimeInfo);
-    logScanDecision({
-      outcome: "CANDIDATE_ACCEPTED",
-      stage: "candidate_score",
-      ai,
-      confirmation,
-      rr: roundNumber(rr, 4),
-      tp: roundNumber(dynamicTPSL.tp, 10),
-      sl: roundNumber(dynamicTPSL.sl, 10),
-      score: roundNumber(score, 2),
-      acceptReason: "AI signal passed filters and became a trade candidate.",
-    });
-
-    return {
-      symbol,
-      signal,
-      ai,
-      aiStrength,
-      context,
-      snapshot,
-      htfSnapshot,
-      regimeInfo,
-      rr,
-      score,
-    };
+    logAIExplainDecision({ symbol, snapshot, htfSnapshot, regimeInfo, outcome: "CANDIDATE_ACCEPTED", stage: "candidate_score", ai, confirmation, rr: roundNumber(rr, 4), score: roundNumber(score, 2) });
+    return { symbol, signal, ai, aiStrength, context, snapshot, htfSnapshot, regimeInfo, rr, score };
   } catch (err) {
-    console.warn(`${symbol} scan skipped: ${err.message}`);
+    console.warn(`${symbol} scan error: ${err.message}`);
     recordCircuitBreakerError(`scan ${symbol}`, err);
-    setSymbolCooldown(symbol, SYMBOL_ERROR_COOLDOWN_MINUTES, "scan error");
+    setSymbolCooldown(symbol, config.symbolErrorCooldownMinutes, "scan error");
     saveRiskState();
     return null;
   }
-}
+};
 
-async function tradingCycle() {
-  if (isTrading) {
-    console.log("[WAIT] Previous cycle running");
-    return;
-  }
+// ======================================================
+// TRADING CYCLE - MAIN
+// ======================================================
+const tradingCycle = async () => {
+  if (isTrading) { console.log("[WAIT] Previous cycle running"); return; }
   isTrading = true;
-  const circuitErrorsAtStart = circuitBreakerState.consecutiveErrors;
-  let circuitAllowedThisCycle = false;
+  const errorsAtStart = circuitBreakerState.consecutiveErrors;
+  let circuitAllowed = false;
   try {
-    console.log(`
-========== ${new Date().toISOString()} ==========
-`);
-    if (!circuitBreakerAllowsTrading()) {
-      return;
-    }
-    circuitAllowedThisCycle = true;
+    console.log(`\n========== ${new Date().toISOString()} ==========`);
+    if (!circuitBreakerAllowsTrading()) return;
+    circuitAllowed = true;
     cleanupCaches();
     await syncProfitLedger();
     await syncRiskState();
     const openPositions = await getOpenPositions();
     console.log("OPEN POSITIONS:", openPositions.length ? openPositions : "NONE");
-    if (killSwitchActive()) {
-      console.log("[KILL] Cycle stopped before scanning new entries");
-      return;
-    }
-    if (!riskGateAllowsTrading()) {
-      return;
-    }
-    const candidates = [];
+    if (killSwitchActive() || !riskGateAllowsTrading()) return;
     const symbolsToScan = getRotatedScanSymbols();
-    console.log(
-      `[SCAN] Rotating batch ${symbolsToScan.join(", ")} (${symbolsToScan.length}/${SCAN_SYMBOLS.length})`,
-    );
+    console.log(`[SCAN] Rotating batch: ${symbolsToScan.join(", ")} (${symbolsToScan.length}/${config.scanSymbols.length})`);
     saveRiskState();
+    const candidates = [];
     for (const symbol of symbolsToScan) {
       const candidate = await analyzeSymbol(symbol);
       if (candidate) candidates.push(candidate);
     }
-
-    if (candidates.length === 0) {
-      console.log("No meme coin setup passed the scanner.");
-      return;
-    }
-
+    if (candidates.length === 0) { console.log("No candidates passed."); return; }
     candidates.sort((a, b) => b.score - a.score);
-    console.table(
-      candidates.map((c) => ({
-        symbol: c.symbol,
-        signal: c.signal,
-        confidence: c.ai.confidence,
-        strength: c.aiStrength,
-        rr: Number(c.rr.toFixed(2)),
-        regime: c.regimeInfo.regime,
-        score: Number(c.score.toFixed(2)),
-      })),
-    );
-
+    console.table(candidates.map(c => ({ symbol: c.symbol, signal: c.signal, confidence: c.ai.confidence, strength: c.aiStrength, rr: Number(c.rr.toFixed(2)), regime: c.regimeInfo.regime, score: Number(c.score.toFixed(2)) })));
     const best = candidates[0];
     const { symbol, signal, context, snapshot } = best;
-    const logBestDecision = (event) =>
-      logAIExplainDecision({
-        symbol,
-        ai: best.ai,
-        snapshot: best.snapshot,
-        htfSnapshot: best.htfSnapshot,
-        regimeInfo: best.regimeInfo,
-        rr: roundNumber(best.rr, 4),
-        score: roundNumber(best.score, 2),
-        ...event,
-      });
-    logBestDecision({
-      outcome: "BEST_CANDIDATE_SELECTED",
-      stage: "candidate_ranking",
-      acceptReason: "Highest-scoring candidate after scanning all symbols.",
-    });
-    const position = openPositions.find((p) => p.symbol === symbol);
-
-    if (position && position.side === signal.toLowerCase()) {
-      console.log(`${symbol} position already exists`);
-      logBestDecision({
-        outcome: "NOT_EXECUTED",
-        stage: "existing_position",
-        rejectReason: "Position already exists in the same direction.",
-      });
-      return;
-    }
-
-    if (!position && openPositions.length >= MAX_OPEN_POSITIONS) {
-      console.log(
-        `Max open positions reached: ${openPositions.length}/${MAX_OPEN_POSITIONS}`,
-      );
-      logBestDecision({
-        outcome: "NOT_EXECUTED",
-        stage: "max_open_positions",
-        rejectReason: "MAX_OPEN_POSITIONS limit reached.",
-      });
-      return;
-    }
-
-    const cooldownMs = REVERSAL_COOLDOWN_MINUTES * 60 * 1000;
-    if (position && Date.now() - lastPositionChangeTime < cooldownMs) {
-      console.log(`${symbol} reversal cooldown active`);
-      logBestDecision({
-        outcome: "NOT_EXECUTED",
-        stage: "reversal_cooldown",
-        rejectReason: "Reversal cooldown is still active.",
-      });
-      return;
-    }
-
-    if (position) {
-      await closePosition(symbol, position);
-    }
+    logAIExplainDecision({ symbol, ai: best.ai, snapshot: best.snapshot, htfSnapshot: best.htfSnapshot, regimeInfo: best.regimeInfo, rr: roundNumber(best.rr, 4), score: roundNumber(best.score, 2), outcome: "BEST_CANDIDATE_SELECTED", stage: "candidate_ranking" });
+    const position = openPositions.find(p => p.symbol === symbol);
+    if (position && position.side === signal.toLowerCase()) { console.log(`${symbol} position already exists`); return; }
+    if (!position && openPositions.length >= config.maxOpenPositions) { console.log(`Max positions: ${openPositions.length}/${config.maxOpenPositions}`); return; }
+    const cooldownMs = config.reversalCooldownMinutes * 60 * 1000;
+    if (position && Date.now() - lastPositionChangeTime < cooldownMs) { console.log(`${symbol} reversal cooldown active`); return; }
+    if (position) await closePosition(symbol, position);
     await cancelAllOrders(symbol);
-
-    const newPos = await openPosition(symbol, signal, context, snapshot.atr);
-    if (!newPos) {
-      logBestDecision({
-        outcome: "NOT_EXECUTED",
-        stage: "open_position",
-        rejectReason: "Exchange did not return an opened position.",
-      });
-      return;
-    }
-
+    const newPos = await openPosition(symbol, signal, context);
+    if (!newPos) { logAIExplainDecision({ symbol, outcome: "NOT_EXECUTED", stage: "open_position", rejectReason: "Position not opened" }); return; }
     const actualEntry = newPos.entryPrice;
-    const slPrice =
-      signal === "LONG"
-        ? actualEntry - snapshot.atr
-        : actualEntry + snapshot.atr;
-    const openTPSL = calculateDynamicTPSL(
-      signal,
-      actualEntry,
-      snapshot.atr,
-      best.aiStrength,
-    );
+    const slPrice = signal === "LONG" ? actualEntry - snapshot.atr : actualEntry + snapshot.atr;
+    const openTPSL = calculateDynamicTPSL(signal, actualEntry, snapshot.atr, best.aiStrength);
     await createStopLossOrder(symbol, newPos, slPrice);
     await createPartialTPs(symbol, newPos, actualEntry, snapshot.atr);
-    await sendFonnteAlert(
-      formatTradeOpenAlert({
-        symbol,
-        signal,
-        entryPrice: actualEntry,
-        contracts: newPos.contracts,
-        slPrice,
-        tpPrice: openTPSL.tp,
-        rr: best.rr,
-        confidence: best.ai.confidence,
-        strength: best.aiStrength,
-      }),
-    );
-    logBestDecision({
-      outcome: "EXECUTED",
-      stage: "order_opened",
-      position: {
-        side: newPos.side,
-        contracts: roundNumber(newPos.contracts, 8),
-        entryPrice: roundNumber(actualEntry, 10),
-      },
-      sl: roundNumber(slPrice, 10),
-      acceptReason: "Market order opened and protection orders were created.",
-    });
+    await sendFonnteAlert(formatTradeOpenAlert({ symbol, signal, entryPrice: actualEntry, contracts: newPos.contracts, slPrice, tpPrice: openTPSL.tp, rr: best.rr, confidence: best.ai.confidence, strength: best.aiStrength }));
+    logAIExplainDecision({ symbol, outcome: "EXECUTED", stage: "order_opened", position: { side: newPos.side, contracts: roundNumber(newPos.contracts, 8), entryPrice: roundNumber(actualEntry, 10) }, sl: roundNumber(slPrice, 10) });
   } catch (err) {
     console.error("[ERROR] Trading error:", err.message);
     recordCircuitBreakerError("trading cycle", err);
   } finally {
-    if (
-      circuitAllowedThisCycle &&
-      circuitBreakerState.consecutiveErrors === circuitErrorsAtStart
-    ) {
-      recordCircuitBreakerSuccess();
-    }
+    if (circuitAllowed && circuitBreakerState.consecutiveErrors === errorsAtStart) recordCircuitBreakerSuccess();
     isTrading = false;
   }
-}
+};
 
 // ======================================================
-// MAIN
+// MAIN LOOP
 // ======================================================
-async function main() {
+const getNextCandleDelay = () => {
+  const now = Date.now();
+  const next = Math.ceil(now / config.intervalMs) * config.intervalMs;
+  return next - now;
+};
+
+const main = async () => {
   console.log(`
 [START] Smart AI Futures Bot
-
-SCAN SYMBOLS:
-${SCAN_SYMBOLS.join(", ")}
-MAX OPEN POSITIONS:
-${MAX_OPEN_POSITIONS}
-LEVERAGE:
-${LEVERAGE}x
-ORDER:
-${ORDER_SIZE_USDT} USDT
-TIMEFRAME:
-${TIMEFRAME}
-HTF:
-${HTF_TIMEFRAME}
-SCAN ROTATION BATCH:
-${SCAN_ROTATION_BATCH_SIZE}
-MODEL:
-${GEMINI_MODEL}
-KILL SWITCH:
-${KILL_SWITCH_ENABLED ? `enabled (${KILL_SWITCH_FILE})` : "disabled"}
-FONNTE ALERT:
-${shouldSendFonnteAlerts() ? `enabled (${FONNTE_TARGET})` : FONNTE_ENABLED ? "configured partially" : "disabled"}
+SCAN SYMBOLS: ${config.scanSymbols.join(", ")}
+MAX POSITIONS: ${config.maxOpenPositions}
+LEVERAGE: ${config.leverage}x
+ORDER SIZE: ${config.orderSizeUsdt} USDT
+TIMEFRAME: ${config.timeframe} / HTF: ${config.htfTimeframe}
+SCAN BATCH: ${config.scanRotationBatchSize}
+MODEL: ${config.geminiModel}
+KILL SWITCH: ${config.killSwitchEnabled ? `enabled (${config.killSwitchFile})` : "disabled"}
+FONNTE ALERT: ${shouldSendFonnteAlerts() ? `enabled (${config.fonnteTarget})` : config.fonnteEnabled ? "partial" : "disabled"}
 `);
   await retry(() => exchange.loadMarkets());
+  profitLedger = loadProfitLedger();
+  riskState = loadRiskState();
   await syncProfitLedger();
   while (true) {
     try {
       const delay = getNextCandleDelay();
-      console.log(`
-[WAIT] Waiting next candle:
-${Math.floor(delay / 1000)}s
-`);
+      console.log(`\n[WAIT] Next candle in ${Math.floor(delay / 1000)}s`);
       await sleep(delay);
       await tradingCycle();
     } catch (err) {
@@ -2215,5 +1012,6 @@ ${Math.floor(delay / 1000)}s
       await sleep(5000);
     }
   }
-}
+};
+
 main().catch(console.error);
