@@ -3,6 +3,7 @@
 //   - Detects support/resistance levels from price action
 //   - AI validates the strength and direction
 //   - Only trades when price near a key level with AI confirmation
+//   - Simple TP/SL (no partial, no trailing)
 // ======================================================
 require("dotenv").config();
 const ccxt = require("ccxt");
@@ -117,14 +118,6 @@ const KILL_SWITCH_ENABLED = envBoolean("KILL_SWITCH_ENABLED");
 const STOP_TRADING = envTrue("STOP_TRADING");
 const KILL_SWITCH_FILE = envValue("KILL_SWITCH_FILE", "bot-paused.flag");
 const KILL_SWITCH_PATH = resolveProjectPath(KILL_SWITCH_FILE);
-
-// Trailing / partial (optional)
-const TRAILING_CALLBACK_MIN = envNumber("TRAILING_CALLBACK_MIN", 0.3);
-const TRAILING_CALLBACK_MAX = envNumber("TRAILING_CALLBACK_MAX", 1.5);
-const TP1_PERCENT = envNumber("TP1_PERCENT", 30);
-const TP2_PERCENT = envNumber("TP2_PERCENT", 40);
-const TP1_RR = envNumber("TP1_RR", 1.0);
-const TP2_RR = envNumber("TP2_RR", 2.0);
 
 // Profit tracker & risk state (reused logic)
 const PROFIT_TRACKER_ENABLED = envBoolean("PROFIT_TRACKER_ENABLED");
@@ -655,7 +648,7 @@ function calculateATR(ohlcv, period = 14) {
 }
 
 // ======================================================
-// RISK & ORDER MANAGEMENT (reused from original)
+// RISK & ORDER MANAGEMENT (simplified TP/SL)
 // ======================================================
 async function getAvailableBalance() {
   const balance = await retry(() => exchange.fetchBalance());
@@ -719,39 +712,30 @@ async function closePosition(symbol, position) {
   console.log("[CLOSE] Position closed");
 }
 
-async function createStopLossOrder(symbol, position, slPrice) {
-  const side = position.side === "long" ? "sell" : "buy";
-  const stopPrice = exchange.priceToPrecision(symbol, slPrice);
-  console.log(`[SL] Stop loss ${side} at ${stopPrice} (close position)`);
-  await retry(() => exchange.createOrder(symbol, "STOP_MARKET", side, undefined, undefined, {
-    stopPrice, closePosition: true, workingType: "MARK_PRICE",
-  }));
-}
-
-async function createPartialTPs(symbol, position, entryPrice, atr) {
-  const side = position.side === "long" ? "sell" : "buy";
+// NEW: Create simple stop loss and take profit orders (market-based, full quantity)
+async function createStopLossAndTakeProfit(symbol, position, slPrice, tpPrice) {
   const isLong = position.side === "long";
-  const total = position.contracts;
-  const tp1Qty = exchange.amountToPrecision(symbol, total * (TP1_PERCENT / 100));
-  const tp2Qty = exchange.amountToPrecision(symbol, total * (TP2_PERCENT / 100));
-  const runnerQty = exchange.amountToPrecision(symbol, total - Number(tp1Qty) - Number(tp2Qty));
-  let tp1Price = isLong ? entryPrice + atr * TP1_RR : entryPrice - atr * TP1_RR;
-  let tp2Price = isLong ? entryPrice + atr * TP2_RR : entryPrice - atr * TP2_RR;
-  tp1Price = Number(exchange.priceToPrecision(symbol, tp1Price));
-  tp2Price = Number(exchange.priceToPrecision(symbol, tp2Price));
-  if (Number(tp1Qty) > 0) {
-    await retry(() => exchange.createOrder(symbol, "TAKE_PROFIT_MARKET", side, Number(tp1Qty), undefined, { stopPrice: tp1Price, reduceOnly: true, workingType: "MARK_PRICE" }));
-    console.log(`[TP1] ${tp1Qty} @ ${tp1Price}`);
-  }
-  if (Number(tp2Qty) > 0) {
-    await retry(() => exchange.createOrder(symbol, "TAKE_PROFIT_MARKET", side, Number(tp2Qty), undefined, { stopPrice: tp2Price, reduceOnly: true, workingType: "MARK_PRICE" }));
-    console.log(`[TP2] ${tp2Qty} @ ${tp2Price}`);
-  }
-  if (Number(runnerQty) > 0) {
-    const callbackRate = clamp((atr / entryPrice) * 100, TRAILING_CALLBACK_MIN, TRAILING_CALLBACK_MAX);
-    await retry(() => exchange.createOrder(symbol, "TRAILING_STOP_MARKET", side, Number(runnerQty), undefined, { callbackRate, reduceOnly: true, workingType: "MARK_PRICE" }));
-    console.log(`[TRAILING] Runner ${runnerQty} callback ${callbackRate}%`);
-  }
+  const slSide = isLong ? "sell" : "buy";
+  const tpSide = isLong ? "sell" : "buy";
+  const quantity = position.contracts;
+  
+  // Stop Loss (STOP_MARKET)
+  const slStopPrice = exchange.priceToPrecision(symbol, slPrice);
+  await retry(() => exchange.createOrder(symbol, "STOP_MARKET", slSide, quantity, undefined, {
+    stopPrice: slStopPrice,
+    reduceOnly: true,
+    workingType: "MARK_PRICE"
+  }));
+  console.log(`[SL] Stop loss placed at ${slStopPrice} (${slSide})`);
+  
+  // Take Profit (TAKE_PROFIT_MARKET)
+  const tpStopPrice = exchange.priceToPrecision(symbol, tpPrice);
+  await retry(() => exchange.createOrder(symbol, "TAKE_PROFIT_MARKET", tpSide, quantity, undefined, {
+    stopPrice: tpStopPrice,
+    reduceOnly: true,
+    workingType: "MARK_PRICE"
+  }));
+  console.log(`[TP] Take profit placed at ${tpStopPrice} (${tpSide})`);
 }
 
 function calculateRR(signal, entry, tp, sl) {
@@ -904,8 +888,10 @@ async function tradingCycle() {
       actualTP = actualEntry - best.atr * ATR_TP_MULTIPLIER;
     }
     const actualRR = calculateRR(best.signal, actualEntry, actualTP, actualSL);
-    await createStopLossOrder(best.symbol, newPos, actualSL);
-    await createPartialTPs(best.symbol, newPos, actualEntry, best.atr);
+    
+    // Create simple SL and TP orders (no partial, no trailing)
+    await createStopLossAndTakeProfit(best.symbol, newPos, actualSL, actualTP);
+    
     await sendFonnteAlert(formatTradeOpenAlert({
       symbol: best.symbol, signal: best.signal, entryPrice: actualEntry,
       contracts: newPos.contracts, slPrice: actualSL, tpPrice: actualTP,
@@ -925,7 +911,7 @@ async function tradingCycle() {
 // ======================================================
 async function main() {
   console.log(`
-[START] SR + AI Bot
+[START] SR + AI Bot (Simple TP/SL)
 SYMBOLS: ${SYMBOLS.join(", ")}
 TIMEFRAME: ${TIMEFRAME}
 LEVERAGE: ${LEVERAGE}x
