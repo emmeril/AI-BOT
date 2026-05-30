@@ -75,6 +75,12 @@ class Config {
       minAtrPct: Config._number("MIN_ATR_PCT", 0.15) / 100,
       minVolumeChangeForTrend: Config._number("MIN_VOLUME_CHANGE_FOR_TREND", -30),
       supportResistanceLookback: Math.max(5, Config._number("SUPPORT_RESISTANCE_LOOKBACK", 20)),
+      structurePivotStrength: Math.max(2, Config._number("STRUCTURE_PIVOT_STRENGTH", 2)),
+      sweepBufferPct: Config._number("SWEEP_BUFFER_PCT", 0.1) / 100,
+      fvgMinGapPct: Config._number("FVG_MIN_GAP_PCT", 0.08) / 100,
+      volatilityContractionRatio: Config._number("VOLATILITY_CONTRACTION_RATIO", 0.8),
+      structureTpBufferPct: Config._number("STRUCTURE_TP_BUFFER_PCT", 0.1) / 100,
+      scanRotationBurstSymbols: Math.max(0, Config._number("SCAN_ROTATION_BURST_SYMBOLS", 1)),
       maxVolumeAnomalyRatio: Math.max(1.1, Config._number("MAX_VOLUME_ANOMALY_RATIO", 1.8)),
       maxOverextendedAtrMultiple: Math.max(0.5, Config._number("MAX_OVEREXTENDED_ATR_MULTIPLE", 2.2)),
       maxLiquidationRiskScore: Config._number("MAX_LIQUIDATION_RISK_SCORE", 70),
@@ -359,6 +365,117 @@ class IndicatorCalculator {
     }
     return atr;
   }
+
+  static findPivotLevels(ohlcv, strength = 2) {
+    if (!Array.isArray(ohlcv) || ohlcv.length < strength * 2 + 3) {
+      return { pivotHighs: [], pivotLows: [] };
+    }
+
+    const pivotHighs = [];
+    const pivotLows = [];
+    for (let i = strength; i < ohlcv.length - strength; i++) {
+      const high = Number(ohlcv[i][2]);
+      const low = Number(ohlcv[i][3]);
+      if (!Number.isFinite(high) || !Number.isFinite(low)) continue;
+
+      let isPivotHigh = true;
+      let isPivotLow = true;
+      for (let j = i - strength; j <= i + strength; j++) {
+        if (j === i) continue;
+        const compareHigh = Number(ohlcv[j][2]);
+        const compareLow = Number(ohlcv[j][3]);
+        if (Number.isFinite(compareHigh) && compareHigh >= high) isPivotHigh = false;
+        if (Number.isFinite(compareLow) && compareLow <= low) isPivotLow = false;
+        if (!isPivotHigh && !isPivotLow) break;
+      }
+
+      if (isPivotHigh) {
+        pivotHighs.push({
+          index: i,
+          timestamp: Number(ohlcv[i][0] || 0),
+          price: high
+        });
+      }
+      if (isPivotLow) {
+        pivotLows.push({
+          index: i,
+          timestamp: Number(ohlcv[i][0] || 0),
+          price: low
+        });
+      }
+    }
+
+    return { pivotHighs, pivotLows };
+  }
+
+  static findNearestLevelAbove(levels, price) {
+    if (!Array.isArray(levels) || !Number.isFinite(price)) return null;
+    const above = levels
+      .map(level => Number(level?.price))
+      .filter(level => Number.isFinite(level) && level > price)
+      .sort((a, b) => a - b);
+    return above.length ? above[0] : null;
+  }
+
+  static findNearestLevelBelow(levels, price) {
+    if (!Array.isArray(levels) || !Number.isFinite(price)) return null;
+    const below = levels
+      .map(level => Number(level?.price))
+      .filter(level => Number.isFinite(level) && level < price)
+      .sort((a, b) => b - a);
+    return below.length ? below[0] : null;
+  }
+
+  static findRecentFVG(ohlcv, direction, lookback = 8, minGapPct = 0) {
+    if (!Array.isArray(ohlcv) || ohlcv.length < 3) return null;
+    const start = Math.max(2, ohlcv.length - lookback);
+
+    for (let i = ohlcv.length - 1; i >= start; i--) {
+      const leftHigh = Number(ohlcv[i - 2][2]);
+      const leftLow = Number(ohlcv[i - 2][3]);
+      const rightHigh = Number(ohlcv[i][2]);
+      const rightLow = Number(ohlcv[i][3]);
+      if (![leftHigh, leftLow, rightHigh, rightLow].every(Number.isFinite)) continue;
+
+      if (direction === "bullish") {
+        if (rightLow > leftHigh * (1 + minGapPct)) {
+          return {
+            low: leftHigh,
+            high: rightLow,
+            createdAt: Number(ohlcv[i][0] || 0)
+          };
+        }
+      } else if (direction === "bearish") {
+        if (rightHigh < leftLow * (1 - minGapPct)) {
+          return {
+            low: rightHigh,
+            high: leftLow,
+            createdAt: Number(ohlcv[i][0] || 0)
+          };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  static getRangeHighLow(ohlcv) {
+    if (!Array.isArray(ohlcv) || ohlcv.length === 0) {
+      return { high: null, low: null };
+    }
+    const highs = [];
+    const lows = [];
+    for (const candle of ohlcv) {
+      const high = Number(candle?.[2]);
+      const low = Number(candle?.[3]);
+      if (Number.isFinite(high)) highs.push(high);
+      if (Number.isFinite(low)) lows.push(low);
+    }
+    return {
+      high: highs.length ? Math.max(...highs) : null,
+      low: lows.length ? Math.min(...lows) : null
+    };
+  }
 }
 
 // ======================================================
@@ -412,7 +529,6 @@ class MarketDataService {
     const trend = ema20 > ema50 ? "UPTREND" : ema20 < ema50 ? "DOWNTREND" : "SIDEWAYS";
     const emaGap = (Math.abs(ema20 - ema50) / context.price) * 100;
 
-    const srLookback = Math.min(Config.env.supportResistanceLookback, ohlcv.length);
     const breakoutLookback = Math.min(Config.env.breakoutLookbackCandles, Math.max(5, ohlcv.length - 1));
     const structureCandles = ohlcv.slice(Math.max(0, ohlcv.length - breakoutLookback - 1), -1);
     const highs = structureCandles.map(c => Number(c[2])).filter(Number.isFinite);
@@ -459,14 +575,116 @@ class MarketDataService {
     const volumeBreakout = Number.isFinite(avgVolume) && avgVolume > 0
       ? latestVolume >= avgVolume * Config.env.volumeBreakoutRatio
       : false;
-    
+
+    const { pivotHighs, pivotLows } = IndicatorCalculator.findPivotLevels(ohlcv.slice(0, -1), Config.env.structurePivotStrength);
+    const lastPivotHigh = pivotHighs.length ? pivotHighs[pivotHighs.length - 1] : null;
+    const prevPivotHigh = pivotHighs.length > 1 ? pivotHighs[pivotHighs.length - 2] : null;
+    const lastPivotLow = pivotLows.length ? pivotLows[pivotLows.length - 1] : null;
+    const prevPivotLow = pivotLows.length > 1 ? pivotLows[pivotLows.length - 2] : null;
+    const lastSwingHigh = Number.isFinite(Number(lastPivotHigh?.price)) ? Number(lastPivotHigh.price) : (Number.isFinite(resistance) ? Number(resistance) : null);
+    const prevSwingHigh = Number.isFinite(Number(prevPivotHigh?.price)) ? Number(prevPivotHigh.price) : null;
+    const lastSwingLow = Number.isFinite(Number(lastPivotLow?.price)) ? Number(lastPivotLow.price) : (Number.isFinite(support) ? Number(support) : null);
+    const prevSwingLow = Number.isFinite(Number(prevPivotLow?.price)) ? Number(prevPivotLow.price) : null;
+
+    const bullishLiquiditySweep = Number.isFinite(lastSwingLow) && Number.isFinite(latestLow) && Number.isFinite(latestClose)
+      ? latestLow < lastSwingLow * (1 - Config.env.sweepBufferPct) && latestClose > lastSwingLow
+      : false;
+    const bearishLiquiditySweep = Number.isFinite(lastSwingHigh) && Number.isFinite(latestHigh) && Number.isFinite(latestClose)
+      ? latestHigh > lastSwingHigh * (1 + Config.env.sweepBufferPct) && latestClose < lastSwingHigh
+      : false;
+    const bullishLiquiditySweepLow = bullishLiquiditySweep ? latestLow : null;
+    const bearishLiquiditySweepHigh = bearishLiquiditySweep ? latestHigh : null;
+
+    const bullishStructure = Number.isFinite(lastSwingHigh) && Number.isFinite(prevSwingHigh) && Number.isFinite(lastSwingLow) && Number.isFinite(prevSwingLow)
+      ? lastSwingHigh > prevSwingHigh && lastSwingLow > prevSwingLow
+      : false;
+    const bearishStructure = Number.isFinite(lastSwingHigh) && Number.isFinite(prevSwingHigh) && Number.isFinite(lastSwingLow) && Number.isFinite(prevSwingLow)
+      ? lastSwingHigh < prevSwingHigh && lastSwingLow < prevSwingLow
+      : false;
+
+    const bullishMSS = Number.isFinite(lastSwingHigh) && Number.isFinite(previousClose) && Number.isFinite(latestClose)
+      ? previousClose <= lastSwingHigh && latestClose > lastSwingHigh * (1 + Config.env.breakoutBufferPct / 2) && (bullishLiquiditySweep || !bearishStructure)
+      : false;
+    const bearishMSS = Number.isFinite(lastSwingLow) && Number.isFinite(previousClose) && Number.isFinite(latestClose)
+      ? previousClose >= lastSwingLow && latestClose < lastSwingLow * (1 - Config.env.breakoutBufferPct / 2) && (bearishLiquiditySweep || !bullishStructure)
+      : false;
+
+    const bullishFVG = IndicatorCalculator.findRecentFVG(ohlcv.slice(0, -1), "bullish", breakoutLookback, Config.env.fvgMinGapPct);
+    const bearishFVG = IndicatorCalculator.findRecentFVG(ohlcv.slice(0, -1), "bearish", breakoutLookback, Config.env.fvgMinGapPct);
+    const bullishOrderBlock = (() => {
+      for (let i = ohlcv.length - 2; i >= Math.max(1, ohlcv.length - breakoutLookback - 1); i--) {
+        const candle = ohlcv[i];
+        const open = Number(candle[1]);
+        const close = Number(candle[4]);
+        const high = Number(candle[2]);
+        const low = Number(candle[3]);
+        if (![open, close, high, low].every(Number.isFinite)) continue;
+        if (close < open && latestLow <= high * (1 + Config.env.sweepBufferPct) && latestClose >= low) {
+          return { high, low, createdAt: Number(candle[0] || 0) };
+        }
+      }
+      return null;
+    })();
+    const bearishOrderBlock = (() => {
+      for (let i = ohlcv.length - 2; i >= Math.max(1, ohlcv.length - breakoutLookback - 1); i--) {
+        const candle = ohlcv[i];
+        const open = Number(candle[1]);
+        const close = Number(candle[4]);
+        const high = Number(candle[2]);
+        const low = Number(candle[3]);
+        if (![open, close, high, low].every(Number.isFinite)) continue;
+        if (close > open && latestHigh >= low * (1 - Config.env.sweepBufferPct) && latestClose <= high) {
+          return { high, low, createdAt: Number(candle[0] || 0) };
+        }
+      }
+      return null;
+    })();
+
+    const recentWindowSize = Math.min(6, Math.max(3, Math.floor(breakoutLookback / 2)));
+    const recentCandles = ohlcv.slice(-recentWindowSize);
+    const priorCandles = ohlcv.slice(Math.max(0, ohlcv.length - recentWindowSize - recentWindowSize), -recentWindowSize);
+    const recentRange = IndicatorCalculator.getRangeHighLow(recentCandles);
+    const priorRange = IndicatorCalculator.getRangeHighLow(priorCandles);
+    const recentRangeWidthPct = Number.isFinite(recentRange.high) && Number.isFinite(recentRange.low) && latestClose > 0
+      ? ((recentRange.high - recentRange.low) / latestClose) * 100
+      : null;
+    const priorRangeWidthPct = Number.isFinite(priorRange.high) && Number.isFinite(priorRange.low) && latestClose > 0
+      ? ((priorRange.high - priorRange.low) / latestClose) * 100
+      : null;
+    const volatilityContraction = Number.isFinite(recentRangeWidthPct) && Number.isFinite(priorRangeWidthPct) && priorRangeWidthPct > 0
+      ? recentRangeWidthPct <= priorRangeWidthPct * Config.env.volatilityContractionRatio
+      : false;
+    const contractionBreakoutLong = volatilityContraction && Number.isFinite(recentRange.high) && latestClose > recentRange.high * (1 + Config.env.breakoutBufferPct) && volumeBreakout;
+    const contractionBreakoutShort = volatilityContraction && Number.isFinite(recentRange.low) && latestClose < recentRange.low * (1 - Config.env.breakoutBufferPct) && volumeBreakout;
+
+    const nearestResistanceAbove = IndicatorCalculator.findNearestLevelAbove(pivotHighs, latestClose);
+    const nextResistanceAbove = IndicatorCalculator.findNearestLevelAbove(
+      pivotHighs.filter(level => Number(level.price) > (nearestResistanceAbove ?? latestClose)),
+      latestClose
+    );
+    const nearestSupportBelow = IndicatorCalculator.findNearestLevelBelow(pivotLows, latestClose);
+    const nextSupportBelow = IndicatorCalculator.findNearestLevelBelow(
+      pivotLows.filter(level => Number(level.price) < (nearestSupportBelow ?? latestClose)),
+      latestClose
+    );
+
     const baseSnapshot = {
       candleTimestamp, expiresAt, ema20, ema50, ema20Slope, ema50Slope, emaGap, rsi, atr, volumeChange, trend,
       support, resistance, supportDistancePct, resistanceDistancePct, rangeWidthPct, rangePositionPct,
       avgVolume, volumeRatio, overextendedMovePct, overextendedAtrMultiple,
       breakoutLookback, breakoutLongDistancePct, breakoutShortDistancePct,
       breakoutLong, breakoutShort, bosLong, bosShort,
-      pullbackLong, pullbackShort, volumeBreakout
+      pullbackLong, pullbackShort, volumeBreakout,
+      lastSwingHigh, prevSwingHigh, lastSwingLow, prevSwingLow,
+      bullishLiquiditySweep, bearishLiquiditySweep,
+      bullishLiquiditySweepLow, bearishLiquiditySweepHigh,
+      bullishStructure, bearishStructure,
+      bullishMSS, bearishMSS,
+      bullishFVG, bearishFVG,
+      bullishOrderBlock, bearishOrderBlock,
+      recentRangeWidthPct, priorRangeWidthPct, volatilityContraction,
+      contractionBreakoutLong, contractionBreakoutShort,
+      nearestResistanceAbove, nextResistanceAbove, nearestSupportBelow, nextSupportBelow
     };
     const snapshot = { price: context.price, fundingRate: context.fundingRate, ...baseSnapshot };
     
@@ -752,10 +970,12 @@ class RiskManager {
   getRotatedScanSymbols() {
     const total = Config.env.symbols.length;
     const batchSize = Math.min(Config.env.scanRotationBatchSize, total);
+    const burst = total <= 6 ? Config.env.scanRotationBurstSymbols : 0;
+    const effectiveBatch = Math.min(total, batchSize + burst);
     const start = this.riskState.scanRotationIndex % total;
     const rotated = [];
-    for (let i = 0; i < batchSize; i++) rotated.push(Config.env.symbols[(start + i) % total]);
-    this.riskState.scanRotationIndex = (start + batchSize) % total;
+    for (let i = 0; i < effectiveBatch; i++) rotated.push(Config.env.symbols[(start + i) % total]);
+    this.riskState.scanRotationIndex = (start + effectiveBatch) % total;
     return rotated;
   }
 
@@ -930,8 +1150,11 @@ class AIValidator {
     const volumeRatio = Number(snapshot?.volumeRatio);
     const overextendedAtrMultiple = Number(snapshot?.overextendedAtrMultiple || 0);
     const breakoutSetup = proposedSignal === "LONG"
-      ? Boolean(snapshot?.bosLong || snapshot?.breakoutLong || snapshot?.pullbackLong)
-      : Boolean(snapshot?.bosShort || snapshot?.breakoutShort || snapshot?.pullbackShort);
+      ? Boolean(snapshot?.bosLong || snapshot?.breakoutLong || snapshot?.pullbackLong || snapshot?.bullishMSS || snapshot?.bullishLiquiditySweep || snapshot?.bullishFVG || snapshot?.contractionBreakoutLong || snapshot?.bullishOrderBlock)
+      : Boolean(snapshot?.bosShort || snapshot?.breakoutShort || snapshot?.pullbackShort || snapshot?.bearishMSS || snapshot?.bearishLiquiditySweep || snapshot?.bearishFVG || snapshot?.contractionBreakoutShort || snapshot?.bearishOrderBlock);
+    const volumeRequired = proposedSignal === "LONG"
+      ? Boolean(snapshot?.bosLong || snapshot?.breakoutLong || snapshot?.pullbackLong || snapshot?.contractionBreakoutLong)
+      : Boolean(snapshot?.bosShort || snapshot?.breakoutShort || snapshot?.pullbackShort || snapshot?.contractionBreakoutShort);
     const breakoutDistancePct = proposedSignal === "LONG"
       ? Number(snapshot?.breakoutLongDistancePct)
       : Number(snapshot?.breakoutShortDistancePct);
@@ -948,7 +1171,7 @@ class AIValidator {
     if (Number.isFinite(effectiveRoomPct) && !breakoutSetup && effectiveRoomPct <= Math.max(atrPct * 1.15, 0.35)) {
       reasons.push(`too close to ${proposedSignal === "LONG" ? "resistance" : "support"}`);
     }
-    if (breakoutSetup && !snapshot?.volumeBreakout) {
+    if (breakoutSetup && volumeRequired && !snapshot?.volumeBreakout) {
       reasons.push("breakout without volume expansion");
     }
     if (overextendedAtrMultiple >= Config.env.maxOverextendedAtrMultiple || snapshot?.overextendedMovePct >= 2.5) {
@@ -979,8 +1202,8 @@ class AIValidator {
     const atrPct = (atr / price) * 100;
     const leveragePressure = Utils.clamp(atrPct * Config.env.leverage * 5.5, 0, 60);
     const breakoutSetup = proposedSignal === "LONG"
-      ? Boolean(snapshot?.bosLong || snapshot?.breakoutLong || snapshot?.pullbackLong)
-      : Boolean(snapshot?.bosShort || snapshot?.breakoutShort || snapshot?.pullbackShort);
+      ? Boolean(snapshot?.bosLong || snapshot?.breakoutLong || snapshot?.pullbackLong || snapshot?.bullishMSS || snapshot?.bullishLiquiditySweep || snapshot?.bullishFVG || snapshot?.contractionBreakoutLong || snapshot?.bullishOrderBlock)
+      : Boolean(snapshot?.bosShort || snapshot?.breakoutShort || snapshot?.pullbackShort || snapshot?.bearishMSS || snapshot?.bearishLiquiditySweep || snapshot?.bearishFVG || snapshot?.contractionBreakoutShort || snapshot?.bearishOrderBlock);
     const breakoutDistancePct = proposedSignal === "LONG"
       ? Number(snapshot?.breakoutLongDistancePct)
       : Number(snapshot?.breakoutShortDistancePct);
@@ -1042,6 +1265,10 @@ Sideways gap: ${snapshot.emaGap}%
 Support: ${snapshot.support}, Resistance: ${snapshot.resistance}
 Distance to support: ${supportDistance}, Distance to resistance: ${resistanceDistance}
 Volume ratio vs recent average: ${volumeRatio}
+Market structure shift long: ${snapshot.bullishMSS ? "yes" : "no"}, short: ${snapshot.bearishMSS ? "yes" : "no"}
+Liquidity sweep long: ${snapshot.bullishLiquiditySweep ? "yes" : "no"}, short: ${snapshot.bearishLiquiditySweep ? "yes" : "no"}
+Fair value gap long: ${snapshot.bullishFVG ? "yes" : "no"}, short: ${snapshot.bearishFVG ? "yes" : "no"}
+Volatility contraction breakout long: ${snapshot.contractionBreakoutLong ? "yes" : "no"}, short: ${snapshot.contractionBreakoutShort ? "yes" : "no"}
 Breakout long: ${breakoutLong}, breakout short: ${breakoutShort}
 BOS long: ${bosLong}, BOS short: ${bosShort}
 Pullback long: ${pullbackLong}, pullback short: ${pullbackShort}
@@ -1235,20 +1462,26 @@ class OrderManager {
     return order;
   }
   
-  async createPartialTPs(symbol, position, entryPrice, atr) {
+  async createPartialTPs(symbol, position, entryPrice, tpPlanOrAtr) {
     const side = position.side === "long" ? "sell" : "buy";
     const isLong = position.side === "long";
+    const tpPlan = Number.isFinite(Number(tpPlanOrAtr))
+      ? { atr: Number(tpPlanOrAtr) }
+      : (tpPlanOrAtr || {});
+    const atr = Number(tpPlan.atr || 0);
     const total = position.contracts;
     const tp1Qty = Number(this.exchange.amountToPrecision(symbol, total * Config.env.tp1Percent / 100));
     const tp2Qty = Number(this.exchange.amountToPrecision(symbol, total * Config.env.tp2Percent / 100));
     const runnerQty = Number(this.exchange.amountToPrecision(symbol, total - tp1Qty - tp2Qty));
-    let tp1Price, tp2Price;
-    if (isLong) {
-      tp1Price = entryPrice + atr * Config.env.tp1RR;
-      tp2Price = entryPrice + atr * Config.env.tp2RR;
-    } else {
-      tp1Price = entryPrice - atr * Config.env.tp1RR;
-      tp2Price = entryPrice - atr * Config.env.tp2RR;
+    let tp1Price = Number(tpPlan.tp1Price);
+    let tp2Price = Number(tpPlan.tp2Price);
+    if (!Number.isFinite(tp1Price) || tp1Price <= 0) {
+      if (isLong) tp1Price = entryPrice + atr * Config.env.tp1RR;
+      else tp1Price = entryPrice - atr * Config.env.tp1RR;
+    }
+    if (!Number.isFinite(tp2Price) || tp2Price <= 0) {
+      if (isLong) tp2Price = entryPrice + atr * Config.env.tp2RR;
+      else tp2Price = entryPrice - atr * Config.env.tp2RR;
     }
     tp1Price = Number(this.exchange.priceToPrecision(symbol, tp1Price));
     tp2Price = Number(this.exchange.priceToPrecision(symbol, tp2Price));
@@ -1266,7 +1499,9 @@ class OrderManager {
       console.log(`[OK] TP2 created: ${tp2Qty}`);
     }
     if (runnerQty > 0) {
-      const callbackRate = Utils.clamp((atr / entryPrice) * 100, Config.env.trailingCallbackMin, Config.env.trailingCallbackMax);
+      const callbackRate = Number.isFinite(Number(tpPlan.trailingCallbackRate))
+        ? Number(tpPlan.trailingCallbackRate)
+        : Utils.clamp((atr / entryPrice) * 100, Config.env.trailingCallbackMin, Config.env.trailingCallbackMax);
       orders.runnerOrder = await this.exchange.createOrder(symbol, "TRAILING_STOP_MARKET", side, runnerQty, undefined, { callbackRate, reduceOnly: true, workingType: "MARK_PRICE" });
       console.log(`\n[TRAILING] Runner ${runnerQty} | Callback: ${callbackRate}%`);
     }
@@ -1335,27 +1570,38 @@ class OrderManager {
 class MarketRegimeFilter {
   static detect(snapshot, htfSnapshot) {
     const atrPct = snapshot.price > 0 ? snapshot.atr / snapshot.price : 0;
+    const bullishStructural = snapshot.bullishMSS || snapshot.bullishLiquiditySweep || snapshot.contractionBreakoutLong || snapshot.bullishFVG || snapshot.bullishOrderBlock;
+    const bearishStructural = snapshot.bearishMSS || snapshot.bearishLiquiditySweep || snapshot.contractionBreakoutShort || snapshot.bearishFVG || snapshot.bearishOrderBlock;
+    const bullishReversal = snapshot.bullishMSS || (snapshot.bullishLiquiditySweep && snapshot.bullishFVG) || snapshot.contractionBreakoutLong;
+    const bearishReversal = snapshot.bearishMSS || (snapshot.bearishLiquiditySweep && snapshot.bearishFVG) || snapshot.contractionBreakoutShort;
+    if (bullishReversal) {
+      return { regime: "TRENDING_UP", allow: true, reason: snapshot.bullishMSS ? "Bullish structure shift" : "Bullish reversal structure", atrPct };
+    }
+    if (bearishReversal) {
+      return { regime: "TRENDING_DOWN", allow: true, reason: snapshot.bearishMSS ? "Bearish structure shift" : "Bearish reversal structure", atrPct };
+    }
     const bullishBreakout = htfSnapshot.trend === "UPTREND" && snapshot.volumeBreakout && (
-      snapshot.bosLong || snapshot.breakoutLong || snapshot.pullbackLong
+      snapshot.bosLong || snapshot.breakoutLong || snapshot.pullbackLong || bullishStructural
     );
     const bearishBreakout = htfSnapshot.trend === "DOWNTREND" && snapshot.volumeBreakout && (
-      snapshot.bosShort || snapshot.breakoutShort || snapshot.pullbackShort
+      snapshot.bosShort || snapshot.breakoutShort || snapshot.pullbackShort || bearishStructural
     );
     if (bullishBreakout) {
-      return { regime: "TRENDING_UP", allow: true, reason: "Bullish breakout continuation", atrPct };
+      return { regime: "TRENDING_UP", allow: true, reason: snapshot.bullishMSS ? "Bullish MSS continuation" : "Bullish breakout continuation", atrPct };
     }
     if (bearishBreakout) {
-      return { regime: "TRENDING_DOWN", allow: true, reason: "Bearish breakout continuation", atrPct };
+      return { regime: "TRENDING_DOWN", allow: true, reason: snapshot.bearishMSS ? "Bearish MSS continuation" : "Bearish breakout continuation", atrPct };
     }
     const bullish = snapshot.trend === "UPTREND" && htfSnapshot.trend === "UPTREND" &&
       snapshot.ema20Slope > 0 && htfSnapshot.ema20Slope > 0 &&
-      snapshot.volumeChange >= Config.env.minVolumeChangeForTrend;
+      snapshot.volumeChange >= Config.env.minVolumeChangeForTrend && (bullishStructural || snapshot.rsi >= 50);
     const bearish = snapshot.trend === "DOWNTREND" && htfSnapshot.trend === "DOWNTREND" &&
       snapshot.ema20Slope < 0 && htfSnapshot.ema20Slope < 0 &&
-      snapshot.volumeChange >= Config.env.minVolumeChangeForTrend;
-    const sideways = snapshot.emaGap < Config.env.sidewaysEmaGap ||
+      snapshot.volumeChange >= Config.env.minVolumeChangeForTrend && (bearishStructural || snapshot.rsi <= 50);
+    const sidewaysBase = snapshot.emaGap < Config.env.sidewaysEmaGap ||
       (Math.abs(snapshot.ema20Slope) < snapshot.atr * 0.02 && Math.abs(snapshot.ema50Slope) < snapshot.atr * 0.02) ||
       (snapshot.rsi >= 45 && snapshot.rsi <= 55 && atrPct < Config.env.minAtrPct);
+    const sideways = sidewaysBase && !bullishStructural && !bearishStructural;
     const volatile = atrPct >= Config.env.maxAtrPct;
     
     if (sideways) return { regime: "CHOPPY", allow: false, reason: "Ranging market", atrPct };
@@ -1512,11 +1758,27 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
     
     const { trend, rsi, volumeChange, ema20Slope, ema50Slope, atr, price, volumeRatio } = snapshot;
     const { trend: htfTrend } = htfSnapshot;
-    const bullishBreakoutSetup = htfTrend === "UPTREND" && snapshot.volumeBreakout && (
-      snapshot.bosLong || snapshot.breakoutLong || snapshot.pullbackLong
+    const bullishStructureScore = [
+      snapshot.bullishMSS ? 40 : 0,
+      snapshot.bullishLiquiditySweep ? 18 : 0,
+      snapshot.bullishFVG ? 12 : 0,
+      snapshot.bullishOrderBlock ? 10 : 0,
+      snapshot.contractionBreakoutLong ? 20 : 0,
+      snapshot.volumeBreakout ? 8 : 0
+    ].reduce((sum, value) => sum + value, 0);
+    const bearishStructureScore = [
+      snapshot.bearishMSS ? 40 : 0,
+      snapshot.bearishLiquiditySweep ? 18 : 0,
+      snapshot.bearishFVG ? 12 : 0,
+      snapshot.bearishOrderBlock ? 10 : 0,
+      snapshot.contractionBreakoutShort ? 20 : 0,
+      snapshot.volumeBreakout ? 8 : 0
+    ].reduce((sum, value) => sum + value, 0);
+    const bullishBreakoutSetup = htfTrend !== "DOWNTREND" && snapshot.volumeBreakout && (
+      snapshot.bosLong || snapshot.breakoutLong || snapshot.pullbackLong || snapshot.bullishMSS || snapshot.bullishLiquiditySweep || snapshot.bullishFVG
     );
-    const bearishBreakoutSetup = !Config.env.longOnly && htfTrend === "DOWNTREND" && snapshot.volumeBreakout && (
-      snapshot.bosShort || snapshot.breakoutShort || snapshot.pullbackShort
+    const bearishBreakoutSetup = !Config.env.longOnly && htfTrend !== "UPTREND" && snapshot.volumeBreakout && (
+      snapshot.bosShort || snapshot.breakoutShort || snapshot.pullbackShort || snapshot.bearishMSS || snapshot.bearishLiquiditySweep || snapshot.bearishFVG
     );
     
     let signal = "HOLD";
@@ -1524,46 +1786,75 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
     let confidence = 50;
     let reason = "";
     
-    // Sinyal LONG
-    if (trend === "UPTREND" && htfTrend === "UPTREND" && ema20Slope > 0 && rsi > 50) {
+    // Sinyal LONG berbasis struktur market
+    if (
+      bullishStructureScore >= 35 &&
+      (htfTrend !== "DOWNTREND" || snapshot.bullishMSS) &&
+      rsi >= 45 &&
+      ema20Slope >= 0
+    ) {
       signal = "LONG";
-      strength = rsi > 70 ? "STRONG" : (rsi > 60 ? "MEDIUM" : "WEAK");
-      confidence = Math.min(90, 60 + (rsi - 50));
-      reason = "Bullish alignment on both timeframes";
+      strength = bullishStructureScore >= 60 ? "EXTREME" : (bullishStructureScore >= 45 ? "STRONG" : "MEDIUM");
+      confidence = Math.min(96, 52 + bullishStructureScore + Math.max(0, rsi - 45));
+      reason = snapshot.bullishMSS
+        ? "Bullish market structure shift with liquidity sweep"
+        : snapshot.contractionBreakoutLong
+          ? "Volatility contraction breakout to the upside"
+          : snapshot.bullishFVG
+            ? "Bullish fair value gap / order block reaction"
+            : "Bullish structure continuation";
     }
     else if (bullishBreakoutSetup && (rsi >= Config.env.breakoutRsiMin || snapshot.breakoutLong || snapshot.bosLong)) {
       signal = "LONG";
-      strength = snapshot.bosLong ? "STRONG" : "MEDIUM";
+      strength = snapshot.bosLong || snapshot.bullishMSS ? "STRONG" : "MEDIUM";
       const breakoutBonus = snapshot.bosLong ? 14 : (snapshot.breakoutLong ? 10 : 8);
       const volumeBonus = Number.isFinite(volumeRatio) ? Math.min(12, Math.max(0, (volumeRatio - 1) * 12)) : 0;
-      confidence = Math.min(95, 58 + breakoutBonus + volumeBonus + Math.max(0, rsi - 48));
-      reason = snapshot.bosLong
-        ? "Bullish BOS with volume breakout"
-        : snapshot.breakoutLong
-          ? "Bullish structure breakout with volume support"
-          : "Bullish EMA pullback with volume support";
+      const structureBonus = Math.min(18, Math.max(0, bullishStructureScore / 2));
+      confidence = Math.min(95, 56 + breakoutBonus + structureBonus + volumeBonus + Math.max(0, rsi - 48));
+      reason = snapshot.bullishMSS
+        ? "Bullish MSS breakout with volume support"
+        : snapshot.bosLong
+          ? "Bullish BOS with volume breakout"
+          : snapshot.breakoutLong
+            ? "Bullish structure breakout with volume support"
+            : "Bullish EMA pullback with volume support";
     }
-    // Sinyal SHORT (hanya jika LONG_ONLY=false)
-    else if (!Config.env.longOnly && trend === "DOWNTREND" && htfTrend === "DOWNTREND" && ema20Slope < 0 && rsi < 50) {
+    // Sinyal SHORT berbasis struktur market
+    else if (
+      !Config.env.longOnly &&
+      bearishStructureScore >= 35 &&
+      (htfTrend !== "UPTREND" || snapshot.bearishMSS) &&
+      rsi <= 55 &&
+      ema20Slope <= 0
+    ) {
       signal = "SHORT";
-      strength = rsi < 30 ? "STRONG" : (rsi < 40 ? "MEDIUM" : "WEAK");
-      confidence = Math.min(90, 60 + (50 - rsi));
-      reason = "Bearish alignment on both timeframes";
+      strength = bearishStructureScore >= 60 ? "EXTREME" : (bearishStructureScore >= 45 ? "STRONG" : "MEDIUM");
+      confidence = Math.min(96, 52 + bearishStructureScore + Math.max(0, 55 - rsi));
+      reason = snapshot.bearishMSS
+        ? "Bearish market structure shift with liquidity sweep"
+        : snapshot.contractionBreakoutShort
+          ? "Volatility contraction breakout to the downside"
+          : snapshot.bearishFVG
+            ? "Bearish fair value gap / order block reaction"
+            : "Bearish structure continuation";
     }
-    else if (bearishBreakoutSetup && (rsi <= (100 - Config.env.breakoutRsiMin) || snapshot.breakoutShort || snapshot.bosShort)) {
+    else if (!Config.env.longOnly && bearishBreakoutSetup && (rsi <= (100 - Config.env.breakoutRsiMin) || snapshot.breakoutShort || snapshot.bosShort)) {
       signal = "SHORT";
-      strength = snapshot.bosShort ? "STRONG" : "MEDIUM";
+      strength = snapshot.bosShort || snapshot.bearishMSS ? "STRONG" : "MEDIUM";
       const breakoutBonus = snapshot.bosShort ? 14 : (snapshot.breakoutShort ? 10 : 8);
       const volumeBonus = Number.isFinite(volumeRatio) ? Math.min(12, Math.max(0, (volumeRatio - 1) * 12)) : 0;
-      confidence = Math.min(95, 58 + breakoutBonus + volumeBonus + Math.max(0, 52 - rsi));
-      reason = snapshot.bosShort
-        ? "Bearish BOS with volume breakout"
-        : snapshot.breakoutShort
-          ? "Bearish structure breakout with volume support"
-          : "Bearish EMA pullback with volume support";
+      const structureBonus = Math.min(18, Math.max(0, bearishStructureScore / 2));
+      confidence = Math.min(95, 56 + breakoutBonus + structureBonus + volumeBonus + Math.max(0, 52 - rsi));
+      reason = snapshot.bearishMSS
+        ? "Bearish MSS breakout with volume support"
+        : snapshot.bosShort
+          ? "Bearish BOS with volume breakout"
+          : snapshot.breakoutShort
+            ? "Bearish structure breakout with volume support"
+            : "Bearish EMA pullback with volume support";
     }
     else {
-      reason = "No clear technical setup";
+      reason = "No clear structure or trend setup";
     }
     
     // Volume filter: tolak jika volume menurun drastis
@@ -1592,7 +1883,8 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
       const snapshot = await this.marketData.getMarketSnapshot(symbol, context, Config.env.timeframe);
       const htfSnapshot = await this.marketData.getMarketSnapshot(symbol, context, Config.env.htfTimeframe);
       const regimeInfo = MarketRegimeFilter.detect(snapshot, htfSnapshot);
-      const breakoutSetupPresent = snapshot.bosLong || snapshot.breakoutLong || snapshot.pullbackLong || snapshot.bosShort || snapshot.breakoutShort || snapshot.pullbackShort;
+      const breakoutSetupPresent = snapshot.bosLong || snapshot.breakoutLong || snapshot.pullbackLong || snapshot.bullishMSS || snapshot.bullishLiquiditySweep || snapshot.bullishFVG || snapshot.contractionBreakoutLong || snapshot.bullishOrderBlock ||
+        snapshot.bosShort || snapshot.breakoutShort || snapshot.pullbackShort || snapshot.bearishMSS || snapshot.bearishLiquiditySweep || snapshot.bearishFVG || snapshot.contractionBreakoutShort || snapshot.bearishOrderBlock;
       
       if (snapshot.emaGap < Config.env.sidewaysEmaGap && !breakoutSetupPresent) {
         console.log(`${symbol} skipped: sideways (EMA gap ${snapshot.emaGap.toFixed(2)}%)`);
@@ -1646,8 +1938,13 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
         return null;
       }
       
-      // 6. Dynamic TP/SL dan RR
-      const { tp, sl } = this._dynamicTPSL(signal, context.price, snapshot.atr, strength);
+      // 6. Dynamic TP/SL dan RR berbasis struktur market
+      const tpPlan = this._dynamicTPSL(signal, context.price, snapshot, strength);
+      if (!tpPlan) {
+        console.log(`${symbol} skipped: no valid structure-based TP/SL`);
+        return null;
+      }
+      const { tp, tp1, tp2, sl } = tpPlan;
       const slDistance = Math.abs(sl - context.price);   // <-- PERUBAHAN: simpan jarak SL
       const rr = this._calculateRR(signal, context.price, tp, sl);
       console.log(`${symbol} RR: ${rr.toFixed(2)}`);
@@ -1660,7 +1957,7 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
       const score = this._scoreCandidate(finalConfidence, rr, regimeInfo, strength);
       return {
         symbol, signal, confidence: finalConfidence, strength,
-        context, snapshot, htfSnapshot, regimeInfo, rr, score, tp, sl, slDistance,   // <-- PERUBAHAN: tambahkan slDistance
+        context, snapshot, htfSnapshot, regimeInfo, rr, score, tp, tp1, tp2, sl, slDistance, tpPlan,   // <-- PERUBAHAN: tambahkan slDistance
         aiValidationReason: aiValidation.reason
       };
     } catch (err) {
@@ -1672,7 +1969,7 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
   }
   
   async executeBestCandidate(best, openPositions) {
-    const { symbol, signal, context, snapshot, confidence, strength, rr, tp, sl, slDistance } = best;  // <-- PERUBAHAN: ambil slDistance
+    const { symbol, signal, context, snapshot, confidence, strength, rr, tp, tp1, tp2, sl, slDistance, tpPlan } = best;  // <-- PERUBAHAN: ambil slDistance
     const position = openPositions.find(p => p.symbol === symbol);
     if (position && position.side === signal.toLowerCase()) {
       console.log(`${symbol} position already exists`);
@@ -1691,7 +1988,7 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
     await this.orderManager.cancelAllOrders(symbol);
     const newPos = await this.orderManager.openPosition(symbol, signal, context.price, sl);
     if (!newPos) return;
-    
+
     const actualEntry = newPos.entryPrice;
     // <-- PERUBAHAN: hitung SL real berdasarkan slDistance yang sudah disimpan (bukan snapshot.atr)
     const slPrice = signal === "LONG"
@@ -1701,7 +1998,12 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
     console.log(`[SL] Real SL from RR calculation: ${slPricePrecise} (distance ${slDistance.toFixed(8)})`);
     
     const stopOrder = await this.orderManager.createStopLossOrder(symbol, newPos, slPricePrecise);
-    const tpOrders = await this.orderManager.createPartialTPs(symbol, newPos, actualEntry, snapshot.atr);
+    const tpOrders = await this.orderManager.createPartialTPs(symbol, newPos, actualEntry, {
+      tp1Price: tp1 ?? tp,
+      tp2Price: tp2 ?? null,
+      atr: snapshot.atr,
+      trailingCallbackRate: null
+    });
     this.riskManager.registerActiveTrade(symbol, {
       side: newPos.side,
       entryPrice: actualEntry,
@@ -1767,11 +2069,56 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
     }
   }
   
-  _dynamicTPSL(signal, entry, atr, strength) {
-    const tpMult = { STRONG: 2.5, EXTREME: 3 }[strength] || Config.env.atrTpMultiplier;
-    const slMult = { MEDIUM: 1.8, STRONG: 2.2, EXTREME: 2.5 }[strength] || 1.5;
-    const dir = signal === "LONG" ? 1 : -1;
-    return { tp: entry + dir * atr * tpMult, sl: entry - dir * atr * slMult };
+  _dynamicTPSL(signal, entry, snapshot, strength) {
+    const isLong = signal === "LONG";
+    const price = Number(entry);
+    const atr = Number(snapshot?.atr || 0);
+    if (!Number.isFinite(price) || price <= 0) return null;
+
+    const targetCandidates = isLong
+      ? [snapshot?.nearestResistanceAbove, snapshot?.nextResistanceAbove, snapshot?.resistance]
+      : [snapshot?.nearestSupportBelow, snapshot?.nextSupportBelow, snapshot?.support];
+    const stopCandidates = isLong
+      ? [snapshot?.bullishLiquiditySweepLow, snapshot?.bullishOrderBlock?.low, snapshot?.lastSwingLow, snapshot?.nearestSupportBelow, snapshot?.support]
+      : [snapshot?.bearishLiquiditySweepHigh, snapshot?.bearishOrderBlock?.high, snapshot?.lastSwingHigh, snapshot?.nearestResistanceAbove, snapshot?.resistance];
+
+    const pickFirstFinite = (values) => {
+      for (const value of values) {
+        const num = Number(value);
+        if (Number.isFinite(num) && num > 0) return num;
+      }
+      return null;
+    };
+
+    const stopAnchor = pickFirstFinite(stopCandidates);
+    const tp1 = pickFirstFinite(targetCandidates);
+    const tp2 = pickFirstFinite(isLong ? targetCandidates.slice(1) : targetCandidates.slice(1));
+
+    if (!Number.isFinite(stopAnchor) || !Number.isFinite(tp1)) return null;
+
+    const stopBuffer = Math.max(
+      price * Config.env.structureTpBufferPct,
+      Number.isFinite(atr) ? atr * 0.1 : 0,
+      price * 0.0005
+    );
+    const sl = isLong ? stopAnchor - stopBuffer : stopAnchor + stopBuffer;
+    if (!Number.isFinite(sl) || sl <= 0) return null;
+    if (isLong && sl >= price) return null;
+    if (!isLong && sl <= price) return null;
+    if (isLong && tp1 <= price) return null;
+    if (!isLong && tp1 >= price) return null;
+
+    const rr = this._calculateRR(signal, price, tp1, sl);
+    if (!Number.isFinite(rr) || rr < Config.env.minRR) return null;
+
+    const tp = tp1;
+    return {
+      tp,
+      tp1,
+      tp2: Number.isFinite(tp2) && ((isLong && tp2 > tp1) || (!isLong && tp2 < tp1)) ? tp2 : null,
+      sl,
+      stopAnchor
+    };
   }
   
   _calculateRR(signal, entry, tp, sl) {
