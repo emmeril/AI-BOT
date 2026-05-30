@@ -90,10 +90,7 @@ const INTERVAL_MS = INTERVAL_MINUTES * 60 * 1000;
 // SR detection parameters
 const SR_WINDOW_SIZE = envNumber("SR_WINDOW_SIZE", 5);     // swing detection window
 const SR_LEVEL_TOLERANCE = envNumber("SR_LEVEL_TOLERANCE", 0.005); // 0.5% tolerance for level grouping
-const PRICE_PROXIMITY_THRESHOLD = envNumber("PRICE_PROXIMITY_THRESHOLD", 0.005); // 0.5% to consider near level
-
-// [MOD] New env variable: minimum distance to support/resistance to call AI
-const PRICE_PROXIMITY_FOR_AI = envNumber("PRICE_PROXIMITY_FOR_AI", 0.005); // 0.5% - if price is farther than this, skip AI
+const PRICE_PROXIMITY_THRESHOLD = envNumber("PRICE_PROXIMITY_THRESHOLD", 0.005); // 0.5% to consider near level (used for AI filter)
 
 // AI
 const GEMINI_MODEL = envValue("GEMINI_MODEL", "gemini-1.5-flash-lite");
@@ -776,7 +773,7 @@ async function analyzeSymbol(symbol) {
       return null;
     }
     
-    // [MOD] === BEGIN: PRICE PROXIMITY CHECK BEFORE AI ===
+    // ========== PROXIMITY CHECK BEFORE AI (using PRICE_PROXIMITY_THRESHOLD) ==========
     // Find nearest support below price and nearest resistance above price
     const supportsBelow = support.filter(s => s.price < currentPrice).sort((a,b) => b.price - a.price);
     const resistancesAbove = resistance.filter(r => r.price > currentPrice).sort((a,b) => a.price - b.price);
@@ -788,14 +785,13 @@ async function analyzeSymbol(symbol) {
     if (nearestSupport) distanceToSupport = (currentPrice - nearestSupport.price) / currentPrice;
     if (nearestResistance) distanceToResistance = (nearestResistance.price - currentPrice) / currentPrice;
     
-    const minDistanceToLevel = PRICE_PROXIMITY_FOR_AI; // e.g., 0.005 = 0.5%
     // If price is not close to any key level, skip AI entirely
-    if (distanceToSupport > minDistanceToLevel && distanceToResistance > minDistanceToLevel) {
-      console.log(`${symbol} price not near any S/R level (dist to S: ${(distanceToSupport*100).toFixed(2)}%, to R: ${(distanceToResistance*100).toFixed(2)}%) -> skip AI`);
+    if (distanceToSupport > PRICE_PROXIMITY_THRESHOLD && distanceToResistance > PRICE_PROXIMITY_THRESHOLD) {
+      console.log(`${symbol} price not near any S/R level (dist to S: ${(distanceToSupport*100).toFixed(2)}%, to R: ${(distanceToResistance*100).toFixed(2)}%) > threshold ${(PRICE_PROXIMITY_THRESHOLD*100).toFixed(2)}% -> skip AI`);
       return null;
     }
-    console.log(`${symbol} price near level: ${distanceToSupport <= minDistanceToLevel ? 'SUPPORT' : 'RESISTANCE'} (dist ${(Math.min(distanceToSupport, distanceToResistance)*100).toFixed(2)}%)`);
-    // [MOD] === END: PRICE PROXIMITY CHECK ===
+    console.log(`${symbol} price near level: ${distanceToSupport <= PRICE_PROXIMITY_THRESHOLD ? 'SUPPORT' : 'RESISTANCE'} (dist ${(Math.min(distanceToSupport, distanceToResistance)*100).toFixed(2)}%)`);
+    // ========== END PROXIMITY CHECK ==========
     
     // AI evaluation (only if price is near a level)
     const ai = await getAISignal(symbol, currentPrice, support, resistance, ohlcv);
@@ -943,9 +939,9 @@ ORDER SIZE: ${ORDER_SIZE_USDT} USDT
 MAX POSITIONS: ${MAX_OPEN_POSITIONS}
 LONG ONLY: ${LONG_ONLY}
 SR_WINDOW: ${SR_WINDOW_SIZE}, TOLERANCE: ${SR_LEVEL_TOLERANCE*100}%
+PRICE_PROXIMITY_THRESHOLD (for AI call): ${PRICE_PROXIMITY_THRESHOLD * 100}%
 MIN_AI_CONFIDENCE: ${MIN_AI_CONFIDENCE}
 ALLOWED_STRENGTHS: ${ALLOWED_AI_STRENGTHS.join(", ")}
-PRICE_PROXIMITY_FOR_AI: ${PRICE_PROXIMITY_FOR_AI * 100}%  // [MOD]
 `);
   await retry(() => exchange.loadMarkets());
   await syncProfitLedger();
