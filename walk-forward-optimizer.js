@@ -131,17 +131,24 @@ function calculateRSI(closes, period = 14) {
 }
 
 function calculateATR(ohlcv, period = 14) {
-  if (ohlcv.length <= period) return null;
+  if (!Array.isArray(ohlcv) || ohlcv.length < period + 1) return null;
   const trs = [];
-  for (let i = ohlcv.length - period; i < ohlcv.length; i++) {
-    const prevClose = ohlcv[i - 1][4];
-    const high = ohlcv[i][2];
-    const low = ohlcv[i][3];
+  for (let i = 1; i < ohlcv.length; i++) {
+    const prevClose = Number(ohlcv[i - 1][4]);
+    const high = Number(ohlcv[i][2]);
+    const low = Number(ohlcv[i][3]);
+    if (![prevClose, high, low].every(Number.isFinite)) return null;
     trs.push(
       Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)),
     );
   }
-  return trs.reduce((a, b) => a + b, 0) / trs.length;
+  if (trs.length < period) return null;
+
+  let atr = trs.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < trs.length; i++) {
+    atr = ((atr * (period - 1)) + trs[i]) / period;
+  }
+  return atr;
 }
 
 function findHtfIndex(htfRows, timestamp) {
@@ -168,7 +175,7 @@ function buildSnapshot(rows, index, price) {
   const ema50 = calculateEMA(closes.slice(-50), 50);
   const prevEma20 = calculateEMA(closes.slice(-21, -1), 20);
   const prevEma50 = calculateEMA(closes.slice(-51, -1), 50);
-  const atr = calculateATR(slice.slice(-15), 14);
+  const atr = calculateATR(slice, 14);
   const rsi = calculateRSI(closes, 14);
   if ([ema20, ema50, prevEma20, prevEma50, atr, rsi].some((v) => v === null)) {
     return null;
@@ -253,7 +260,7 @@ function calculateRR(signal, entry, tp, sl) {
 
 function simulateTrade(rows, entryIndex, signal, params, equity) {
   const entry = rows[entryIndex][4];
-  const atr = calculateATR(rows.slice(0, entryIndex + 1).slice(-15), 14);
+  const atr = calculateATR(rows.slice(0, entryIndex + 1), 14);
   if (!atr || atr <= 0) return null;
 
   const sl = signal === "LONG" ? entry - atr : entry + atr;

@@ -333,18 +333,31 @@ class IndicatorCalculator {
     return 100 - 100 / (1 + rs);
   }
   
-  static calculateATR(ohlcv) {
-    if (!Array.isArray(ohlcv) || ohlcv.length < 2) return null;
+  static calculateATR(ohlcv, period = 14) {
+    period = Math.max(1, Number(period) || 14);
+    if (!Array.isArray(ohlcv) || ohlcv.length < period + 1) return null;
+
+    // Wilder ATR = RMA dari True Range, bukan simple average TR.
     const trs = [];
     for (let i = 1; i < ohlcv.length; i++) {
-      const prevClose = ohlcv[i - 1][4];
-      const high = ohlcv[i][2];
-      const low = ohlcv[i][3];
-      const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
-      trs.push(tr);
+      const prevClose = Number(ohlcv[i - 1][4]);
+      const high = Number(ohlcv[i][2]);
+      const low = Number(ohlcv[i][3]);
+      if (![prevClose, high, low].every(Number.isFinite)) return null;
+      trs.push(Math.max(
+        high - low,
+        Math.abs(high - prevClose),
+        Math.abs(low - prevClose)
+      ));
     }
-    if (!trs.length) return null;
-    return trs.reduce((a, b) => a + b, 0) / trs.length;
+
+    if (trs.length < period) return null;
+
+    let atr = trs.slice(0, period).reduce((sum, value) => sum + value, 0) / period;
+    for (let i = period; i < trs.length; i++) {
+      atr = ((atr * (period - 1)) + trs[i]) / period;
+    }
+    return atr;
   }
 }
 
@@ -392,7 +405,7 @@ class MarketDataService {
     const ema20Slope = ema20 - prevEma20;
     const ema50Slope = ema50 - prevEma50;
     const rsi = IndicatorCalculator.calculateRSI(closes);
-    const atr = IndicatorCalculator.calculateATR(ohlcv.slice(-Config.env.atrPeriod));
+    const atr = IndicatorCalculator.calculateATR(ohlcv, Config.env.atrPeriod);
     const latestVolume = ohlcv[ohlcv.length - 1][5];
     const prevVolume = ohlcv[ohlcv.length - 2][5];
     const volumeChange = prevVolume ? ((latestVolume - prevVolume) / prevVolume) * 100 : 0;
