@@ -1,5 +1,5 @@
 // ======================================================
-// SMART BINANCE AI FUTURES BOT
+// SMART BINANCE AI FUTURES BOT (AI as Validator Only)
 // ======================================================
 
 require("dotenv").config();
@@ -16,7 +16,6 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 class Config {
   static get env() {
     return {
-      // Symbols and scanning
       symbols: Config._parseSymbols(),
       maxOpenPositions: Config._number("MAX_OPEN_POSITIONS", 1),
       leverage: Config._number("LEVERAGE", 10),
@@ -27,23 +26,19 @@ class Config {
       intervalMinutes: Config._number("INTERVAL_MINUTES", 5),
       scanRotationBatchSize: Math.max(1, Config._number("SCAN_ROTATION_BATCH_SIZE", 2)),
       
-      // Caching
       marketSnapshotCacheEnabled: Config._bool("MARKET_SNAPSHOT_CACHE_ENABLED", true),
       aiSignalCacheEnabled: Config._bool("AI_SIGNAL_CACHE_ENABLED", true),
       cacheMaxEntries: Math.max(1, Config._number("CACHE_MAX_ENTRIES", 500)),
       
-      // Emergency controls
       killSwitchEnabled: Config._bool("KILL_SWITCH_ENABLED", true),
       stopTrading: Config._true("STOP_TRADING"),
       killSwitchFile: Config._string("KILL_SWITCH_FILE", "bot-paused.flag"),
       
-      // Profit tracking
       profitTrackerEnabled: Config._bool("PROFIT_TRACKER_ENABLED", true),
       profitTrackerFile: Config._string("PROFIT_TRACKER_FILE", "profit-ledger.json"),
       profitSyncLimit: Config._number("PROFIT_SYNC_LIMIT", 100),
       riskStateFile: Config._string("RISK_STATE_FILE", "risk-state.json"),
       
-      // Risk parameters
       maxFundingRate: Config._number("MAX_FUNDING_RATE", 0.1) / 100,
       minRR: Config._number("MIN_RR", 1.5),
       riskPerTradePct: Config._number("RISK_PER_TRADE_PCT", 1) / 100,
@@ -52,18 +47,15 @@ class Config {
       maxConsecutiveLosses: Config._number("MAX_CONSECUTIVE_LOSSES", 3),
       maxPositionNotionalUsdt: Config._number("MAX_POSITION_NOTIONAL_USDT", 0),
       
-      // ATR and trailing
       atrTpMultiplier: Config._number("ATR_TP_MULTIPLIER", 1.8),
       trailingCallbackMin: Config._number("TRAILING_CALLBACK_MIN", 0.3),
       trailingCallbackMax: Config._number("TRAILING_CALLBACK_MAX", 1.5),
       
-      // Partial TP
       tp1Percent: Config._number("TP1_PERCENT", 30),
       tp2Percent: Config._number("TP2_PERCENT", 40),
       tp1RR: Config._number("TP1_RR", 1.0),
       tp2RR: Config._number("TP2_RR", 2.0),
       
-      // Filters
       requiredConfirmation: Config._number("REQUIRED_CONFIRMATION", 2),
       sidewaysEmaGap: Config._number("SIDEWAYS_EMA_GAP", 0.04),
       reversalCooldownMinutes: Config._number("REVERSAL_COOLDOWN_MINUTES", 10),
@@ -77,23 +69,19 @@ class Config {
       symbolCooldownMinutes: Config._number("SYMBOL_COOLDOWN_MINUTES", 30),
       symbolErrorCooldownMinutes: Config._number("SYMBOL_ERROR_COOLDOWN_MINUTES", 5),
       
-      // AI
       geminiModel: Config._string("GEMINI_MODEL", "gemini-1.5-flash-lite"),
       geminiApiKey: process.env.GEMINI_API_KEY,
       aiFilterEnabled: Config._bool("AI_FILTER_ENABLED", true),
       minAiConfidence: Config._number("MIN_AI_CONFIDENCE", 65),
-      allowedAiStrengths: Config._list("ALLOWED_AI_STRENGTHS", "MEDIUM,STRONG,EXTREME").map(s => s.toUpperCase()),
       aiResponseRetries: Config._number("AI_RESPONSE_RETRIES", 2),
       aiExplainLogEnabled: Config._bool("AI_EXPLAIN_LOG_ENABLED", false),
       aiExplainLogFile: Config._string("AI_EXPLAIN_LOG_FILE", "ai-explain-log.jsonl"),
       aiExplainLogMaxLines: Config._number("AI_EXPLAIN_LOG_MAX_LINES", 5000),
       
-      // Circuit breaker
       circuitBreakerEnabled: Config._bool("CIRCUIT_BREAKER_ENABLED", true),
       circuitBreakerMaxErrors: Config._number("CIRCUIT_BREAKER_MAX_ERRORS", 5),
       circuitBreakerPauseMinutes: Config._number("CIRCUIT_BREAKER_PAUSE_MINUTES", 15),
       
-      // Fonnte alerts
       fonnteEnabled: Config._bool("FONNTE_ENABLED", false),
       fonnteToken: Config._string("FONNTE_TOKEN", ""),
       fonnteTarget: Config._string("FONNTE_TARGET", ""),
@@ -746,77 +734,74 @@ class FonnteAlert {
 }
 
 // ======================================================
-// AI Signal Generator
+// AI Validator (formerly AISignalGenerator)
 // ======================================================
-class AISignalGenerator {
+class AIValidator {
   constructor(marketData) {
     this.marketData = marketData;
     const genAI = new GoogleGenerativeAI(Config.env.geminiApiKey);
     this.model = genAI.getGenerativeModel({ model: Config.env.geminiModel });
   }
   
-  async getSignal(symbol, snapshot, htfSnapshot, regimeInfo) {
-    const promptKey = crypto.createHash("sha256").update(JSON.stringify({
-      symbol, longOnly: Config.env.longOnly, snapshot, htfSnapshot, regimeInfo
+  async validateSignal(symbol, snapshot, htfSnapshot, regimeInfo, proposedSignal, proposedStrength) {
+    const cacheKey = crypto.createHash("sha256").update(JSON.stringify({
+      symbol, proposedSignal, proposedStrength, snapshot, htfSnapshot, regimeInfo
     })).digest("hex");
-    const cached = this.marketData.getCachedAISignal(promptKey);
+    
+    const cached = this.marketData.getCachedAISignal(cacheKey);
     if (cached) {
-      console.log(`[CACHE] AI hit ${symbol}`);
+      console.log(`[CACHE] AI validation hit for ${symbol}`);
       return cached;
     }
     
-    const prompt = this._buildPrompt(symbol, snapshot, htfSnapshot, regimeInfo);
+    const prompt = this._buildValidationPrompt(symbol, snapshot, htfSnapshot, regimeInfo, proposedSignal, proposedStrength);
     let lastError = null;
     for (let attempt = 1; attempt <= Config.env.aiResponseRetries + 1; attempt++) {
       try {
         const result = await this.model.generateContent(prompt);
         const text = result.response.text();
-        const signal = this._parseSignal(text);
+        const validation = this._parseValidation(text);
         const expiresAt = Math.min(snapshot?.expiresAt || Date.now(), htfSnapshot?.expiresAt || Date.now());
-        this.marketData.cacheAISignal(promptKey, signal, expiresAt);
-        return signal;
+        this.marketData.cacheAISignal(cacheKey, validation, expiresAt);
+        return validation;
       } catch (err) {
         lastError = err;
-        console.warn(`[WARN] AI invalid for ${symbol} (${attempt}/${Config.env.aiResponseRetries+1}): ${err.message}`);
+        console.warn(`[WARN] AI validation error ${symbol} (${attempt}/${Config.env.aiResponseRetries+1}): ${err.message}`);
         if (attempt <= Config.env.aiResponseRetries) await Utils.sleep(1000 * attempt);
       }
     }
-    return { signal: "HOLD", strength: "WEAK", confidence: 0, tradeAllowed: false, reason: `Fallback: ${lastError?.message}` };
+    return { valid: false, confidence: 0, reason: `Fallback: ${lastError?.message}` };
   }
   
-  _buildPrompt(symbol, snapshot, htfSnapshot, regimeInfo) {
-    const allowedSignals = Config.env.longOnly ? "LONG, HOLD" : "LONG, SHORT, HOLD";
-    const volumeContext = Utils.classifyVolumeChange(snapshot.volumeChange);
-    return `You are a professional crypto futures trader AI.
-RULES: Prioritize HOLD during sideways. Do NOT reverse easily. Avoid fake breakouts. Use higher timeframe as filter.
-Allowed signals: ${allowedSignals}. Strengths: WEAK, MEDIUM, STRONG, EXTREME (use WEAK not LOW).
-Market regime: ${regimeInfo.regime} (${regimeInfo.reason}). Volume: ${volumeContext}.
-SYMBOL: ${symbol}
-PRICE: ${snapshot.price}
-LOW TF TREND: ${snapshot.trend}
-HIGH TF TREND: ${htfSnapshot.trend}
-EMA20: ${snapshot.ema20}, EMA50: ${snapshot.ema50}
-EMA20 SLOPE: ${snapshot.ema20Slope}, EMA50 SLOPE: ${snapshot.ema50Slope}
-EMA GAP: ${snapshot.emaGap}%%, RSI: ${snapshot.rsi}, ATR: ${snapshot.atr}
-VOLUME CHANGE: ${snapshot.volumeChange}%%, FUNDING: ${snapshot.fundingRate}
-Return JSON: { "signal":"LONG/SHORT/HOLD", "strength":"WEAK/MEDIUM/STRONG/EXTREME", "confidence":0-100, "tradeAllowed":true/false, "reason":"..." }`;
+  _buildValidationPrompt(symbol, snapshot, htfSnapshot, regimeInfo, proposedSignal, proposedStrength) {
+    const atrPct = (snapshot.atr / snapshot.price) * 100;
+    return `You are a validator for a crypto futures trading bot.
+The bot proposes a ${proposedSignal} trade with strength ${proposedStrength}.
+Your job: Decide if this trade is safe and logical based on market conditions.
+Return JSON: { "valid": true/false, "confidence": 0-100, "reason": "short explanation" }
+
+Market regime: ${regimeInfo.regime} (${regimeInfo.reason})
+Symbol: ${symbol}
+Price: ${snapshot.price}
+Low TF trend: ${snapshot.trend}, High TF trend: ${htfSnapshot.trend}
+EMA20 slope: ${snapshot.ema20Slope}, EMA50 slope: ${snapshot.ema50Slope}
+RSI: ${snapshot.rsi}, Volume change: ${snapshot.volumeChange}%
+Funding rate: ${snapshot.fundingRate}
+ATR pct: ${atrPct.toFixed(2)}%
+Sideways gap: ${snapshot.emaGap}%
+
+ONLY reject if: extreme volatility, contradictory trends, abnormal funding, or clear reversal pattern.`;
   }
   
-  _parseSignal(text) {
+  _parseValidation(text) {
     const cleaned = String(text).replace(/```json/gi, "").replace(/```/g, "").trim();
     const start = cleaned.indexOf("{");
     const end = cleaned.lastIndexOf("}");
     if (start === -1 || end === -1) throw new Error("No JSON object");
     const parsed = JSON.parse(cleaned.slice(start, end + 1));
-    const signal = String(parsed.signal || "").toUpperCase();
-    const strength = String(parsed.strength || "WEAK").toUpperCase();
-    const allowedStrengths = ["WEAK", "MEDIUM", "STRONG", "EXTREME"];
-    if (!["LONG", "SHORT", "HOLD"].includes(signal)) throw new Error("Invalid signal");
-    if (!allowedStrengths.includes(strength)) throw new Error("Invalid strength");
-    const confidence = Number(parsed.confidence);
-    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 100) throw new Error("Invalid confidence");
     return {
-      signal, strength, confidence, tradeAllowed: parsed.tradeAllowed !== false,
+      valid: parsed.valid === true,
+      confidence: Number(parsed.confidence) || 0,
       reason: String(parsed.reason || "").slice(0, 500)
     };
   }
@@ -1031,7 +1016,7 @@ class KillSwitch {
 }
 
 // ======================================================
-// Main Trading Bot
+// Main Trading Bot (AI as Validator Only)
 // ======================================================
 class SmartTradingBot {
   constructor() {
@@ -1040,14 +1025,14 @@ class SmartTradingBot {
     this.riskManager = new RiskManager(this.exchangeClient);
     this.orderManager = new OrderManager(this.exchangeClient);
     this.circuitBreaker = new CircuitBreaker();
-    this.aiGenerator = new AISignalGenerator(this.marketData);
+    this.aiValidator = new AIValidator(this.marketData);
     this.signalTracker = new SignalTracker();
     this.isTrading = false;
   }
   
   async start() {
     console.log(`
-[START] Smart AI Futures Bot
+[START] Smart AI Futures Bot (AI as Validator Only)
 Symbols: ${Config.env.symbols.join(", ")}
 Max positions: ${Config.env.maxOpenPositions}
 Leverage: ${Config.env.leverage}x
@@ -1055,6 +1040,7 @@ Order size: ${Config.env.orderSizeUsdt} USDT
 Timeframes: ${Config.env.timeframe} / ${Config.env.htfTimeframe}
 Rotation batch: ${Config.env.scanRotationBatchSize}
 Model: ${Config.env.geminiModel}
+AI Filter: ${Config.env.aiFilterEnabled ? "ON (validator)" : "OFF"}
 Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnteTarget ? "enabled" : "disabled"}
 `);
     await this.exchangeClient.loadMarkets();
@@ -1100,8 +1086,8 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
       
       candidates.sort((a,b) => b.score - a.score);
       console.table(candidates.map(c => ({
-        symbol: c.symbol, signal: c.signal, conf: c.ai.confidence,
-        strength: c.aiStrength, rr: c.rr.toFixed(2), regime: c.regimeInfo.regime, score: c.score.toFixed(2)
+        symbol: c.symbol, signal: c.signal, conf: c.confidence.toFixed(0),
+        strength: c.strength, rr: c.rr.toFixed(2), regime: c.regimeInfo.regime, score: c.score.toFixed(2)
       })));
       const best = candidates[0];
       await this.executeBestCandidate(best, openPositions);
@@ -1112,6 +1098,58 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
       if (circuitAllowed && this.circuitBreaker.consecutiveErrors === errorsAtStart) this.circuitBreaker.recordSuccess();
       this.isTrading = false;
     }
+  }
+  
+  // ======================================================
+  // Rule-based signal generator (no AI)
+  // ======================================================
+  generateRuleBasedSignal(snapshot, htfSnapshot, regimeInfo) {
+    if (!regimeInfo.allow) {
+      return { signal: "HOLD", strength: "WEAK", confidence: 0, reason: regimeInfo.reason };
+    }
+    
+    const { trend, rsi, volumeChange, ema20Slope, ema50Slope, atr, price } = snapshot;
+    const { trend: htfTrend } = htfSnapshot;
+    
+    let signal = "HOLD";
+    let strength = "WEAK";
+    let confidence = 50;
+    let reason = "";
+    
+    // Sinyal LONG
+    if (trend === "UPTREND" && htfTrend === "UPTREND" && ema20Slope > 0 && rsi > 50) {
+      signal = "LONG";
+      strength = rsi > 70 ? "STRONG" : (rsi > 60 ? "MEDIUM" : "WEAK");
+      confidence = Math.min(90, 60 + (rsi - 50));
+      reason = "Bullish alignment on both timeframes";
+    }
+    // Sinyal SHORT (hanya jika LONG_ONLY=false)
+    else if (!Config.env.longOnly && trend === "DOWNTREND" && htfTrend === "DOWNTREND" && ema20Slope < 0 && rsi < 50) {
+      signal = "SHORT";
+      strength = rsi < 30 ? "STRONG" : (rsi < 40 ? "MEDIUM" : "WEAK");
+      confidence = Math.min(90, 60 + (50 - rsi));
+      reason = "Bearish alignment on both timeframes";
+    }
+    else {
+      reason = "No clear technical setup";
+    }
+    
+    // Volume filter: tolak jika volume menurun drastis
+    if (signal !== "HOLD" && volumeChange < -40) {
+      signal = "HOLD";
+      reason = `Volume too weak (${volumeChange.toFixed(1)}%)`;
+      confidence = 0;
+    }
+    
+    // ATR filter: terlalu tinggi atau terlalu rendah
+    const atrPct = (atr / price) * 100;
+    if (signal !== "HOLD" && (atrPct > Config.env.maxAtrPct * 100 || atrPct < Config.env.minAtrPct * 100)) {
+      signal = "HOLD";
+      reason = `ATR% abnormal (${atrPct.toFixed(2)}%)`;
+      confidence = 0;
+    }
+    
+    return { signal, strength, confidence, tradeAllowed: signal !== "HOLD", reason };
   }
   
   async analyzeSymbol(symbol) {
@@ -1132,29 +1170,65 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
         return null;
       }
       
-      console.log(`Asking Gemini for ${symbol}...`);
-      const ai = await this.aiGenerator.getSignal(symbol, snapshot, htfSnapshot, regimeInfo);
-      console.log(ai);
-      const signal = ai.signal;
-      if (signal === "HOLD") { console.log(`${symbol} HOLD`); return null; }
-      if (Config.env.longOnly && signal === "SHORT") { console.log(`${symbol} SHORT ignored in LONG ONLY`); return null; }
-      if (!this._aiFilterSafe(ai)) { console.log(`${symbol} AI filter failed`); return null; }
+      // 1. Generate signal dari aturan (rule-based)
+      const ruleSignal = this.generateRuleBasedSignal(snapshot, htfSnapshot, regimeInfo);
+      if (ruleSignal.signal === "HOLD") {
+        console.log(`${symbol} rule-based: HOLD (${ruleSignal.reason})`);
+        return null;
+      }
       
-      const confirmation = this.signalTracker.update(symbol, signal, ai.strength);
-      console.log(`Signal confirm: ${confirmation.count}/${Config.effectiveRequiredConfirmation}`);
-      if (!confirmation.confirmed) { console.log(`${symbol} not confirmed`); return null; }
+      // 2. Validasi oleh AI (jika diaktifkan)
+      let aiValidation = { valid: true, confidence: 100, reason: "AI disabled" };
+      if (Config.env.aiFilterEnabled) {
+        console.log(`Validating ${symbol} ${ruleSignal.signal} with AI...`);
+        aiValidation = await this.aiValidator.validateSignal(
+          symbol, snapshot, htfSnapshot, regimeInfo,
+          ruleSignal.signal, ruleSignal.strength
+        );
+        console.log(`AI validation: valid=${aiValidation.valid}, conf=${aiValidation.confidence}, reason=${aiValidation.reason}`);
+        if (!aiValidation.valid || aiValidation.confidence < Config.env.minAiConfidence) {
+          console.log(`${symbol} rejected by AI validator`);
+          return null;
+        }
+      }
       
+      // 3. Gunakan sinyal dari rule, gabungkan confidence
+      const signal = ruleSignal.signal;
+      const strength = ruleSignal.strength;
+      const finalConfidence = (ruleSignal.confidence + aiValidation.confidence) / 2;
+      
+      // 4. Funding rate check
       const fundingSafe = (signal === "LONG" && context.fundingRate <= Config.env.maxFundingRate) ||
                           (signal === "SHORT" && context.fundingRate >= -Config.env.maxFundingRate);
-      if (!fundingSafe) { console.warn(`${symbol} funding unsafe: ${context.fundingRate}`); return null; }
+      if (!fundingSafe) {
+        console.warn(`${symbol} funding unsafe: ${context.fundingRate}`);
+        return null;
+      }
       
-      const { tp, sl } = this._dynamicTPSL(signal, context.price, snapshot.atr, ai.strength);
+      // 5. Confirmation tracker
+      const confirmation = this.signalTracker.update(symbol, signal, strength);
+      console.log(`Signal confirm: ${confirmation.count}/${Config.effectiveRequiredConfirmation}`);
+      if (!confirmation.confirmed) {
+        console.log(`${symbol} not confirmed`);
+        return null;
+      }
+      
+      // 6. Dynamic TP/SL dan RR
+      const { tp, sl } = this._dynamicTPSL(signal, context.price, snapshot.atr, strength);
       const rr = this._calculateRR(signal, context.price, tp, sl);
       console.log(`${symbol} RR: ${rr.toFixed(2)}`);
-      if (rr < Config.env.minRR) { console.warn(`${symbol} RR too low`); return null; }
+      if (rr < Config.env.minRR) {
+        console.warn(`${symbol} RR too low`);
+        return null;
+      }
       
-      const score = this._scoreCandidate(ai, rr, regimeInfo);
-      return { symbol, signal, ai, aiStrength: ai.strength, context, snapshot, htfSnapshot, regimeInfo, rr, score, tp, sl };
+      // 7. Scoring candidate
+      const score = this._scoreCandidate(finalConfidence, rr, regimeInfo, strength);
+      return {
+        symbol, signal, confidence: finalConfidence, strength,
+        context, snapshot, htfSnapshot, regimeInfo, rr, score, tp, sl,
+        aiValidationReason: aiValidation.reason
+      };
     } catch (err) {
       console.warn(`${symbol} scan error: ${err.message}`);
       this.circuitBreaker.recordError(`scan ${symbol}`, err);
@@ -1164,7 +1238,7 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
   }
   
   async executeBestCandidate(best, openPositions) {
-    const { symbol, signal, context, snapshot, ai, rr, tp, sl, aiStrength } = best;
+    const { symbol, signal, context, snapshot, confidence, strength, rr, tp, sl } = best;
     const position = openPositions.find(p => p.symbol === symbol);
     if (position && position.side === signal.toLowerCase()) {
       console.log(`${symbol} position already exists`);
@@ -1190,7 +1264,7 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
     await this.orderManager.createPartialTPs(symbol, newPos, actualEntry, snapshot.atr);
     await FonnteAlert.send(this._formatOpenAlert({
       symbol, signal, entryPrice: actualEntry, contracts: newPos.contracts,
-      slPrice, tpPrice: tp, rr, confidence: ai.confidence, strength: aiStrength
+      slPrice, tpPrice: tp, rr, confidence, strength
     }));
   }
   
@@ -1206,19 +1280,11 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
     return (entry - tp) / (sl - entry);
   }
   
-  _scoreCandidate(ai, rr, regimeInfo) {
-    const strengthBonus = { MEDIUM: 5, STRONG: 15, EXTREME: 25 }[ai.strength] || 0;
+  _scoreCandidate(confidence, rr, regimeInfo, strength) {
+    const strengthBonus = { MEDIUM: 5, STRONG: 15, EXTREME: 25 }[strength] || 0;
     const rrBonus = Math.min(rr, 3) * 10;
     const trendBonus = regimeInfo.allow ? 10 : 0;
-    return ai.confidence + strengthBonus + rrBonus + trendBonus;
-  }
-  
-  _aiFilterSafe(ai) {
-    if (!Config.env.aiFilterEnabled) return true;
-    if (!ai.tradeAllowed) return false;
-    if (!Config.env.allowedAiStrengths.includes(ai.strength)) return false;
-    if (ai.confidence < Config.env.minAiConfidence) return false;
-    return true;
+    return confidence + strengthBonus + rrBonus + trendBonus;
   }
   
   _formatOpenAlert({ symbol, signal, entryPrice, contracts, slPrice, tpPrice, rr, confidence, strength }) {
