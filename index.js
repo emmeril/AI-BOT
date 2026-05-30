@@ -55,6 +55,7 @@ class Config {
       tp2Percent: Config._number("TP2_PERCENT", 40),
       tp1RR: Config._number("TP1_RR", 1.0),
       tp2RR: Config._number("TP2_RR", 2.0),
+      breakEvenProtectionEnabled: Config._bool("BREAK_EVEN_PROTECTION_ENABLED", true),
       
       requiredConfirmation: Config._number("REQUIRED_CONFIRMATION", 2),
       sidewaysEmaGap: Config._number("SIDEWAYS_EMA_GAP", 0.04),
@@ -421,12 +422,19 @@ class RiskManager {
       consecutiveLosses: 0,
       processedTradeIds: [],
       symbolCooldowns: {},
+      activeTradeStates: {},
       scanRotationIndex: 0,
       lastSyncedAt: 0,
       updatedAt: new Date().toISOString()
     });
     const state = Utils.loadJsonFile(Config.env.riskStateFile, emptyState, "Risk state");
-    return { ...emptyState(), ...state, processedTradeIds: state.processedTradeIds || [], symbolCooldowns: state.symbolCooldowns || {} };
+    return {
+      ...emptyState(),
+      ...state,
+      processedTradeIds: state.processedTradeIds || [],
+      symbolCooldowns: state.symbolCooldowns || {},
+      activeTradeStates: state.activeTradeStates || {}
+    };
   }
   
   _loadProfitLedger() {
@@ -575,9 +583,10 @@ class RiskManager {
     const equity = await this.getAccountEquity();
     const dayKey = Utils.getUtcDayKey();
     if (this.riskState.dayKey !== dayKey) {
+      const activeTradeStates = this.riskState.activeTradeStates || {};
       this.riskState = {
         dayKey, dayStartEquity: equity, dailyNetPnL: 0, consecutiveLosses: 0,
-        processedTradeIds: [], symbolCooldowns: {}, scanRotationIndex: 0, lastSyncedAt: 0,
+        processedTradeIds: [], symbolCooldowns: {}, activeTradeStates, scanRotationIndex: 0, lastSyncedAt: 0,
         updatedAt: new Date().toISOString()
       };
       this.saveRiskState();
@@ -649,6 +658,39 @@ class RiskManager {
     for (let i = 0; i < batchSize; i++) rotated.push(Config.env.symbols[(start + i) % total]);
     this.riskState.scanRotationIndex = (start + batchSize) % total;
     return rotated;
+  }
+
+  getActiveTradeState(symbol) {
+    return this.riskState.activeTradeStates?.[symbol] || null;
+  }
+
+  registerActiveTrade(symbol, tradeState) {
+    this.riskState.activeTradeStates[symbol] = {
+      ...tradeState,
+      symbol,
+      updatedAt: new Date().toISOString()
+    };
+    this.saveRiskState();
+  }
+
+  updateActiveTradeState(symbol, patch) {
+    const current = this.riskState.activeTradeStates?.[symbol];
+    if (!current) return null;
+    this.riskState.activeTradeStates[symbol] = {
+      ...current,
+      ...patch,
+      updatedAt: new Date().toISOString()
+    };
+    this.saveRiskState();
+    return this.riskState.activeTradeStates[symbol];
+  }
+
+  clearActiveTradeState(symbol, reason = "") {
+    if (!this.riskState.activeTradeStates?.[symbol]) return false;
+    delete this.riskState.activeTradeStates[symbol];
+    console.log(`[STATE] Cleared active trade state for ${symbol}${reason ? ` (${reason})` : ""}`);
+    this.saveRiskState();
+    return true;
   }
 }
 
@@ -890,10 +932,11 @@ class OrderManager {
     const side = position.side === "long" ? "sell" : "buy";
     const stopPrice = this.exchange.priceToPrecision(symbol, slPrice);
     console.log(`\n[SL] Stop loss market | Side: ${side} | Trigger: ${stopPrice}`);
-    await this.exchange.createOrder(symbol, "STOP_MARKET", side, undefined, undefined, {
+    const order = await this.exchange.createOrder(symbol, "STOP_MARKET", side, undefined, undefined, {
       stopPrice, closePosition: true, workingType: "MARK_PRICE"
     });
     console.log("[OK] Stop loss active");
+    return order;
   }
   
   async createPartialTPs(symbol, position, entryPrice, atr) {
@@ -914,19 +957,64 @@ class OrderManager {
     tp1Price = Number(this.exchange.priceToPrecision(symbol, tp1Price));
     tp2Price = Number(this.exchange.priceToPrecision(symbol, tp2Price));
     console.log(`\n[TP] TP1: ${tp1Price}\n[TP] TP2: ${tp2Price}`);
+    const orders = {
+      tp1Qty, tp2Qty, runnerQty, tp1Price, tp2Price,
+      tp1Order: null, tp2Order: null, runnerOrder: null
+    };
     if (tp1Qty > 0) {
-      await this.exchange.createOrder(symbol, "TAKE_PROFIT_MARKET", side, tp1Qty, undefined, { stopPrice: tp1Price, reduceOnly: true, workingType: "MARK_PRICE" });
+      orders.tp1Order = await this.exchange.createOrder(symbol, "TAKE_PROFIT_MARKET", side, tp1Qty, undefined, { stopPrice: tp1Price, reduceOnly: true, workingType: "MARK_PRICE" });
       console.log(`[OK] TP1 created: ${tp1Qty}`);
     }
     if (tp2Qty > 0) {
-      await this.exchange.createOrder(symbol, "TAKE_PROFIT_MARKET", side, tp2Qty, undefined, { stopPrice: tp2Price, reduceOnly: true, workingType: "MARK_PRICE" });
+      orders.tp2Order = await this.exchange.createOrder(symbol, "TAKE_PROFIT_MARKET", side, tp2Qty, undefined, { stopPrice: tp2Price, reduceOnly: true, workingType: "MARK_PRICE" });
       console.log(`[OK] TP2 created: ${tp2Qty}`);
     }
     if (runnerQty > 0) {
       const callbackRate = Utils.clamp((atr / entryPrice) * 100, Config.env.trailingCallbackMin, Config.env.trailingCallbackMax);
-      await this.exchange.createOrder(symbol, "TRAILING_STOP_MARKET", side, runnerQty, undefined, { callbackRate, reduceOnly: true, workingType: "MARK_PRICE" });
+      orders.runnerOrder = await this.exchange.createOrder(symbol, "TRAILING_STOP_MARKET", side, runnerQty, undefined, { callbackRate, reduceOnly: true, workingType: "MARK_PRICE" });
       console.log(`\n[TRAILING] Runner ${runnerQty} | Callback: ${callbackRate}%`);
     }
+    return orders;
+  }
+
+  async moveStopLossToEntry(symbol, position, state = {}) {
+    const entryPrice = Number(state.entryPrice || position.entryPrice);
+    if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+      throw new Error(`Invalid entry price for BE move on ${symbol}`);
+    }
+
+    let stopOrderId = state.stopOrderId;
+    if (!stopOrderId) {
+      try {
+        const openOrders = await this.exchange.fetchOpenOrders(symbol);
+        const matching = openOrders.find(order => {
+          const type = String(order.type || order.info?.origType || "").toUpperCase();
+          const isStopLoss = [
+            "STOP_MARKET",
+            "STOP",
+            "STOP_LOSS_MARKET",
+            "STOP_LOSS"
+          ].includes(type);
+          const isProtective = Boolean(order.closePosition || order.info?.closePosition);
+          return isStopLoss && isProtective;
+        });
+        stopOrderId = matching?.id || null;
+      } catch (err) {
+        console.warn(`[WARN] Could not inspect open orders for ${symbol}: ${err.message}`);
+      }
+    }
+
+    if (stopOrderId) {
+      try {
+        await this.cancelOrder(stopOrderId, symbol);
+        console.log(`[CANCEL] Old SL ${stopOrderId} removed for BE`);
+      } catch (err) {
+        console.warn(`[WARN] Could not cancel old SL ${stopOrderId} for ${symbol}: ${err.message}`);
+      }
+    }
+
+    const order = await this.createStopLossOrder(symbol, position, entryPrice);
+    return order;
   }
   
   async _getAvailableBalance() {
@@ -1072,6 +1160,7 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
       await this.riskManager.ensureDailyRiskState();
       const openPositions = await this.orderManager.getOpenPositions(Config.env.symbols);
       console.log("Open positions:", openPositions.length ? openPositions : "NONE");
+      await this.reconcileBreakEven(openPositions);
       if (KillSwitch.isActive()) { console.log("[KILL] Cycle stopped"); return; }
       if (!this.riskManager.riskGateAllowsTrading()) return;
       
@@ -1267,12 +1356,71 @@ Fonnte: ${Config.env.fonnteEnabled && Config.env.fonnteToken && Config.env.fonnt
     const slPricePrecise = this.exchangeClient.priceToPrecision(symbol, slPrice);
     console.log(`[SL] Real SL from RR calculation: ${slPricePrecise} (distance ${slDistance.toFixed(8)})`);
     
-    await this.orderManager.createStopLossOrder(symbol, newPos, slPricePrecise);
-    await this.orderManager.createPartialTPs(symbol, newPos, actualEntry, snapshot.atr);
+    const stopOrder = await this.orderManager.createStopLossOrder(symbol, newPos, slPricePrecise);
+    const tpOrders = await this.orderManager.createPartialTPs(symbol, newPos, actualEntry, snapshot.atr);
+    this.riskManager.registerActiveTrade(symbol, {
+      side: newPos.side,
+      entryPrice: actualEntry,
+      initialContracts: newPos.contracts,
+      tp1Qty: tpOrders.tp1Qty,
+      tp2Qty: tpOrders.tp2Qty,
+      runnerQty: tpOrders.runnerQty,
+      tp1Price: tpOrders.tp1Price,
+      tp2Price: tpOrders.tp2Price,
+      slPrice: Number(slPricePrecise),
+      stopOrderId: stopOrder?.id || null,
+      breakEvenArmed: false,
+      breakEvenPrice: null
+    });
     await FonnteAlert.send(this._formatOpenAlert({
       symbol, signal, entryPrice: actualEntry, contracts: newPos.contracts,
       slPrice: slPricePrecise, tpPrice: tp, rr, confidence, strength
     }));
+  }
+
+  async reconcileBreakEven(openPositions) {
+    if (!Config.env.breakEvenProtectionEnabled) return;
+    const openMap = new Map(openPositions.map(pos => [pos.symbol, pos]));
+    const activeStates = Object.entries(this.riskManager.riskState.activeTradeStates || {});
+
+    for (const [symbol, state] of activeStates) {
+      const position = openMap.get(symbol);
+      if (!position) {
+        this.riskManager.clearActiveTradeState(symbol, "position closed");
+        continue;
+      }
+
+      const currentContracts = Number(position.contracts);
+      if (!Number.isFinite(currentContracts) || currentContracts <= 0) {
+        this.riskManager.clearActiveTradeState(symbol, "position empty");
+        continue;
+      }
+
+      const initialContracts = Number(state.initialContracts || 0);
+      const tp1Qty = Number(state.tp1Qty || 0);
+      if (state.breakEvenArmed || initialContracts <= 0 || tp1Qty <= 0) continue;
+
+      const tp1FilledThreshold = Math.max(0, initialContracts - tp1Qty);
+      const epsilon = Math.max(initialContracts * 0.001, 1e-8);
+      if (currentContracts > tp1FilledThreshold + epsilon) continue;
+
+      console.log(`[BE] ${symbol} TP1 detected, moving SL to entry`);
+      const updatedStop = await this.orderManager.moveStopLossToEntry(symbol, position, state);
+      const entryPrice = Number(state.entryPrice || position.entryPrice);
+      this.riskManager.updateActiveTradeState(symbol, {
+        breakEvenArmed: true,
+        breakEvenPrice: entryPrice,
+        stopOrderId: updatedStop?.id || state.stopOrderId || null,
+        lastObservedContracts: currentContracts,
+        breakEvenArmedAt: new Date().toISOString()
+      });
+      await FonnteAlert.send([
+        "[BREAK EVEN]",
+        `Symbol: ${symbol}`,
+        `TP1 filled: ${Utils.roundNumber(initialContracts - currentContracts, 8)} contracts`,
+        `SL moved to entry: ${Utils.roundNumber(entryPrice, 10)}`
+      ].join("\n"));
+    }
   }
   
   _dynamicTPSL(signal, entry, atr, strength) {
