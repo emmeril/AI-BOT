@@ -18,6 +18,11 @@ const TIMEFRAME = envValue("TIMEFRAME", "15m");
 const LOOKBACK_CANDLES = envNumber("LOOKBACK_CANDLES", 200);
 const INTERVAL_MINUTES = envNumber("INTERVAL_MINUTES", 5);
 const INTERVAL_MS = INTERVAL_MINUTES * 60 * 1000;
+const AI_SIGNAL_CACHE_ENABLED = envBoolean("AI_SIGNAL_CACHE_ENABLED", true);
+const AI_SIGNAL_CACHE_TTL_MS = envNumber(
+  "AI_SIGNAL_CACHE_TTL_MS",
+  Math.max(INTERVAL_MS * 3, 60 * 1000)
+);
 
 const SR_WINDOW_SIZE = envNumber("SR_WINDOW_SIZE", 5);
 const SR_LEVEL_TOLERANCE = envNumber("SR_LEVEL_TOLERANCE", 0.005);
@@ -91,6 +96,21 @@ function envList(key, fallback) {
     .filter(Boolean);
 }
 
+function parseTimeframeToMs(timeframe) {
+  const text = String(timeframe || "").trim().toLowerCase();
+  const match = text.match(/^(\d+)(m|h|d|w)$/);
+  if (!match) return INTERVAL_MS;
+  const value = Number(match[1]);
+  const unit = match[2];
+  const unitMs = {
+    m: 60 * 1000,
+    h: 60 * 60 * 1000,
+    d: 24 * 60 * 60 * 1000,
+    w: 7 * 24 * 60 * 60 * 1000,
+  }[unit];
+  return value * unitMs;
+}
+
 function resolveProjectPath(fileName) {
   return path.resolve(process.cwd(), fileName);
 }
@@ -103,6 +123,59 @@ function roundNumber(value, digits = 6) {
   const number = Number(value);
   if (!Number.isFinite(number)) return null;
   return Number(number.toFixed(digits));
+}
+
+function isCacheEntryValid(entry) {
+  return Boolean(entry && entry.expiresAt > Date.now());
+}
+
+function pruneCacheEntries(cache, maxEntries) {
+  const now = Date.now();
+  for (const [key, entry] of cache.entries()) {
+    if (!entry?.expiresAt || entry.expiresAt <= now) {
+      cache.delete(key);
+    }
+  }
+
+  while (cache.size > maxEntries) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey === undefined) break;
+    cache.delete(firstKey);
+  }
+}
+
+function cleanupAiSignalCache() {
+  if (!AI_SIGNAL_CACHE_ENABLED) {
+    aiSignalCache.clear();
+    return;
+  }
+  pruneCacheEntries(aiSignalCache, 500);
+}
+
+function getAiSignalCacheKey(symbol, ohlcv) {
+  const candleTimestamp = ohlcv?.[ohlcv.length - 1]?.[0] || 0;
+  const timeframeMs = parseTimeframeToMs(TIMEFRAME);
+  const candleBucket = candleTimestamp ? Math.floor(candleTimestamp / timeframeMs) : 0;
+  return [symbol, TIMEFRAME, candleBucket, LONG_ONLY ? "LONG_ONLY" : "BOTH"].join("|");
+}
+
+function getCachedAISignal(cacheKey) {
+  if (!AI_SIGNAL_CACHE_ENABLED) return null;
+  const entry = aiSignalCache.get(cacheKey);
+  if (!isCacheEntryValid(entry)) {
+    if (entry) aiSignalCache.delete(cacheKey);
+    return null;
+  }
+  return entry.value;
+}
+
+function setCachedAISignal(cacheKey, value, ttlMs = AI_SIGNAL_CACHE_TTL_MS) {
+  if (!AI_SIGNAL_CACHE_ENABLED) return;
+  aiSignalCache.set(cacheKey, {
+    value,
+    expiresAt: Date.now() + ttlMs,
+  });
+  pruneCacheEntries(aiSignalCache, 500);
 }
 
 async function retry(fn, retries = 3, delay = 2000) {
@@ -142,6 +215,7 @@ let isTrading = false;
 let lastPositionChangeTime = 0;
 let profitLedger = loadProfitLedger();
 let riskState = loadRiskState();
+let aiSignalCache = new Map();
 let circuitBreakerState = { consecutiveErrors: 0, pausedUntil: 0, lastError: null };
 let fonnteAlertWarningShown = false;
 
@@ -766,6 +840,13 @@ function calculateEMA(data, period) {
 }
 
 async function getAISignal(symbol, currentPrice, supportLevels, resistanceLevels, ohlcv) {
+  const cacheKey = getAiSignalCacheKey(symbol, ohlcv);
+  const cachedSignal = getCachedAISignal(cacheKey);
+  if (cachedSignal) {
+    console.log(`[AI CACHE] Hit for ${symbol}`);
+    return cachedSignal;
+  }
+
   const supportsBelow = supportLevels.filter(s => s.price < currentPrice).sort((a, b) => b.price - a.price);
   const resistancesAbove = resistanceLevels.filter(r => r.price > currentPrice).sort((a, b) => a.price - b.price);
   const nearestSupport = supportsBelow[0] || null;
@@ -798,6 +879,7 @@ async function getAISignal(symbol, currentPrice, supportLevels, resistanceLevels
       const result = await model.generateContent(prompt);
       const text = result.response.text();
       const signal = parseAISignal(text);
+      setCachedAISignal(cacheKey, signal);
       return signal;
     } catch (err) {
       console.warn(`[AI] Attempt ${attempt} failed for ${symbol}: ${err.message}`);
@@ -805,7 +887,9 @@ async function getAISignal(symbol, currentPrice, supportLevels, resistanceLevels
     }
   }
   recordCircuitBreakerError(`AI ${symbol}`, new Error("AI response failed"));
-  return createHoldAISignal("AI fallback to HOLD");
+  const fallbackSignal = createHoldAISignal("AI fallback to HOLD");
+  setCachedAISignal(cacheKey, fallbackSignal, Math.min(AI_SIGNAL_CACHE_TTL_MS, 60 * 1000));
+  return fallbackSignal;
 }
 
 // ------------------------------
@@ -1094,6 +1178,7 @@ async function tradingCycle() {
     circuitAllowed = true;
     await syncProfitLedger();
     await syncRiskState();
+    cleanupAiSignalCache();
     cleanupSymbolCooldowns();
 
     const openPositions = await getOpenPositions();
