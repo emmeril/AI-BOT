@@ -32,8 +32,12 @@ const GEMINI_MODEL = envValue("GEMINI_MODEL", "gemini-1.5-flash-lite");
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
 const MIN_AI_CONFIDENCE = envNumber("MIN_AI_CONFIDENCE", 65);
-const ALLOWED_AI_STRENGTHS = envList("ALLOWED_AI_STRENGTHS", "MEDIUM,STRONG,EXTREME").map(s => s.toUpperCase());
+const ALLOWED_AI_STRENGTHS = envList(
+  "ALLOWED_AI_STRENGTHS",
+  "MEDIUM,STRONG,EXTREME"
+).map((strength) => strength.toUpperCase());
 const AI_RESPONSE_RETRIES = envNumber("AI_RESPONSE_RETRIES", 2);
+const AI_SIGNAL_CACHE_MAX_ENTRIES = 500;
 
 const MAX_FUNDING_RATE = envNumber("MAX_FUNDING_RATE", 0.1) / 100;
 const MIN_RR = envNumber("MIN_RR", 1.5);
@@ -149,7 +153,7 @@ function cleanupAiSignalCache() {
     aiSignalCache.clear();
     return;
   }
-  pruneCacheEntries(aiSignalCache, 500);
+  pruneCacheEntries(aiSignalCache, AI_SIGNAL_CACHE_MAX_ENTRIES);
 }
 
 function getAiSignalCacheKey(symbol, ohlcv) {
@@ -175,7 +179,7 @@ function setCachedAISignal(cacheKey, value, ttlMs = AI_SIGNAL_CACHE_TTL_MS) {
     value,
     expiresAt: Date.now() + ttlMs,
   });
-  pruneCacheEntries(aiSignalCache, 500);
+  pruneCacheEntries(aiSignalCache, AI_SIGNAL_CACHE_MAX_ENTRIES);
 }
 
 async function retry(fn, retries = 3, delay = 2000) {
@@ -285,25 +289,41 @@ async function sendFonnteAlert(message) {
     }
     return false;
   }
+
   try {
     const formBody = new URLSearchParams({
       target: FONNTE_TARGET,
       message,
       countryCode: String(FONNTE_COUNTRY_CODE),
     }).toString();
-    const response = await postFormUrlEncoded(FONNTE_API_URL, formBody, FONNTE_TOKEN);
-    let payload = null;
-    try {
-      payload = JSON.parse(response.body);
-    } catch {
-      // ignore
-    }
+
+    const response = await postFormUrlEncoded(
+      FONNTE_API_URL,
+      formBody,
+      FONNTE_TOKEN
+    );
+    const payload = (() => {
+      try {
+        return JSON.parse(response.body);
+      } catch {
+        return null;
+      }
+    })();
+
     const success =
       response.statusCode >= 200 &&
       response.statusCode < 300 &&
-      (payload?.status !== false && payload?.Status !== false);
-    if (!success) console.warn(`[FONNTE] Alert failed: ${response.statusCode} ${response.body}`);
-    else console.log("[FONNTE] Trade alert sent");
+      payload?.status !== false &&
+      payload?.Status !== false;
+
+    if (!success) {
+      console.warn(
+        `[FONNTE] Alert failed: ${response.statusCode} ${response.body || "empty response"}`
+      );
+    } else {
+      console.log("[FONNTE] Trade alert sent");
+    }
+
     return success;
   } catch (err) {
     console.warn(`[FONNTE] Alert error: ${err.message}`);
@@ -770,16 +790,26 @@ function normalizeAISignal(raw) {
   const confidence = Number(raw.confidence);
   const tradeAllowed = typeof raw.tradeAllowed === "boolean" ? raw.tradeAllowed : signal !== "HOLD";
   const reason = String(raw.reason || "").slice(0, 500);
-  if (!["LONG", "SHORT", "HOLD"].includes(signal)) throw new Error(`Invalid signal: ${signal}`);
-  if (!["WEAK", "MEDIUM", "STRONG", "EXTREME"].includes(strength))
+
+  if (!["LONG", "SHORT", "HOLD"].includes(signal)) {
+    throw new Error(`Invalid signal: ${signal}`);
+  }
+  if (!["WEAK", "MEDIUM", "STRONG", "EXTREME"].includes(strength)) {
     throw new Error(`Invalid strength: ${strength}`);
-  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 100)
+  }
+  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 100) {
     throw new Error(`Invalid confidence: ${confidence}`);
+  }
+
   return { signal, strength, confidence, tradeAllowed, reason };
 }
 
 function parseAISignal(text) {
-  return normalizeAISignal(JSON.parse(extractJsonObject(text)));
+  try {
+    return normalizeAISignal(JSON.parse(extractJsonObject(text)));
+  } catch (err) {
+    throw new Error(`Failed to parse AI response: ${err.message}`);
+  }
 }
 
 function buildSRPrompt({
@@ -831,12 +861,18 @@ Return JSON:
 }
 
 function calculateEMA(data, period) {
+  if (!Array.isArray(data) || data.length === 0) return 0;
   const k = 2 / (period + 1);
   let ema = data[0];
   for (let i = 1; i < data.length; i++) {
     ema = data[i] * k + ema * (1 - k);
   }
   return ema;
+}
+
+function average(values) {
+  if (!Array.isArray(values) || values.length === 0) return 0;
+  return values.reduce((sum, value) => sum + Number(value || 0), 0) / values.length;
 }
 
 async function getAISignal(symbol, currentPrice, supportLevels, resistanceLevels, ohlcv) {
@@ -853,8 +889,8 @@ async function getAISignal(symbol, currentPrice, supportLevels, resistanceLevels
   const nearestResistance = resistancesAbove[0] || null;
 
   const volumes = ohlcv.map(c => c[5]);
-  const recentVolAvg = volumes.slice(-5).reduce((a, b) => a + b, 0) / 5;
-  const prevVolAvg = volumes.slice(-10, -5).reduce((a, b) => a + b, 0) / 5;
+  const recentVolAvg = average(volumes.slice(-5));
+  const prevVolAvg = average(volumes.slice(-10, -5));
   const volumeTrend = recentVolAvg > prevVolAvg ? "increasing" : "decreasing";
 
   const closes = ohlcv.map(c => c[4]);
@@ -1008,6 +1044,7 @@ function fundingSafe(signal, fundingRate) {
 }
 
 function calculateATR(ohlcv, period = 14) {
+  if (!Array.isArray(ohlcv) || ohlcv.length < 2) return 0;
   const trs = [];
   for (let i = 1; i < ohlcv.length; i++) {
     const prevClose = ohlcv[i - 1][4];
@@ -1016,7 +1053,8 @@ function calculateATR(ohlcv, period = 14) {
     const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
     trs.push(tr);
   }
-  return trs.slice(-period).reduce((a, b) => a + b, 0) / period;
+  const sample = trs.slice(-period);
+  return sample.length ? average(sample) : 0;
 }
 
 // ------------------------------
@@ -1136,7 +1174,7 @@ async function analyzeSymbol(symbol) {
       return null;
     }
 
-    console.log(`${symbol} → TP/SL based on ${usedSR ? "S/R levels" : "ATR"} (RR=${rr.toFixed(2)})`);
+    console.log(`${symbol} -> TP/SL based on ${usedSR ? "S/R levels" : "ATR"} (RR=${rr.toFixed(2)})`);
 
     return {
       symbol,
