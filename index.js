@@ -1187,7 +1187,7 @@ function calculateATR(ohlcv, period = 14) {
 }
 
 // ------------------------------
-//  Analyze Symbol (TP/SL based on S/R + ATR fallback)
+//  Analyze Symbol (TP/SL based on S/R + ATR fallback) - FIXED
 // ------------------------------
 
 async function analyzeSymbol(symbol) {
@@ -1214,8 +1214,6 @@ async function analyzeSymbol(symbol) {
     const resistancesAbove = resistance.filter(r => r.price > currentPrice).sort((a, b) => a.price - b.price);
     const nearestSupport = supportsBelow[0] || null;
     const nearestResistance = resistancesAbove[0] || null;
-    const nextSupport = supportsBelow[1] || null;
-    const nextResistance = resistancesAbove[1] || null;
 
     let distanceToSupport = Infinity;
     let distanceToResistance = Infinity;
@@ -1234,9 +1232,6 @@ async function analyzeSymbol(symbol) {
 
     let ai = await getAISignal(symbol, currentPrice, support, resistance, ohlcv);
     const originalConfidence = ai.confidence;
-
-    // We'll adjust confidence after we have RR (later)
-    // For now, keep original, will adjust after RR calculation
 
     console.log("[AI]", ai);
 
@@ -1261,42 +1256,56 @@ async function analyzeSymbol(symbol) {
 
     const atr = calculateATR(ohlcv.slice(-20), 14);
     const buffer = currentPrice * 0.002;
-    let slPrice, tpPrice, usedSR = false;
+    let slPrice, tpPrice;
+    let usedSR = false;
+    let slPercent, tpPercent;
 
     if (signal === "LONG") {
+      // SL di bawah support terdekat
       if (nearestSupport) {
         slPrice = nearestSupport.price - buffer;
         usedSR = true;
       } else {
         slPrice = currentPrice - atr * ATR_SL_MULTIPLIER;
       }
-      if (nextResistance) {
-        tpPrice = nextResistance.price;
+      // TP di resistance terdekat (bukan nextResistance)
+      if (nearestResistance) {
+        tpPrice = nearestResistance.price;
         usedSR = true;
       } else {
         tpPrice = currentPrice + atr * ATR_TP_MULTIPLIER;
       }
-    } else {
+
+      // Validasi agar SL dan TP tidak terbalik
+      if (slPrice >= currentPrice) slPrice = currentPrice - atr * ATR_SL_MULTIPLIER;
+      if (tpPrice <= currentPrice) tpPrice = currentPrice + atr * ATR_TP_MULTIPLIER;
+
+      // Hitung persentase untuk adaptasi nanti
+      slPercent = (currentPrice - slPrice) / currentPrice;   // jarak SL ke bawah (%)
+      tpPercent = (tpPrice - currentPrice) / currentPrice;   // jarak TP ke atas (%)
+    } else { // SHORT
+      // SL di atas resistance terdekat
       if (nearestResistance) {
         slPrice = nearestResistance.price + buffer;
         usedSR = true;
       } else {
         slPrice = currentPrice + atr * ATR_SL_MULTIPLIER;
       }
-      if (nextSupport) {
-        tpPrice = nextSupport.price;
+      // TP di support terdekat (bukan nextSupport)
+      if (nearestSupport) {
+        tpPrice = nearestSupport.price;
         usedSR = true;
       } else {
         tpPrice = currentPrice - atr * ATR_TP_MULTIPLIER;
       }
-    }
 
-    if (signal === "LONG") {
-      if (slPrice >= currentPrice) slPrice = currentPrice - atr * ATR_SL_MULTIPLIER;
-      if (tpPrice <= currentPrice) tpPrice = currentPrice + atr * ATR_TP_MULTIPLIER;
-    } else {
+      // Validasi
       if (slPrice <= currentPrice) slPrice = currentPrice + atr * ATR_SL_MULTIPLIER;
       if (tpPrice >= currentPrice) tpPrice = currentPrice - atr * ATR_TP_MULTIPLIER;
+
+      // Hitung persentase untuk adaptasi nanti
+      slPercent = (slPrice - currentPrice) / currentPrice;   // jarak SL ke atas (%)
+      tpPercent = (currentPrice - tpPrice) / currentPrice;   // jarak TP ke bawah (%)
     }
 
     const rr = calculateRR(signal, currentPrice, tpPrice, slPrice);
@@ -1336,6 +1345,9 @@ async function analyzeSymbol(symbol) {
       confidence: ai.confidence,
       strength: ai.strength,
       reason: ai.reason,
+      usedSR,
+      slPercent,
+      tpPercent,
     };
   } catch (err) {
     console.warn(`${symbol} error: ${err.message}`);
@@ -1426,17 +1438,17 @@ async function tradingCycle() {
     const actualEntry = newPos.entryPrice;
     let actualSL, actualTP;
 
-    const originalSL = best.slPrice;
-    const originalTP = best.tpPrice;
-    const originalEntry = best.currentPrice;
-    const usedSR = Math.abs(originalSL - originalEntry) < (ATR_SL_MULTIPLIER * best.atr * 1.2) ? false : true;
-
-    if (usedSR) {
-      const offsetSL = originalSL - originalEntry;
-      const offsetTP = originalTP - originalEntry;
-      actualSL = actualEntry + offsetSL;
-      actualTP = actualEntry + offsetTP;
+    if (best.usedSR) {
+      // Gunakan persentase dari entry sinyal, terapkan ke entry aktual
+      if (best.signal === "LONG") {
+        actualSL = actualEntry * (1 - best.slPercent);
+        actualTP = actualEntry * (1 + best.tpPercent);
+      } else {
+        actualSL = actualEntry * (1 + best.slPercent);
+        actualTP = actualEntry * (1 - best.tpPercent);
+      }
     } else {
+      // Fallback ke ATR murni
       if (best.signal === "LONG") {
         actualSL = actualEntry - best.atr * ATR_SL_MULTIPLIER;
         actualTP = actualEntry + best.atr * ATR_TP_MULTIPLIER;
@@ -1446,6 +1458,7 @@ async function tradingCycle() {
       }
     }
 
+    // Validasi akhir agar SL dan TP tidak terbalik
     if (best.signal === "LONG") {
       if (actualSL >= actualEntry) actualSL = actualEntry - best.atr * ATR_SL_MULTIPLIER;
       if (actualTP <= actualEntry) actualTP = actualEntry + best.atr * ATR_TP_MULTIPLIER;
@@ -1455,7 +1468,7 @@ async function tradingCycle() {
     }
 
     const actualRR = calculateRR(best.signal, actualEntry, actualTP, actualSL);
-    console.log(`[ADAPT] Entry=${actualEntry}, usedSR=${usedSR}, RR=${actualRR.toFixed(2)}`);
+    console.log(`[ADAPT] Entry=${actualEntry}, usedSR=${best.usedSR}, RR=${actualRR.toFixed(2)}`);
 
     await createStopLossAndTakeProfit(best.symbol, newPos, actualSL, actualTP);
 
