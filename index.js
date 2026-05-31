@@ -65,6 +65,14 @@ const FONNTE_TARGET = envValue("FONNTE_TARGET", "");
 const FONNTE_API_URL = envValue("FONNTE_API_URL", "https://api.fonnte.com/send");
 const FONNTE_COUNTRY_CODE = envValue("FONNTE_COUNTRY_CODE", "62");
 
+// ---------- LEARNING MEMORY ----------
+const LEARNING_MEMORY_ENABLED = envBoolean("LEARNING_MEMORY_ENABLED", true);
+const LEARNING_MEMORY_FILE = envValue("LEARNING_MEMORY_FILE", "learning-memory-sr.json");
+const LEARNING_MEMORY_PATH = resolveProjectPath(LEARNING_MEMORY_FILE);
+const LEARNING_MEMORY_MIN_TRADES = envNumber("LEARNING_MEMORY_MIN_TRADES", 5);
+const LEARNING_MEMORY_BAD_WIN_RATE = envNumber("LEARNING_MEMORY_BAD_WIN_RATE", 40); // percent
+const LEARNING_MEMORY_CONFIDENCE_PENALTY = envNumber("LEARNING_MEMORY_CONFIDENCE_PENALTY", 0.6);
+
 // ------------------------------
 //  Helper Functions
 // ------------------------------
@@ -218,6 +226,10 @@ let riskState = loadRiskState();
 let aiSignalCache = new Map();
 let circuitBreakerState = { consecutiveErrors: 0, pausedUntil: 0, lastError: null };
 let fonnteAlertWarningShown = false;
+
+// Learning memory state
+let learningMemory = null;
+let pendingTradeSetups = new Map(); // key: tradeId, value: { symbol, signal, strength, confidence, rr, entryPrice, timestamp }
 
 // ------------------------------
 //  Kill Switch
@@ -522,6 +534,138 @@ function isRealizedTrade(trade) {
   return Math.abs(getRealizedPnl(trade)) > 0.0000001;
 }
 
+// ---------- LEARNING MEMORY IMPLEMENTATION ----------
+function getRRRange(rr) {
+  if (rr < 1.5) return "<1.5";
+  if (rr < 2) return "1.5-2";
+  return ">2";
+}
+
+function createEmptyLearningMemory() {
+  return {
+    version: 1,
+    stats: {
+      bySymbolSide: {},     // e.g. "BTC/USDT:USDT_LONG" -> { wins, losses, totalPnl }
+      bySymbolStrength: {}, // e.g. "BTC/USDT:USDT_STRONG" -> { wins, losses, totalPnl }
+      byRRRange: {},        // e.g. ">2" -> { wins, losses, totalPnl }
+    },
+    lastUpdated: new Date().toISOString(),
+  };
+}
+
+function loadLearningMemory() {
+  if (!LEARNING_MEMORY_ENABLED) return createEmptyLearningMemory();
+  try {
+    if (fs.existsSync(LEARNING_MEMORY_PATH)) {
+      const data = JSON.parse(fs.readFileSync(LEARNING_MEMORY_PATH, "utf8"));
+      if (!data.stats) data.stats = createEmptyLearningMemory().stats;
+      return data;
+    }
+  } catch (err) {
+    console.warn("[MEMORY] Failed to load, starting fresh:", err.message);
+  }
+  return createEmptyLearningMemory();
+}
+
+function saveLearningMemory() {
+  if (!LEARNING_MEMORY_ENABLED) return;
+  learningMemory.lastUpdated = new Date().toISOString();
+  fs.writeFileSync(LEARNING_MEMORY_PATH, JSON.stringify(learningMemory, null, 2));
+}
+
+function updateMemoryCategory(categoryKey, isWin, pnl) {
+  const cat = learningMemory.stats[categoryKey];
+  if (!cat) return;
+  if (isWin) cat.wins++;
+  else cat.losses++;
+  cat.totalPnl += pnl;
+}
+
+function recordTradeOutcome(tradeId, netProfit) {
+  if (!LEARNING_MEMORY_ENABLED) return;
+  const setup = pendingTradeSetups.get(tradeId);
+  if (!setup) {
+    console.warn(`[MEMORY] No setup found for trade ${tradeId}`);
+    return;
+  }
+
+  const isWin = netProfit > 0;
+  const pnl = netProfit;
+  const { symbol, signal, strength, rr } = setup;
+
+  // Category 1: symbol + side
+  const symbolSideKey = `bySymbolSide.${symbol}_${signal}`;
+  if (!learningMemory.stats.bySymbolSide[symbolSideKey]) {
+    learningMemory.stats.bySymbolSide[symbolSideKey] = { wins: 0, losses: 0, totalPnl: 0 };
+  }
+  updateMemoryCategory(`bySymbolSide.${symbolSideKey}`, isWin, pnl);
+
+  // Category 2: symbol + strength
+  const symbolStrengthKey = `bySymbolStrength.${symbol}_${strength}`;
+  if (!learningMemory.stats.bySymbolStrength[symbolStrengthKey]) {
+    learningMemory.stats.bySymbolStrength[symbolStrengthKey] = { wins: 0, losses: 0, totalPnl: 0 };
+  }
+  updateMemoryCategory(`bySymbolStrength.${symbolStrengthKey}`, isWin, pnl);
+
+  // Category 3: RR range
+  const rrRange = getRRRange(rr);
+  const rrKey = `byRRRange.${rrRange}`;
+  if (!learningMemory.stats.byRRRange[rrKey]) {
+    learningMemory.stats.byRRRange[rrKey] = { wins: 0, losses: 0, totalPnl: 0 };
+  }
+  updateMemoryCategory(`byRRRange.${rrKey}`, isWin, pnl);
+
+  saveLearningMemory();
+  console.log(`[MEMORY] Recorded ${isWin ? "WIN" : "LOSS"} for ${symbol} ${signal} | strength=${strength} | RR=${rrRange} | PnL=${pnl.toFixed(2)}`);
+
+  pendingTradeSetups.delete(tradeId);
+}
+
+function getWinRate(categoryStats) {
+  if (!categoryStats) return null;
+  const total = categoryStats.wins + categoryStats.losses;
+  if (total === 0) return null;
+  return (categoryStats.wins / total) * 100;
+}
+
+function adjustConfidenceWithMemory(symbol, signal, strength, rr, originalConfidence) {
+  if (!LEARNING_MEMORY_ENABLED) return originalConfidence;
+
+  const symbolSideKey = `bySymbolSide.${symbol}_${signal}`;
+  const symbolStrengthKey = `bySymbolStrength.${symbol}_${strength}`;
+  const rrRange = getRRRange(rr);
+  const rrKey = `byRRRange.${rrRange}`;
+
+  let worstWinRate = 100;
+  let worstCategory = null;
+
+  const checkCategory = (key, statsKey) => {
+    const stats = learningMemory.stats[statsKey]?.[key];
+    if (!stats) return;
+    const total = stats.wins + stats.losses;
+    if (total >= LEARNING_MEMORY_MIN_TRADES) {
+      const wr = getWinRate(stats);
+      if (wr !== null && wr < worstWinRate) {
+        worstWinRate = wr;
+        worstCategory = `${statsKey}.${key}`;
+      }
+    }
+  };
+
+  checkCategory(symbolSideKey, "bySymbolSide");
+  checkCategory(symbolStrengthKey, "bySymbolStrength");
+  checkCategory(rrKey, "byRRRange");
+
+  if (worstCategory && worstWinRate < LEARNING_MEMORY_BAD_WIN_RATE) {
+    const penalty = LEARNING_MEMORY_CONFIDENCE_PENALTY;
+    const newConf = Math.floor(originalConfidence * penalty);
+    console.log(`[MEMORY] Penalty applied: win rate ${worstWinRate.toFixed(1)}% in ${worstCategory} → confidence ${originalConfidence} → ${newConf}`);
+    return newConf;
+  }
+
+  return originalConfidence;
+}
+
 async function applyTradeToRiskState(trade) {
   const id = tradeIdOf(trade);
   if (riskState.processedTradeIds.includes(id)) return false;
@@ -542,6 +686,11 @@ async function applyTradeToRiskState(trade) {
       riskState.consecutiveLosses = 0;
     }
     await sendFonnteAlert(formatTradeCloseAlert(trade, realizedPnl, fee, netProfit));
+
+    // ---------- LEARNING MEMORY RECORD ----------
+    if (LEARNING_MEMORY_ENABLED) {
+      recordTradeOutcome(id, netProfit);
+    }
   }
   return true;
 }
@@ -1065,7 +1214,15 @@ async function analyzeSymbol(symbol) {
       `${symbol} price near level: ${distanceToSupport <= PRICE_PROXIMITY_THRESHOLD ? "SUPPORT" : "RESISTANCE"} (dist ${(Math.min(distanceToSupport, distanceToResistance) * 100).toFixed(2)}%)`
     );
 
-    const ai = await getAISignal(symbol, currentPrice, support, resistance, ohlcv);
+    let ai = await getAISignal(symbol, currentPrice, support, resistance, ohlcv);
+    const originalConfidence = ai.confidence;
+
+    // Apply learning memory adjustment
+    if (ai.signal !== "HOLD") {
+      const adjustedConfidence = adjustConfidenceWithMemory(symbol, ai.signal, ai.strength, 0, originalConfidence);
+      ai = { ...ai, confidence: adjustedConfidence };
+    }
+
     console.log("[AI]", ai);
 
     const signal = ai.signal;
@@ -1078,7 +1235,7 @@ async function analyzeSymbol(symbol) {
       return null;
     }
     if (ai.confidence < MIN_AI_CONFIDENCE) {
-      console.log(`${symbol} low confidence ${ai.confidence}`);
+      console.log(`${symbol} low confidence ${ai.confidence} (original ${originalConfidence})`);
       return null;
     }
     if (!ALLOWED_AI_STRENGTHS.includes(ai.strength)) {
@@ -1263,6 +1420,18 @@ async function tradingCycle() {
     const actualRR = calculateRR(best.signal, actualEntry, actualTP, actualSL);
     console.log(`[ADAPT] Entry=${actualEntry}, usedSR=${usedSR}, RR=${actualRR.toFixed(2)}`);
 
+    // Store trade setup for learning memory (use a synthetic tradeId based on symbol + timestamp)
+    const tradeId = `${best.symbol}_${Date.now()}`;
+    pendingTradeSetups.set(tradeId, {
+      symbol: best.symbol,
+      signal: best.signal,
+      strength: best.strength,
+      confidence: best.confidence,
+      rr: actualRR,
+      entryPrice: actualEntry,
+      timestamp: Date.now(),
+    });
+
     await createStopLossAndTakeProfit(best.symbol, newPos, actualSL, actualTP);
 
     await sendFonnteAlert(
@@ -1303,7 +1472,13 @@ LONG ONLY: ${LONG_ONLY}
 SR_WINDOW: ${SR_WINDOW_SIZE}, TOLERANCE: ${SR_LEVEL_TOLERANCE * 100}%
 MIN_AI_CONFIDENCE: ${MIN_AI_CONFIDENCE}
 ALLOWED_STRENGTHS: ${ALLOWED_AI_STRENGTHS.join(", ")}
+LEARNING MEMORY: ${LEARNING_MEMORY_ENABLED ? "ON" : "OFF"} (min trades ${LEARNING_MEMORY_MIN_TRADES}, bad WR ${LEARNING_MEMORY_BAD_WIN_RATE}%, penalty ${LEARNING_MEMORY_CONFIDENCE_PENALTY})
 `);
+
+  // Initialize learning memory
+  learningMemory = loadLearningMemory();
+  console.log("[MEMORY] Loaded", Object.keys(learningMemory.stats.bySymbolSide).length, "symbol-side records");
+
   await retry(() => exchange.loadMarkets());
   await syncProfitLedger();
   while (true) {
