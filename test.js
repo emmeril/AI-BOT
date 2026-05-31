@@ -2,13 +2,12 @@ require("dotenv").config();
 const ccxt = require("ccxt");
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
 const https = require("https");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-// ======================================================
-//  CONFIGURATION (from environment variables)
-// ======================================================
+// ------------------------------
+//  Configuration
+// ------------------------------
 
 const DEFAULT_SYMBOLS = "BTC/USDT:USDT,ETH/USDT:USDT,DOGE/USDT:USDT";
 const SYMBOLS = envList("SYMBOLS", DEFAULT_SYMBOLS);
@@ -20,12 +19,10 @@ const LOOKBACK_CANDLES = envNumber("LOOKBACK_CANDLES", 200);
 const INTERVAL_MINUTES = envNumber("INTERVAL_MINUTES", 5);
 const INTERVAL_MS = INTERVAL_MINUTES * 60 * 1000;
 
-// SR detection parameters
 const SR_WINDOW_SIZE = envNumber("SR_WINDOW_SIZE", 5);
 const SR_LEVEL_TOLERANCE = envNumber("SR_LEVEL_TOLERANCE", 0.005);
 const PRICE_PROXIMITY_THRESHOLD = envNumber("PRICE_PROXIMITY_THRESHOLD", 0.005);
 
-// AI parameters
 const GEMINI_MODEL = envValue("GEMINI_MODEL", "gemini-1.5-flash-lite");
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
@@ -33,7 +30,6 @@ const MIN_AI_CONFIDENCE = envNumber("MIN_AI_CONFIDENCE", 65);
 const ALLOWED_AI_STRENGTHS = envList("ALLOWED_AI_STRENGTHS", "MEDIUM,STRONG,EXTREME").map(s => s.toUpperCase());
 const AI_RESPONSE_RETRIES = envNumber("AI_RESPONSE_RETRIES", 2);
 
-// Risk / filters
 const MAX_FUNDING_RATE = envNumber("MAX_FUNDING_RATE", 0.1) / 100;
 const MIN_RR = envNumber("MIN_RR", 1.5);
 const RISK_PER_TRADE_PCT = envNumber("RISK_PER_TRADE_PCT", 1) / 100;
@@ -52,23 +48,21 @@ const STOP_TRADING = envTrue("STOP_TRADING");
 const KILL_SWITCH_FILE = envValue("KILL_SWITCH_FILE", "bot-paused.flag");
 const KILL_SWITCH_PATH = resolveProjectPath(KILL_SWITCH_FILE);
 
-// Profit tracker & risk state
 const PROFIT_TRACKER_ENABLED = envBoolean("PROFIT_TRACKER_ENABLED");
 const PROFIT_TRACKER_FILE = envValue("PROFIT_TRACKER_FILE", "profit-ledger-sr.json");
 const PROFIT_LEDGER_PATH = resolveProjectPath(PROFIT_TRACKER_FILE);
 const RISK_STATE_FILE = envValue("RISK_STATE_FILE", "risk-state-sr.json");
 const RISK_STATE_PATH = resolveProjectPath(RISK_STATE_FILE);
 
-// Alert (Fonnte)
 const FONNTE_ENABLED = envBoolean("FONNTE_ENABLED");
 const FONNTE_TOKEN = envValue("FONNTE_TOKEN", "");
 const FONNTE_TARGET = envValue("FONNTE_TARGET", "");
 const FONNTE_API_URL = envValue("FONNTE_API_URL", "https://api.fonnte.com/send");
 const FONNTE_COUNTRY_CODE = envValue("FONNTE_COUNTRY_CODE", "62");
 
-// ======================================================
-//  HELPER FUNCTIONS
-// ======================================================
+// ------------------------------
+//  Helper Functions
+// ------------------------------
 
 function envValue(key, fallback) {
   const value = process.env[key];
@@ -111,10 +105,6 @@ function roundNumber(value, digits = 6) {
   return Number(number.toFixed(digits));
 }
 
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
-}
-
 async function retry(fn, retries = 3, delay = 2000) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -128,9 +118,9 @@ async function retry(fn, retries = 3, delay = 2000) {
   }
 }
 
-// ======================================================
-//  EXCHANGE SETUP
-// ======================================================
+// ------------------------------
+//  Exchange Setup
+// ------------------------------
 
 const exchange = new ccxt.binance({
   apiKey: process.env.EXCHANGE_API_KEY,
@@ -144,21 +134,20 @@ if (process.env.EXCHANGE_DEMO === "true") {
   console.log("[DEMO] Futures demo mode enabled");
 }
 
-// ======================================================
-//  GLOBAL STATE
-// ======================================================
+// ------------------------------
+//  Global State
+// ------------------------------
 
 let isTrading = false;
 let lastPositionChangeTime = 0;
 let profitLedger = loadProfitLedger();
 let riskState = loadRiskState();
 let circuitBreakerState = { consecutiveErrors: 0, pausedUntil: 0, lastError: null };
-let aiSignalCache = new Map();
 let fonnteAlertWarningShown = false;
 
-// ======================================================
-//  KILL SWITCH
-// ======================================================
+// ------------------------------
+//  Kill Switch
+// ------------------------------
 
 function killSwitchActive() {
   if (!KILL_SWITCH_ENABLED) return false;
@@ -179,9 +168,9 @@ function getNextCandleDelay() {
   return next - now;
 }
 
-// ======================================================
-//  ALERTS (FONNTE)
-// ======================================================
+// ------------------------------
+//  Alerts (Fonnte)
+// ------------------------------
 
 function shouldSendFonnteAlerts() {
   return Boolean(FONNTE_ENABLED && FONNTE_TOKEN && FONNTE_TARGET);
@@ -233,7 +222,7 @@ async function sendFonnteAlert(message) {
     try {
       payload = JSON.parse(response.body);
     } catch {
-      /* ignore */
+      // ignore
     }
     const success =
       response.statusCode >= 200 &&
@@ -248,17 +237,7 @@ async function sendFonnteAlert(message) {
   }
 }
 
-function formatTradeOpenAlert({
-  symbol,
-  signal,
-  entryPrice,
-  contracts,
-  slPrice,
-  tpPrice,
-  rr,
-  confidence,
-  strength,
-}) {
+function formatTradeOpenAlert({ symbol, signal, entryPrice, contracts, slPrice, tpPrice, rr, confidence, strength }) {
   return [
     "[TRADE OPEN]",
     `Symbol: ${symbol}`,
@@ -285,9 +264,9 @@ function formatTradeCloseAlert(trade, realizedPnl, fee, netProfit) {
   ].join("\n");
 }
 
-// ======================================================
-//  PROFIT LEDGER
-// ======================================================
+// ------------------------------
+//  Profit Ledger
+// ------------------------------
 
 function createEmptyProfitLedger() {
   const now = new Date().toISOString();
@@ -416,9 +395,9 @@ async function syncProfitLedger() {
   }
 }
 
-// ======================================================
-//  RISK STATE (cooldown, daily PnL, consecutive losses)
-// ======================================================
+// ------------------------------
+//  Risk State (cooldown, daily PnL, consecutive losses)
+// ------------------------------
 
 function createEmptyRiskState() {
   return {
@@ -580,9 +559,9 @@ function cleanupSymbolCooldowns() {
   return changed;
 }
 
-// ======================================================
-//  CIRCUIT BREAKER
-// ======================================================
+// ------------------------------
+//  Circuit Breaker
+// ------------------------------
 
 function circuitBreakerAllowsTrading() {
   if (circuitBreakerState.pausedUntil <= Date.now()) return true;
@@ -605,9 +584,9 @@ function recordCircuitBreakerSuccess() {
   circuitBreakerState.lastError = null;
 }
 
-// ======================================================
-//  SUPPORT & RESISTANCE DETECTION
-// ======================================================
+// ------------------------------
+//  Support & Resistance Detection
+// ------------------------------
 
 function detectSwingPoints(ohlcv, windowSize) {
   const highs = ohlcv.map(c => c[2]);
@@ -678,9 +657,9 @@ function getSupportResistanceLevels(ohlcv, windowSize = SR_WINDOW_SIZE, toleranc
   };
 }
 
-// ======================================================
-//  AI PROMPT & SIGNAL
-// ======================================================
+// ------------------------------
+//  AI Prompt & Signal
+// ------------------------------
 
 function createHoldAISignal(reason) {
   return { signal: "HOLD", strength: "WEAK", confidence: 0, tradeAllowed: false, reason };
@@ -829,9 +808,9 @@ async function getAISignal(symbol, currentPrice, supportLevels, resistanceLevels
   return createHoldAISignal("AI fallback to HOLD");
 }
 
-// ======================================================
-//  RISK & ORDER MANAGEMENT (TP/SL)
-// ======================================================
+// ------------------------------
+//  Risk & Order Management (TP/SL)
+// ------------------------------
 
 async function getAvailableBalance() {
   const balance = await retry(() => exchange.fetchBalance());
@@ -904,11 +883,7 @@ async function closePosition(symbol, position) {
   console.log("[CLOSE] Position closed");
 }
 
-// ======================================================
-//  MODIFIED FUNCTION: Clean old TP/SL before placing new ones
-// ======================================================
 async function createStopLossAndTakeProfit(symbol, position, slPrice, tpPrice) {
-  // Bersihkan semua order yang masih terbuka untuk simbol ini (termasuk TP/SL lama)
   await cancelAllOrders(symbol);
 
   const isLong = position.side === "long";
@@ -960,9 +935,9 @@ function calculateATR(ohlcv, period = 14) {
   return trs.slice(-period).reduce((a, b) => a + b, 0) / period;
 }
 
-// ======================================================
-//  MODIFIED analyzeSymbol : TP/SL based on S/R + ATR fallback
-// ======================================================
+// ------------------------------
+//  Analyze Symbol (TP/SL based on S/R + ATR fallback)
+// ------------------------------
 
 async function analyzeSymbol(symbol) {
   try {
@@ -984,15 +959,13 @@ async function analyzeSymbol(symbol) {
       return null;
     }
 
-    // Urutkan support dari yang tertinggi di bawah harga, dan resistance dari terendah di atas harga
     const supportsBelow = support.filter(s => s.price < currentPrice).sort((a, b) => b.price - a.price);
     const resistancesAbove = resistance.filter(r => r.price > currentPrice).sort((a, b) => a.price - b.price);
     const nearestSupport = supportsBelow[0] || null;
     const nearestResistance = resistancesAbove[0] || null;
-    const nextSupport = supportsBelow[1] || null;      // support lebih dalam (untuk TP SHORT)
-    const nextResistance = resistancesAbove[1] || null; // resistance lebih tinggi (untuk TP LONG)
+    const nextSupport = supportsBelow[1] || null;
+    const nextResistance = resistancesAbove[1] || null;
 
-    // Proximity check sebelum AI
     let distanceToSupport = Infinity;
     let distanceToResistance = Infinity;
     if (nearestSupport) distanceToSupport = (currentPrice - nearestSupport.price) / currentPrice;
@@ -1033,37 +1006,30 @@ async function analyzeSymbol(symbol) {
       return null;
     }
 
-    // ======================================================
-    // Tentukan TP/SL berdasarkan Support/Resistance dengan fallback ATR
-    // ======================================================
     const atr = calculateATR(ohlcv.slice(-20), 14);
-    const buffer = currentPrice * 0.002; // buffer 0.2% untuk SL (hindari stop hunt)
+    const buffer = currentPrice * 0.002;
     let slPrice, tpPrice, usedSR = false;
 
     if (signal === "LONG") {
-      // SL: di bawah nearestSupport (jika ada), atau pakai ATR
       if (nearestSupport) {
         slPrice = nearestSupport.price - buffer;
         usedSR = true;
       } else {
         slPrice = currentPrice - atr * ATR_SL_MULTIPLIER;
       }
-      // TP: di nextResistance (jika ada), atau pakai ATR
       if (nextResistance) {
         tpPrice = nextResistance.price;
         usedSR = true;
       } else {
         tpPrice = currentPrice + atr * ATR_TP_MULTIPLIER;
       }
-    } else { // SHORT
-      // SL: di atas nearestResistance
+    } else {
       if (nearestResistance) {
         slPrice = nearestResistance.price + buffer;
         usedSR = true;
       } else {
         slPrice = currentPrice + atr * ATR_SL_MULTIPLIER;
       }
-      // TP: di nextSupport
       if (nextSupport) {
         tpPrice = nextSupport.price;
         usedSR = true;
@@ -1072,7 +1038,6 @@ async function analyzeSymbol(symbol) {
       }
     }
 
-    // Pastikan SL dan TP valid (misal LONG: SL < entry < TP)
     if (signal === "LONG") {
       if (slPrice >= currentPrice) slPrice = currentPrice - atr * ATR_SL_MULTIPLIER;
       if (tpPrice <= currentPrice) tpPrice = currentPrice + atr * ATR_TP_MULTIPLIER;
@@ -1111,9 +1076,9 @@ async function analyzeSymbol(symbol) {
   }
 }
 
-// ======================================================
-//  MAIN TRADING CYCLE (modified for SR-based TP/SL adaptation)
-// ======================================================
+// ------------------------------
+//  Main Trading Cycle
+// ------------------------------
 
 async function tradingCycle() {
   if (isTrading) {
@@ -1180,23 +1145,19 @@ async function tradingCycle() {
     if (!newPos) return;
 
     const actualEntry = newPos.entryPrice;
-    const priceDiffRatio = actualEntry / best.currentPrice; // koreksi karena slippage
     let actualSL, actualTP;
 
-    // Cek apakah TP/SL asli dari analyzeSymbol berdasarkan S/R (dengan membandingkan deviasi terhadap ATR)
     const originalSL = best.slPrice;
     const originalTP = best.tpPrice;
     const originalEntry = best.currentPrice;
-    const usedSR = (Math.abs(originalSL - originalEntry) < (ATR_SL_MULTIPLIER * best.atr * 1.2)) ? false : true;
+    const usedSR = Math.abs(originalSL - originalEntry) < (ATR_SL_MULTIPLIER * best.atr * 1.2) ? false : true;
 
     if (usedSR) {
-      // Skala linier terhadap perubahan entry price
       const offsetSL = originalSL - originalEntry;
       const offsetTP = originalTP - originalEntry;
       actualSL = actualEntry + offsetSL;
       actualTP = actualEntry + offsetTP;
     } else {
-      // Fallback ke ATR seperti semula
       if (best.signal === "LONG") {
         actualSL = actualEntry - best.atr * ATR_SL_MULTIPLIER;
         actualTP = actualEntry + best.atr * ATR_TP_MULTIPLIER;
@@ -1206,7 +1167,6 @@ async function tradingCycle() {
       }
     }
 
-    // Validasi ulang agar arah tetap benar
     if (best.signal === "LONG") {
       if (actualSL >= actualEntry) actualSL = actualEntry - best.atr * ATR_SL_MULTIPLIER;
       if (actualTP <= actualEntry) actualTP = actualEntry + best.atr * ATR_TP_MULTIPLIER;
@@ -1242,13 +1202,13 @@ async function tradingCycle() {
   }
 }
 
-// ======================================================
-//  MAIN LOOP
-// ======================================================
+// ------------------------------
+//  Main Loop
+// ------------------------------
 
 async function main() {
   console.log(`
-[START] SR + AI Bot (TP/SL based on S/R + ATR fallback)
+[START]
 SYMBOLS: ${SYMBOLS.join(", ")}
 TIMEFRAME: ${TIMEFRAME}
 LEVERAGE: ${LEVERAGE}x
