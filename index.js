@@ -229,7 +229,7 @@ let fonnteAlertWarningShown = false;
 
 // Learning memory state
 let learningMemory = null;
-let pendingTradeSetups = new Map(); // key: tradeId, value: { symbol, signal, strength, confidence, rr, entryPrice, timestamp }
+let pendingTradeSetups = new Map(); // key: orderId, value: { symbol, signal, strength, confidence, rr, entryPrice, timestamp }
 
 // ------------------------------
 //  Kill Switch
@@ -581,11 +581,11 @@ function updateMemoryCategory(categoryKey, isWin, pnl) {
   cat.totalPnl += pnl;
 }
 
-function recordTradeOutcome(tradeId, netProfit) {
+function recordTradeOutcome(orderId, netProfit) {
   if (!LEARNING_MEMORY_ENABLED) return;
-  const setup = pendingTradeSetups.get(tradeId);
+  const setup = pendingTradeSetups.get(orderId);
   if (!setup) {
-    console.warn(`[MEMORY] No setup found for trade ${tradeId}`);
+    console.warn(`[MEMORY] No setup found for order ${orderId}`);
     return;
   }
 
@@ -594,14 +594,14 @@ function recordTradeOutcome(tradeId, netProfit) {
   const { symbol, signal, strength, rr } = setup;
 
   // Category 1: symbol + side
-  const symbolSideKey = `bySymbolSide.${symbol}_${signal}`;
+  const symbolSideKey = `${symbol}_${signal}`;
   if (!learningMemory.stats.bySymbolSide[symbolSideKey]) {
     learningMemory.stats.bySymbolSide[symbolSideKey] = { wins: 0, losses: 0, totalPnl: 0 };
   }
   updateMemoryCategory(`bySymbolSide.${symbolSideKey}`, isWin, pnl);
 
   // Category 2: symbol + strength
-  const symbolStrengthKey = `bySymbolStrength.${symbol}_${strength}`;
+  const symbolStrengthKey = `${symbol}_${strength}`;
   if (!learningMemory.stats.bySymbolStrength[symbolStrengthKey]) {
     learningMemory.stats.bySymbolStrength[symbolStrengthKey] = { wins: 0, losses: 0, totalPnl: 0 };
   }
@@ -609,7 +609,7 @@ function recordTradeOutcome(tradeId, netProfit) {
 
   // Category 3: RR range
   const rrRange = getRRRange(rr);
-  const rrKey = `byRRRange.${rrRange}`;
+  const rrKey = rrRange;
   if (!learningMemory.stats.byRRRange[rrKey]) {
     learningMemory.stats.byRRRange[rrKey] = { wins: 0, losses: 0, totalPnl: 0 };
   }
@@ -618,7 +618,7 @@ function recordTradeOutcome(tradeId, netProfit) {
   saveLearningMemory();
   console.log(`[MEMORY] Recorded ${isWin ? "WIN" : "LOSS"} for ${symbol} ${signal} | strength=${strength} | RR=${rrRange} | PnL=${pnl.toFixed(2)}`);
 
-  pendingTradeSetups.delete(tradeId);
+  pendingTradeSetups.delete(orderId);
 }
 
 function getWinRate(categoryStats) {
@@ -631,10 +631,10 @@ function getWinRate(categoryStats) {
 function adjustConfidenceWithMemory(symbol, signal, strength, rr, originalConfidence) {
   if (!LEARNING_MEMORY_ENABLED) return originalConfidence;
 
-  const symbolSideKey = `bySymbolSide.${symbol}_${signal}`;
-  const symbolStrengthKey = `bySymbolStrength.${symbol}_${strength}`;
+  const symbolSideKey = `${symbol}_${signal}`;
+  const symbolStrengthKey = `${symbol}_${strength}`;
   const rrRange = getRRRange(rr);
-  const rrKey = `byRRRange.${rrRange}`;
+  const rrKey = rrRange;
 
   let worstWinRate = 100;
   let worstCategory = null;
@@ -689,7 +689,12 @@ async function applyTradeToRiskState(trade) {
 
     // ---------- LEARNING MEMORY RECORD ----------
     if (LEARNING_MEMORY_ENABLED) {
-      recordTradeOutcome(id, netProfit);
+      const orderId = trade.order; // CCXT trade object has 'order' field
+      if (orderId) {
+        recordTradeOutcome(orderId, netProfit);
+      } else {
+        console.warn(`[MEMORY] Trade ${id} has no orderId, cannot record outcome`);
+      }
     }
   }
   return true;
@@ -1092,7 +1097,7 @@ async function cancelAllOrders(symbol) {
   }
 }
 
-async function openPosition(symbol, signal, price) {
+async function openPosition(symbol, signal, price, setupData) {
   await retry(() => exchange.setLeverage(LEVERAGE, symbol));
   const side = signal === "LONG" ? "buy" : "sell";
   const amount = await calculateContracts(symbol, price);
@@ -1104,6 +1109,19 @@ async function openPosition(symbol, signal, price) {
   }
   console.log(`[OPEN] ${signal} ${symbol} | contracts: ${amount} | margin: ${requiredMargin.toFixed(4)}`);
   const order = await retry(() => exchange.createMarketOrder(symbol, side, amount));
+  const orderId = order.id;
+
+  // Store setup for learning memory
+  if (setupData && LEARNING_MEMORY_ENABLED) {
+    pendingTradeSetups.set(orderId, {
+      ...setupData,
+      symbol,
+      signal,
+      entryPrice: price,
+      timestamp: Date.now(),
+    });
+  }
+
   lastPositionChangeTime = Date.now();
   await sleep(3000);
   return await getCurrentPosition(symbol);
@@ -1217,11 +1235,8 @@ async function analyzeSymbol(symbol) {
     let ai = await getAISignal(symbol, currentPrice, support, resistance, ohlcv);
     const originalConfidence = ai.confidence;
 
-    // Apply learning memory adjustment
-    if (ai.signal !== "HOLD") {
-      const adjustedConfidence = adjustConfidenceWithMemory(symbol, ai.signal, ai.strength, 0, originalConfidence);
-      ai = { ...ai, confidence: adjustedConfidence };
-    }
+    // We'll adjust confidence after we have RR (later)
+    // For now, keep original, will adjust after RR calculation
 
     console.log("[AI]", ai);
 
@@ -1234,10 +1249,7 @@ async function analyzeSymbol(symbol) {
       console.log(`${symbol} tradeAllowed false`);
       return null;
     }
-    if (ai.confidence < MIN_AI_CONFIDENCE) {
-      console.log(`${symbol} low confidence ${ai.confidence} (original ${originalConfidence})`);
-      return null;
-    }
+
     if (!ALLOWED_AI_STRENGTHS.includes(ai.strength)) {
       console.log(`${symbol} strength ${ai.strength} not allowed`);
       return null;
@@ -1290,6 +1302,23 @@ async function analyzeSymbol(symbol) {
     const rr = calculateRR(signal, currentPrice, tpPrice, slPrice);
     if (rr < MIN_RR) {
       console.log(`${symbol} RR ${rr.toFixed(2)} < ${MIN_RR} (${usedSR ? "S/R based" : "ATR fallback"})`);
+      return null;
+    }
+
+    // Apply learning memory adjustment now that RR is known
+    if (ai.signal !== "HOLD") {
+      const adjustedConfidence = adjustConfidenceWithMemory(
+        symbol,
+        ai.signal,
+        ai.strength,
+        rr,
+        originalConfidence
+      );
+      ai = { ...ai, confidence: adjustedConfidence };
+    }
+
+    if (ai.confidence < MIN_AI_CONFIDENCE) {
+      console.log(`${symbol} low confidence ${ai.confidence} (original ${originalConfidence})`);
       return null;
     }
 
@@ -1383,7 +1412,15 @@ async function tradingCycle() {
     if (existing) await closePosition(best.symbol, existing);
     await cancelAllOrders(best.symbol);
 
-    const newPos = await openPosition(best.symbol, best.signal, best.currentPrice);
+    // Prepare setup data for learning memory
+    const setupData = {
+      signal: best.signal,
+      strength: best.strength,
+      confidence: best.confidence,
+      rr: best.rr,
+    };
+
+    const newPos = await openPosition(best.symbol, best.signal, best.currentPrice, setupData);
     if (!newPos) return;
 
     const actualEntry = newPos.entryPrice;
@@ -1419,18 +1456,6 @@ async function tradingCycle() {
 
     const actualRR = calculateRR(best.signal, actualEntry, actualTP, actualSL);
     console.log(`[ADAPT] Entry=${actualEntry}, usedSR=${usedSR}, RR=${actualRR.toFixed(2)}`);
-
-    // Store trade setup for learning memory (use a synthetic tradeId based on symbol + timestamp)
-    const tradeId = `${best.symbol}_${Date.now()}`;
-    pendingTradeSetups.set(tradeId, {
-      symbol: best.symbol,
-      signal: best.signal,
-      strength: best.strength,
-      confidence: best.confidence,
-      rr: actualRR,
-      entryPrice: actualEntry,
-      timestamp: Date.now(),
-    });
 
     await createStopLossAndTakeProfit(best.symbol, newPos, actualSL, actualTP);
 
