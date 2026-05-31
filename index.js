@@ -664,10 +664,16 @@ async function applyTradeToRiskState(trade) {
   saveRiskState();   // persist after each trade for durability
   
   const symbol = trade.symbol;
-  const side = trade.side === 'buy' ? 'LONG' : 'SHORT';
+  const realizedTrade = isRealizedTrade(trade);
+  // Realized PnL is reported on the closing fill. A sell closes a LONG,
+  // while a buy closes a SHORT, so use the inverse of the fill side for
+  // position-level learning-memory keys.
+  const side = realizedTrade
+    ? trade.side === "sell" ? "LONG" : "SHORT"
+    : trade.side === "buy" ? "LONG" : "SHORT";
   const posKey = `${symbol}_${side}`;
   
-  if (isRealizedTrade(trade)) {
+  if (realizedTrade) {
     if (!pendingPositionPnL.has(posKey)) {
       const setup = pendingTradeSetups.get(posKey);
       pendingPositionPnL.set(posKey, {
@@ -1213,6 +1219,7 @@ function fundingSafe(signal, fundingRate) {
 }
 
 function calculateATR(ohlcv, period = 14) {
+  if (!Array.isArray(ohlcv) || ohlcv.length <= period) return null;
   const trs = [];
   for (let i = 1; i < ohlcv.length; i++) {
     const prevClose = ohlcv[i - 1][4];
@@ -1221,7 +1228,9 @@ function calculateATR(ohlcv, period = 14) {
     const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
     trs.push(tr);
   }
-  return trs.slice(-period).reduce((a, b) => a + b, 0) / period;
+  const recentTrs = trs.slice(-period);
+  if (recentTrs.length < period) return null;
+  return recentTrs.reduce((a, b) => a + b, 0) / recentTrs.length;
 }
 
 // ------------------------------
@@ -1293,6 +1302,10 @@ async function analyzeSymbol(symbol) {
     }
 
     const atr = calculateATR(ohlcv.slice(-20), 14);
+    if (!atr || atr <= 0) {
+      console.log(`${symbol} invalid ATR`);
+      return null;
+    }
     const buffer = currentPrice * 0.002;
     let slPrice, tpPrice;
     let usedSR = false;
