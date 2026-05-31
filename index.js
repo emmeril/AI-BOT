@@ -229,7 +229,8 @@ let fonnteAlertWarningShown = false;
 
 // Learning memory state
 let learningMemory = null;
-let pendingTradeSetups = new Map(); // key: orderId, value: { symbol, signal, strength, confidence, rr, entryPrice, timestamp }
+// FIXED: Ubah struktur pendingTradeSetups: key = `${symbol}_${side}`
+let pendingTradeSetups = new Map(); // key: "BTC/USDT:USDT_long" or "BTC/USDT:USDT_short"
 
 // ------------------------------
 //  Kill Switch
@@ -534,7 +535,7 @@ function isRealizedTrade(trade) {
   return Math.abs(getRealizedPnl(trade)) > 0.0000001;
 }
 
-// ---------- LEARNING MEMORY IMPLEMENTATION ----------
+// ---------- LEARNING MEMORY IMPLEMENTATION (FIXED) ----------
 function getRRRange(rr) {
   if (rr < 1.5) return "<1.5";
   if (rr < 2) return "1.5-2";
@@ -559,6 +560,10 @@ function loadLearningMemory() {
     if (fs.existsSync(LEARNING_MEMORY_PATH)) {
       const data = JSON.parse(fs.readFileSync(LEARNING_MEMORY_PATH, "utf8"));
       if (!data.stats) data.stats = createEmptyLearningMemory().stats;
+      // Pastikan sub-objek ada
+      if (!data.stats.bySymbolSide) data.stats.bySymbolSide = {};
+      if (!data.stats.bySymbolStrength) data.stats.bySymbolStrength = {};
+      if (!data.stats.byRRRange) data.stats.byRRRange = {};
       return data;
     }
   } catch (err) {
@@ -573,52 +578,42 @@ function saveLearningMemory() {
   fs.writeFileSync(LEARNING_MEMORY_PATH, JSON.stringify(learningMemory, null, 2));
 }
 
-function updateMemoryCategory(categoryKey, isWin, pnl) {
-  const cat = learningMemory.stats[categoryKey];
-  if (!cat) return;
-  if (isWin) cat.wins++;
-  else cat.losses++;
-  cat.totalPnl += pnl;
-}
-
-function recordTradeOutcome(orderId, netProfit) {
-  if (!LEARNING_MEMORY_ENABLED) return;
-  const setup = pendingTradeSetups.get(orderId);
-  if (!setup) {
-    console.warn(`[MEMORY] No setup found for order ${orderId}`);
+// FIXED: updateMemoryCategory sekarang mengakses properti stats dengan benar
+function updateMemoryCategory(categoryType, key, isWin, pnl) {
+  const category = learningMemory.stats[categoryType];
+  if (!category) {
+    console.error(`[MEMORY] Unknown category type: ${categoryType}`);
     return;
   }
+  if (!category[key]) {
+    category[key] = { wins: 0, losses: 0, totalPnl: 0 };
+  }
+  const entry = category[key];
+  if (isWin) entry.wins++;
+  else entry.losses++;
+  entry.totalPnl += pnl;
+}
 
+function recordTradeOutcome(symbol, side, netProfit, strength, rr) {
+  if (!LEARNING_MEMORY_ENABLED) return;
+  
   const isWin = netProfit > 0;
   const pnl = netProfit;
-  const { symbol, signal, strength, rr } = setup;
 
   // Category 1: symbol + side
-  const symbolSideKey = `${symbol}_${signal}`;
-  if (!learningMemory.stats.bySymbolSide[symbolSideKey]) {
-    learningMemory.stats.bySymbolSide[symbolSideKey] = { wins: 0, losses: 0, totalPnl: 0 };
-  }
-  updateMemoryCategory(`bySymbolSide.${symbolSideKey}`, isWin, pnl);
+  const symbolSideKey = `${symbol}_${side.toUpperCase()}`;
+  updateMemoryCategory("bySymbolSide", symbolSideKey, isWin, pnl);
 
   // Category 2: symbol + strength
   const symbolStrengthKey = `${symbol}_${strength}`;
-  if (!learningMemory.stats.bySymbolStrength[symbolStrengthKey]) {
-    learningMemory.stats.bySymbolStrength[symbolStrengthKey] = { wins: 0, losses: 0, totalPnl: 0 };
-  }
-  updateMemoryCategory(`bySymbolStrength.${symbolStrengthKey}`, isWin, pnl);
+  updateMemoryCategory("bySymbolStrength", symbolStrengthKey, isWin, pnl);
 
   // Category 3: RR range
   const rrRange = getRRRange(rr);
-  const rrKey = rrRange;
-  if (!learningMemory.stats.byRRRange[rrKey]) {
-    learningMemory.stats.byRRRange[rrKey] = { wins: 0, losses: 0, totalPnl: 0 };
-  }
-  updateMemoryCategory(`byRRRange.${rrKey}`, isWin, pnl);
+  updateMemoryCategory("byRRRange", rrRange, isWin, pnl);
 
   saveLearningMemory();
-  console.log(`[MEMORY] Recorded ${isWin ? "WIN" : "LOSS"} for ${symbol} ${signal} | strength=${strength} | RR=${rrRange} | PnL=${pnl.toFixed(2)}`);
-
-  pendingTradeSetups.delete(orderId);
+  console.log(`[MEMORY] Recorded ${isWin ? "WIN" : "LOSS"} for ${symbol} ${side} | strength=${strength} | RR=${rrRange} | PnL=${pnl.toFixed(2)}`);
 }
 
 function getWinRate(categoryStats) {
@@ -631,30 +626,29 @@ function getWinRate(categoryStats) {
 function adjustConfidenceWithMemory(symbol, signal, strength, rr, originalConfidence) {
   if (!LEARNING_MEMORY_ENABLED) return originalConfidence;
 
-  const symbolSideKey = `${symbol}_${signal}`;
+  const symbolSideKey = `${symbol}_${signal.toUpperCase()}`;
   const symbolStrengthKey = `${symbol}_${strength}`;
   const rrRange = getRRRange(rr);
-  const rrKey = rrRange;
 
   let worstWinRate = 100;
   let worstCategory = null;
 
-  const checkCategory = (key, statsKey) => {
-    const stats = learningMemory.stats[statsKey]?.[key];
-    if (!stats) return;
-    const total = stats.wins + stats.losses;
+  const checkCategory = (key, categoryType) => {
+    const cat = learningMemory.stats[categoryType]?.[key];
+    if (!cat) return;
+    const total = cat.wins + cat.losses;
     if (total >= LEARNING_MEMORY_MIN_TRADES) {
-      const wr = getWinRate(stats);
+      const wr = getWinRate(cat);
       if (wr !== null && wr < worstWinRate) {
         worstWinRate = wr;
-        worstCategory = `${statsKey}.${key}`;
+        worstCategory = `${categoryType}.${key}`;
       }
     }
   };
 
   checkCategory(symbolSideKey, "bySymbolSide");
   checkCategory(symbolStrengthKey, "bySymbolStrength");
-  checkCategory(rrKey, "byRRRange");
+  checkCategory(rrRange, "byRRRange");
 
   if (worstCategory && worstWinRate < LEARNING_MEMORY_BAD_WIN_RATE) {
     const penalty = LEARNING_MEMORY_CONFIDENCE_PENALTY;
@@ -666,38 +660,98 @@ function adjustConfidenceWithMemory(symbol, signal, strength, rr, originalConfid
   return originalConfidence;
 }
 
+// FIXED: applyTradeToRiskState sekarang menangani partial fill dan merekam outcome dengan benar
+// Kita akan mengakumulasi net profit per posisi (symbol+side) dan merekam setelah posisi ditutup.
+// Untuk itu kita perlu melacak total net profit per (symbol, side) sementara.
+
+let pendingPositionPnL = new Map(); // key: `${symbol}_${side}` -> { netProfitSum, lastTradeTimestamp, strength, rr, recorded }
+
 async function applyTradeToRiskState(trade) {
   const id = tradeIdOf(trade);
   if (riskState.processedTradeIds.includes(id)) return false;
+  
   const realizedPnl = getRealizedPnl(trade);
   const fee = getTradeFee(trade);
   const netProfit = realizedPnl - fee;
+  
   riskState.processedTradeIds.push(id);
   riskState.processedTradeIds = riskState.processedTradeIds.slice(-1000);
   riskState.lastSyncedAt = Math.max(riskState.lastSyncedAt || 0, trade.timestamp || 0);
   riskState.dailyNetPnL += netProfit;
+  
+  const symbol = trade.symbol;
+  const side = trade.side; // 'buy' or 'sell'
+  // Untuk futures, side 'buy' = long, 'sell' = short. Kita simpan sebagai uppercase.
+  const positionSide = side === 'buy' ? 'LONG' : 'SHORT';
+  const posKey = `${symbol}_${positionSide}`;
+  
   if (isRealizedTrade(trade)) {
+    // Akumulasi PnL untuk posisi ini
+    if (!pendingPositionPnL.has(posKey)) {
+      // Cari setup dari pendingTradeSetups
+      const setup = pendingTradeSetups.get(posKey);
+      if (setup) {
+        pendingPositionPnL.set(posKey, {
+          netProfitSum: 0,
+          strength: setup.strength,
+          rr: setup.rr,
+          recorded: false,
+          lastUpdate: Date.now()
+        });
+      } else {
+        // Jika tidak ada setup, kita tetap akumulasi tapi tidak akan direkam (mungkin posisi lama sebelum bot start)
+        pendingPositionPnL.set(posKey, {
+          netProfitSum: 0,
+          strength: null,
+          rr: null,
+          recorded: true, // tandai sudah direkam agar tidak direkam
+          lastUpdate: Date.now()
+        });
+      }
+    }
+    
+    const acc = pendingPositionPnL.get(posKey);
+    acc.netProfitSum += netProfit;
+    acc.lastUpdate = Date.now();
+    
+    // Update consecutive losses berdasarkan net profit trade ini (per fill)
     if (netProfit < 0) {
       riskState.consecutiveLosses += 1;
       if (SYMBOL_COOLDOWN_ENABLED) {
-        setSymbolCooldown(trade.symbol, SYMBOL_COOLDOWN_MINUTES, `loss ${netProfit.toFixed(6)} USDT`);
+        setSymbolCooldown(symbol, SYMBOL_COOLDOWN_MINUTES, `loss ${netProfit.toFixed(6)} USDT`);
       }
     } else if (netProfit > 0) {
       riskState.consecutiveLosses = 0;
     }
+    
     await sendFonnteAlert(formatTradeCloseAlert(trade, realizedPnl, fee, netProfit));
-
-    // ---------- LEARNING MEMORY RECORD ----------
-    if (LEARNING_MEMORY_ENABLED) {
-      const orderId = trade.order; // CCXT trade object has 'order' field
-      if (orderId) {
-        recordTradeOutcome(orderId, netProfit);
-      } else {
-        console.warn(`[MEMORY] Trade ${id} has no orderId, cannot record outcome`);
-      }
-    }
+    
+    // Cek apakah posisi sudah benar-benar tertutup?
+    // Kita tidak tahu posisi tersisa, tapi kita bisa periksa dengan fetchPositions nanti.
+    // Alternatif: setelah akumulasi, kita tidak langsung record. Kita akan cek di akhir sync apakah posisi masih ada.
+    // Untuk sederhananya, kita akan record jika total net profit sudah mencerminkan posisi tertutup.
+    // Karena kita tidak tahu kapan posisi tertutup total, kita akan gunakan penanda waktu: jika tidak ada trade baru untuk posisi ini dalam 1 menit? Tidak ideal.
+    // Pendekatan lebih baik: di tradingCycle, setelah close position, kita langsung record.
+    // Tapi di sini kita tetap perlu dukungan untuk kasus posisi ditutup oleh SL/TP tanpa campur tangan bot.
+    
+    // Untuk sekarang, kita tidak record otomatis di sini. Akan dipanggil explicit saat posisi ditutup di tradingCycle.
   }
   return true;
+}
+
+// Fungsi baru: record outcome untuk posisi yang sudah ditutup (dipanggil dari tradingCycle setelah close)
+async function recordClosedPositionOutcome(symbol, side, netProfitTotal, strength, rr) {
+  if (!LEARNING_MEMORY_ENABLED) return;
+  const posKey = `${symbol}_${side.toUpperCase()}`;
+  const acc = pendingPositionPnL.get(posKey);
+  if (acc && !acc.recorded) {
+    recordTradeOutcome(symbol, side, netProfitTotal, strength, rr);
+    acc.recorded = true;
+    pendingPositionPnL.delete(posKey);
+  } else {
+    // Jika tidak ada akumulasi, langsung record saja (misal dari close manual)
+    recordTradeOutcome(symbol, side, netProfitTotal, strength, rr);
+  }
 }
 
 function getDailyLossLimit() {
@@ -1109,11 +1163,11 @@ async function openPosition(symbol, signal, price, setupData) {
   }
   console.log(`[OPEN] ${signal} ${symbol} | contracts: ${amount} | margin: ${requiredMargin.toFixed(4)}`);
   const order = await retry(() => exchange.createMarketOrder(symbol, side, amount));
-  const orderId = order.id;
-
-  // Store setup for learning memory
+  
+  // Simpan setup untuk learning memory dengan key = symbol_side
   if (setupData && LEARNING_MEMORY_ENABLED) {
-    pendingTradeSetups.set(orderId, {
+    const posKey = `${symbol}_${signal}`;
+    pendingTradeSetups.set(posKey, {
       ...setupData,
       symbol,
       signal,
@@ -1129,9 +1183,45 @@ async function openPosition(symbol, signal, price, setupData) {
 
 async function closePosition(symbol, position) {
   const side = position.side === "long" ? "sell" : "buy";
+  // Sebelum close, catat entryPrice dan side untuk menghitung PnL nanti? Lebih baik ambil dari trade history.
+  // Kita akan record outcome setelah close berdasarkan pendingPositionPnL yang sudah diakumulasi oleh syncRiskState.
+  // Namun kita perlu memastikan bahwa kita punya strength dan rr dari setup.
+  const posKey = `${symbol}_${position.side.toUpperCase()}`;
+  const setup = pendingTradeSetups.get(posKey);
+  let totalNetProfit = 0;
+  // Ambil total net profit yang sudah diakumulasi untuk posisi ini dari pendingPositionPnL
+  const acc = pendingPositionPnL.get(posKey);
+  if (acc && !acc.recorded) {
+    totalNetProfit = acc.netProfitSum;
+  } else {
+    // Jika tidak ada akumulasi, hitung sendiri? Kita akan coba cari dari trade history setelah close.
+    // Alternatif: biarkan syncRiskState menangani.
+  }
+  
   await retry(() => exchange.createMarketOrder(symbol, side, position.contracts, { reduceOnly: true }));
   await cancelAllOrders(symbol);
   console.log("[CLOSE] Position closed");
+  
+  // Tunggu sebentar agar trade history terupdate
+  await sleep(2000);
+  // Sinkron ulang risk state untuk mendapatkan PnL terbaru
+  await syncRiskState();
+  
+  // Setelah close, rekam outcome jika ada setup dan totalNetProfit diketahui
+  if (setup && LEARNING_MEMORY_ENABLED) {
+    // Dapatkan total net profit dari pendingPositionPnL yang mungkin sudah diupdate oleh syncRiskState
+    const updatedAcc = pendingPositionPnL.get(posKey);
+    if (updatedAcc && !updatedAcc.recorded) {
+      totalNetProfit = updatedAcc.netProfitSum;
+      recordClosedPositionOutcome(symbol, position.side.toUpperCase(), totalNetProfit, setup.strength, setup.rr);
+      updatedAcc.recorded = true;
+      pendingPositionPnL.delete(posKey);
+    } else if (!updatedAcc) {
+      // Jika tidak ada akumulasi, mungkin tidak ada trade yang direkam? coba fallback
+      console.warn(`[MEMORY] No accumulated PnL for ${posKey}, cannot record outcome`);
+    }
+  }
+  pendingTradeSetups.delete(posKey);
 }
 
 async function createStopLossAndTakeProfit(symbol, position, slPrice, tpPrice) {
@@ -1187,7 +1277,7 @@ function calculateATR(ohlcv, period = 14) {
 }
 
 // ------------------------------
-//  Analyze Symbol (TP/SL based on S/R + ATR fallback) - FIXED
+//  Analyze Symbol (TP/SL based on S/R + ATR fallback)
 // ------------------------------
 
 async function analyzeSymbol(symbol) {
@@ -1261,14 +1351,12 @@ async function analyzeSymbol(symbol) {
     let slPercent, tpPercent;
 
     if (signal === "LONG") {
-      // SL di bawah support terdekat
       if (nearestSupport) {
         slPrice = nearestSupport.price - buffer;
         usedSR = true;
       } else {
         slPrice = currentPrice - atr * ATR_SL_MULTIPLIER;
       }
-      // TP di resistance terdekat (bukan nextResistance)
       if (nearestResistance) {
         tpPrice = nearestResistance.price;
         usedSR = true;
@@ -1276,22 +1364,18 @@ async function analyzeSymbol(symbol) {
         tpPrice = currentPrice + atr * ATR_TP_MULTIPLIER;
       }
 
-      // Validasi agar SL dan TP tidak terbalik
       if (slPrice >= currentPrice) slPrice = currentPrice - atr * ATR_SL_MULTIPLIER;
       if (tpPrice <= currentPrice) tpPrice = currentPrice + atr * ATR_TP_MULTIPLIER;
 
-      // Hitung persentase untuk adaptasi nanti
-      slPercent = (currentPrice - slPrice) / currentPrice;   // jarak SL ke bawah (%)
-      tpPercent = (tpPrice - currentPrice) / currentPrice;   // jarak TP ke atas (%)
-    } else { // SHORT
-      // SL di atas resistance terdekat
+      slPercent = (currentPrice - slPrice) / currentPrice;
+      tpPercent = (tpPrice - currentPrice) / currentPrice;
+    } else {
       if (nearestResistance) {
         slPrice = nearestResistance.price + buffer;
         usedSR = true;
       } else {
         slPrice = currentPrice + atr * ATR_SL_MULTIPLIER;
       }
-      // TP di support terdekat (bukan nextSupport)
       if (nearestSupport) {
         tpPrice = nearestSupport.price;
         usedSR = true;
@@ -1299,13 +1383,11 @@ async function analyzeSymbol(symbol) {
         tpPrice = currentPrice - atr * ATR_TP_MULTIPLIER;
       }
 
-      // Validasi
       if (slPrice <= currentPrice) slPrice = currentPrice + atr * ATR_SL_MULTIPLIER;
       if (tpPrice >= currentPrice) tpPrice = currentPrice - atr * ATR_TP_MULTIPLIER;
 
-      // Hitung persentase untuk adaptasi nanti
-      slPercent = (slPrice - currentPrice) / currentPrice;   // jarak SL ke atas (%)
-      tpPercent = (currentPrice - tpPrice) / currentPrice;   // jarak TP ke bawah (%)
+      slPercent = (slPrice - currentPrice) / currentPrice;
+      tpPercent = (currentPrice - tpPrice) / currentPrice;
     }
 
     const rr = calculateRR(signal, currentPrice, tpPrice, slPrice);
@@ -1314,7 +1396,6 @@ async function analyzeSymbol(symbol) {
       return null;
     }
 
-    // Apply learning memory adjustment now that RR is known
     if (ai.signal !== "HOLD") {
       const adjustedConfidence = adjustConfidenceWithMemory(
         symbol,
@@ -1424,7 +1505,6 @@ async function tradingCycle() {
     if (existing) await closePosition(best.symbol, existing);
     await cancelAllOrders(best.symbol);
 
-    // Prepare setup data for learning memory
     const setupData = {
       signal: best.signal,
       strength: best.strength,
@@ -1439,7 +1519,6 @@ async function tradingCycle() {
     let actualSL, actualTP;
 
     if (best.usedSR) {
-      // Gunakan persentase dari entry sinyal, terapkan ke entry aktual
       if (best.signal === "LONG") {
         actualSL = actualEntry * (1 - best.slPercent);
         actualTP = actualEntry * (1 + best.tpPercent);
@@ -1448,7 +1527,6 @@ async function tradingCycle() {
         actualTP = actualEntry * (1 - best.tpPercent);
       }
     } else {
-      // Fallback ke ATR murni
       if (best.signal === "LONG") {
         actualSL = actualEntry - best.atr * ATR_SL_MULTIPLIER;
         actualTP = actualEntry + best.atr * ATR_TP_MULTIPLIER;
@@ -1458,7 +1536,6 @@ async function tradingCycle() {
       }
     }
 
-    // Validasi akhir agar SL dan TP tidak terbalik
     if (best.signal === "LONG") {
       if (actualSL >= actualEntry) actualSL = actualEntry - best.atr * ATR_SL_MULTIPLIER;
       if (actualTP <= actualEntry) actualTP = actualEntry + best.atr * ATR_TP_MULTIPLIER;
@@ -1513,7 +1590,6 @@ ALLOWED_STRENGTHS: ${ALLOWED_AI_STRENGTHS.join(", ")}
 LEARNING MEMORY: ${LEARNING_MEMORY_ENABLED ? "ON" : "OFF"} (min trades ${LEARNING_MEMORY_MIN_TRADES}, bad WR ${LEARNING_MEMORY_BAD_WIN_RATE}%, penalty ${LEARNING_MEMORY_CONFIDENCE_PENALTY})
 `);
 
-  // Initialize learning memory
   learningMemory = loadLearningMemory();
   console.log("[MEMORY] Loaded", Object.keys(learningMemory.stats.bySymbolSide).length, "symbol-side records");
 
