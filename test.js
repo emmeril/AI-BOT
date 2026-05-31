@@ -904,7 +904,13 @@ async function closePosition(symbol, position) {
   console.log("[CLOSE] Position closed");
 }
 
+// ======================================================
+//  MODIFIED FUNCTION: Clean old TP/SL before placing new ones
+// ======================================================
 async function createStopLossAndTakeProfit(symbol, position, slPrice, tpPrice) {
+  // Bersihkan semua order yang masih terbuka untuk simbol ini (termasuk TP/SL lama)
+  await cancelAllOrders(symbol);
+
   const isLong = position.side === "long";
   const slSide = isLong ? "sell" : "buy";
   const tpSide = isLong ? "sell" : "buy";
