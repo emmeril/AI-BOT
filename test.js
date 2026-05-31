@@ -961,7 +961,7 @@ function calculateATR(ohlcv, period = 14) {
 }
 
 // ======================================================
-//  MAIN TRADING CYCLE
+//  MODIFIED analyzeSymbol : TP/SL based on S/R + ATR fallback
 // ======================================================
 
 async function analyzeSymbol(symbol) {
@@ -984,12 +984,15 @@ async function analyzeSymbol(symbol) {
       return null;
     }
 
-    // Proximity check before AI
+    // Urutkan support dari yang tertinggi di bawah harga, dan resistance dari terendah di atas harga
     const supportsBelow = support.filter(s => s.price < currentPrice).sort((a, b) => b.price - a.price);
     const resistancesAbove = resistance.filter(r => r.price > currentPrice).sort((a, b) => a.price - b.price);
     const nearestSupport = supportsBelow[0] || null;
     const nearestResistance = resistancesAbove[0] || null;
+    const nextSupport = supportsBelow[1] || null;      // support lebih dalam (untuk TP SHORT)
+    const nextResistance = resistancesAbove[1] || null; // resistance lebih tinggi (untuk TP LONG)
 
+    // Proximity check sebelum AI
     let distanceToSupport = Infinity;
     let distanceToResistance = Infinity;
     if (nearestSupport) distanceToSupport = (currentPrice - nearestSupport.price) / currentPrice;
@@ -1030,20 +1033,61 @@ async function analyzeSymbol(symbol) {
       return null;
     }
 
+    // ======================================================
+    // Tentukan TP/SL berdasarkan Support/Resistance dengan fallback ATR
+    // ======================================================
     const atr = calculateATR(ohlcv.slice(-20), 14);
-    let slPrice, tpPrice;
+    const buffer = currentPrice * 0.002; // buffer 0.2% untuk SL (hindari stop hunt)
+    let slPrice, tpPrice, usedSR = false;
+
     if (signal === "LONG") {
-      slPrice = currentPrice - atr * ATR_SL_MULTIPLIER;
-      tpPrice = currentPrice + atr * ATR_TP_MULTIPLIER;
-    } else {
-      slPrice = currentPrice + atr * ATR_SL_MULTIPLIER;
-      tpPrice = currentPrice - atr * ATR_TP_MULTIPLIER;
+      // SL: di bawah nearestSupport (jika ada), atau pakai ATR
+      if (nearestSupport) {
+        slPrice = nearestSupport.price - buffer;
+        usedSR = true;
+      } else {
+        slPrice = currentPrice - atr * ATR_SL_MULTIPLIER;
+      }
+      // TP: di nextResistance (jika ada), atau pakai ATR
+      if (nextResistance) {
+        tpPrice = nextResistance.price;
+        usedSR = true;
+      } else {
+        tpPrice = currentPrice + atr * ATR_TP_MULTIPLIER;
+      }
+    } else { // SHORT
+      // SL: di atas nearestResistance
+      if (nearestResistance) {
+        slPrice = nearestResistance.price + buffer;
+        usedSR = true;
+      } else {
+        slPrice = currentPrice + atr * ATR_SL_MULTIPLIER;
+      }
+      // TP: di nextSupport
+      if (nextSupport) {
+        tpPrice = nextSupport.price;
+        usedSR = true;
+      } else {
+        tpPrice = currentPrice - atr * ATR_TP_MULTIPLIER;
+      }
     }
+
+    // Pastikan SL dan TP valid (misal LONG: SL < entry < TP)
+    if (signal === "LONG") {
+      if (slPrice >= currentPrice) slPrice = currentPrice - atr * ATR_SL_MULTIPLIER;
+      if (tpPrice <= currentPrice) tpPrice = currentPrice + atr * ATR_TP_MULTIPLIER;
+    } else {
+      if (slPrice <= currentPrice) slPrice = currentPrice + atr * ATR_SL_MULTIPLIER;
+      if (tpPrice >= currentPrice) tpPrice = currentPrice - atr * ATR_TP_MULTIPLIER;
+    }
+
     const rr = calculateRR(signal, currentPrice, tpPrice, slPrice);
     if (rr < MIN_RR) {
-      console.log(`${symbol} RR ${rr.toFixed(2)} < ${MIN_RR}`);
+      console.log(`${symbol} RR ${rr.toFixed(2)} < ${MIN_RR} (${usedSR ? "S/R based" : "ATR fallback"})`);
       return null;
     }
+
+    console.log(`${symbol} → TP/SL based on ${usedSR ? "S/R levels" : "ATR"} (RR=${rr.toFixed(2)})`);
 
     return {
       symbol,
@@ -1066,6 +1110,10 @@ async function analyzeSymbol(symbol) {
     return null;
   }
 }
+
+// ======================================================
+//  MAIN TRADING CYCLE (modified for SR-based TP/SL adaptation)
+// ======================================================
 
 async function tradingCycle() {
   if (isTrading) {
@@ -1132,15 +1180,43 @@ async function tradingCycle() {
     if (!newPos) return;
 
     const actualEntry = newPos.entryPrice;
+    const priceDiffRatio = actualEntry / best.currentPrice; // koreksi karena slippage
     let actualSL, actualTP;
-    if (best.signal === "LONG") {
-      actualSL = actualEntry - best.atr * ATR_SL_MULTIPLIER;
-      actualTP = actualEntry + best.atr * ATR_TP_MULTIPLIER;
+
+    // Cek apakah TP/SL asli dari analyzeSymbol berdasarkan S/R (dengan membandingkan deviasi terhadap ATR)
+    const originalSL = best.slPrice;
+    const originalTP = best.tpPrice;
+    const originalEntry = best.currentPrice;
+    const usedSR = (Math.abs(originalSL - originalEntry) < (ATR_SL_MULTIPLIER * best.atr * 1.2)) ? false : true;
+
+    if (usedSR) {
+      // Skala linier terhadap perubahan entry price
+      const offsetSL = originalSL - originalEntry;
+      const offsetTP = originalTP - originalEntry;
+      actualSL = actualEntry + offsetSL;
+      actualTP = actualEntry + offsetTP;
     } else {
-      actualSL = actualEntry + best.atr * ATR_SL_MULTIPLIER;
-      actualTP = actualEntry - best.atr * ATR_TP_MULTIPLIER;
+      // Fallback ke ATR seperti semula
+      if (best.signal === "LONG") {
+        actualSL = actualEntry - best.atr * ATR_SL_MULTIPLIER;
+        actualTP = actualEntry + best.atr * ATR_TP_MULTIPLIER;
+      } else {
+        actualSL = actualEntry + best.atr * ATR_SL_MULTIPLIER;
+        actualTP = actualEntry - best.atr * ATR_TP_MULTIPLIER;
+      }
     }
+
+    // Validasi ulang agar arah tetap benar
+    if (best.signal === "LONG") {
+      if (actualSL >= actualEntry) actualSL = actualEntry - best.atr * ATR_SL_MULTIPLIER;
+      if (actualTP <= actualEntry) actualTP = actualEntry + best.atr * ATR_TP_MULTIPLIER;
+    } else {
+      if (actualSL <= actualEntry) actualSL = actualEntry + best.atr * ATR_SL_MULTIPLIER;
+      if (actualTP >= actualEntry) actualTP = actualEntry - best.atr * ATR_TP_MULTIPLIER;
+    }
+
     const actualRR = calculateRR(best.signal, actualEntry, actualTP, actualSL);
+    console.log(`[ADAPT] Entry=${actualEntry}, usedSR=${usedSR}, RR=${actualRR.toFixed(2)}`);
 
     await createStopLossAndTakeProfit(best.symbol, newPos, actualSL, actualTP);
 
@@ -1172,7 +1248,7 @@ async function tradingCycle() {
 
 async function main() {
   console.log(`
-[START] SR + AI Bot (Simple TP/SL)
+[START] SR + AI Bot (TP/SL based on S/R + ATR fallback)
 SYMBOLS: ${SYMBOLS.join(", ")}
 TIMEFRAME: ${TIMEFRAME}
 LEVERAGE: ${LEVERAGE}x
