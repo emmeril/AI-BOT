@@ -229,8 +229,10 @@ let fonnteAlertWarningShown = false;
 
 // Learning memory state
 let learningMemory = null;
-// FIXED: Ubah struktur pendingTradeSetups: key = `${symbol}_${side}`
-let pendingTradeSetups = new Map(); // key: "BTC/USDT:USDT_long" or "BTC/USDT:USDT_short"
+// pendingTradeSetups: key = `${symbol}_${side}` (side uppercase LONG/SHORT)
+let pendingTradeSetups = new Map();
+// pendingPositionPnL: key = `${symbol}_${side}` -> { netProfitSum, strength, rr, recorded, lastUpdate }
+let pendingPositionPnL = new Map();
 
 // ------------------------------
 //  Kill Switch
@@ -336,18 +338,6 @@ function formatTradeOpenAlert({ symbol, signal, entryPrice, contracts, slPrice, 
     `RR: ${roundNumber(rr, 2)}`,
     `Confidence: ${confidence ?? "-"}`,
     `Strength: ${strength || "-"}`,
-  ].join("\n");
-}
-
-function formatTradeCloseAlert(trade, realizedPnl, fee, netProfit) {
-  return [
-    "[TRADE CLOSE]",
-    `Symbol: ${trade.symbol || "-"}`,
-    `Side: ${String(trade.side || "-").toUpperCase()}`,
-    `Time: ${trade.datetime || new Date(trade.timestamp || Date.now()).toISOString()}`,
-    `Realized PnL: ${roundNumber(realizedPnl, 6)} USDT`,
-    `Fee: ${roundNumber(fee, 6)} USDT`,
-    `Net Profit: ${roundNumber(netProfit, 6)} USDT`,
   ].join("\n");
 }
 
@@ -535,7 +525,7 @@ function isRealizedTrade(trade) {
   return Math.abs(getRealizedPnl(trade)) > 0.0000001;
 }
 
-// ---------- LEARNING MEMORY IMPLEMENTATION (FIXED) ----------
+// ---------- LEARNING MEMORY IMPLEMENTATION ----------
 function getRRRange(rr) {
   if (rr < 1.5) return "<1.5";
   if (rr < 2) return "1.5-2";
@@ -546,9 +536,9 @@ function createEmptyLearningMemory() {
   return {
     version: 1,
     stats: {
-      bySymbolSide: {},     // e.g. "BTC/USDT:USDT_LONG" -> { wins, losses, totalPnl }
-      bySymbolStrength: {}, // e.g. "BTC/USDT:USDT_STRONG" -> { wins, losses, totalPnl }
-      byRRRange: {},        // e.g. ">2" -> { wins, losses, totalPnl }
+      bySymbolSide: {},
+      bySymbolStrength: {},
+      byRRRange: {},
     },
     lastUpdated: new Date().toISOString(),
   };
@@ -560,7 +550,6 @@ function loadLearningMemory() {
     if (fs.existsSync(LEARNING_MEMORY_PATH)) {
       const data = JSON.parse(fs.readFileSync(LEARNING_MEMORY_PATH, "utf8"));
       if (!data.stats) data.stats = createEmptyLearningMemory().stats;
-      // Pastikan sub-objek ada
       if (!data.stats.bySymbolSide) data.stats.bySymbolSide = {};
       if (!data.stats.bySymbolStrength) data.stats.bySymbolStrength = {};
       if (!data.stats.byRRRange) data.stats.byRRRange = {};
@@ -578,7 +567,6 @@ function saveLearningMemory() {
   fs.writeFileSync(LEARNING_MEMORY_PATH, JSON.stringify(learningMemory, null, 2));
 }
 
-// FIXED: updateMemoryCategory sekarang mengakses properti stats dengan benar
 function updateMemoryCategory(categoryType, key, isWin, pnl) {
   const category = learningMemory.stats[categoryType];
   if (!category) {
@@ -600,15 +588,12 @@ function recordTradeOutcome(symbol, side, netProfit, strength, rr) {
   const isWin = netProfit > 0;
   const pnl = netProfit;
 
-  // Category 1: symbol + side
   const symbolSideKey = `${symbol}_${side.toUpperCase()}`;
   updateMemoryCategory("bySymbolSide", symbolSideKey, isWin, pnl);
 
-  // Category 2: symbol + strength
   const symbolStrengthKey = `${symbol}_${strength}`;
   updateMemoryCategory("bySymbolStrength", symbolStrengthKey, isWin, pnl);
 
-  // Category 3: RR range
   const rrRange = getRRRange(rr);
   updateMemoryCategory("byRRRange", rrRange, isWin, pnl);
 
@@ -660,11 +645,9 @@ function adjustConfidenceWithMemory(symbol, signal, strength, rr, originalConfid
   return originalConfidence;
 }
 
-// FIXED: applyTradeToRiskState sekarang menangani partial fill dan merekam outcome dengan benar
-// Kita akan mengakumulasi net profit per posisi (symbol+side) dan merekam setelah posisi ditutup.
-// Untuk itu kita perlu melacak total net profit per (symbol, side) sementara.
-
-let pendingPositionPnL = new Map(); // key: `${symbol}_${side}` -> { netProfitSum, lastTradeTimestamp, strength, rr, recorded }
+// ------------------------------
+//  Risk State Trade Processing (without per‑fill side effects)
+// ------------------------------
 
 async function applyTradeToRiskState(trade) {
   const id = tradeIdOf(trade);
@@ -678,79 +661,69 @@ async function applyTradeToRiskState(trade) {
   riskState.processedTradeIds = riskState.processedTradeIds.slice(-1000);
   riskState.lastSyncedAt = Math.max(riskState.lastSyncedAt || 0, trade.timestamp || 0);
   riskState.dailyNetPnL += netProfit;
+  saveRiskState();   // persist after each trade for durability
   
   const symbol = trade.symbol;
-  const side = trade.side; // 'buy' or 'sell'
-  // Untuk futures, side 'buy' = long, 'sell' = short. Kita simpan sebagai uppercase.
-  const positionSide = side === 'buy' ? 'LONG' : 'SHORT';
-  const posKey = `${symbol}_${positionSide}`;
+  const side = trade.side === 'buy' ? 'LONG' : 'SHORT';
+  const posKey = `${symbol}_${side}`;
   
   if (isRealizedTrade(trade)) {
-    // Akumulasi PnL untuk posisi ini
     if (!pendingPositionPnL.has(posKey)) {
-      // Cari setup dari pendingTradeSetups
       const setup = pendingTradeSetups.get(posKey);
-      if (setup) {
-        pendingPositionPnL.set(posKey, {
-          netProfitSum: 0,
-          strength: setup.strength,
-          rr: setup.rr,
-          recorded: false,
-          lastUpdate: Date.now()
-        });
-      } else {
-        // Jika tidak ada setup, kita tetap akumulasi tapi tidak akan direkam (mungkin posisi lama sebelum bot start)
-        pendingPositionPnL.set(posKey, {
-          netProfitSum: 0,
-          strength: null,
-          rr: null,
-          recorded: true, // tandai sudah direkam agar tidak direkam
-          lastUpdate: Date.now()
-        });
-      }
+      pendingPositionPnL.set(posKey, {
+        netProfitSum: 0,
+        strength: setup?.strength || null,
+        rr: setup?.rr || null,
+        recorded: false,
+        lastUpdate: Date.now()
+      });
     }
-    
     const acc = pendingPositionPnL.get(posKey);
     acc.netProfitSum += netProfit;
     acc.lastUpdate = Date.now();
-    
-    // Update consecutive losses berdasarkan net profit trade ini (per fill)
-    if (netProfit < 0) {
-      riskState.consecutiveLosses += 1;
-      if (SYMBOL_COOLDOWN_ENABLED) {
-        setSymbolCooldown(symbol, SYMBOL_COOLDOWN_MINUTES, `loss ${netProfit.toFixed(6)} USDT`);
-      }
-    } else if (netProfit > 0) {
-      riskState.consecutiveLosses = 0;
-    }
-    
-    await sendFonnteAlert(formatTradeCloseAlert(trade, realizedPnl, fee, netProfit));
-    
-    // Cek apakah posisi sudah benar-benar tertutup?
-    // Kita tidak tahu posisi tersisa, tapi kita bisa periksa dengan fetchPositions nanti.
-    // Alternatif: setelah akumulasi, kita tidak langsung record. Kita akan cek di akhir sync apakah posisi masih ada.
-    // Untuk sederhananya, kita akan record jika total net profit sudah mencerminkan posisi tertutup.
-    // Karena kita tidak tahu kapan posisi tertutup total, kita akan gunakan penanda waktu: jika tidak ada trade baru untuk posisi ini dalam 1 menit? Tidak ideal.
-    // Pendekatan lebih baik: di tradingCycle, setelah close position, kita langsung record.
-    // Tapi di sini kita tetap perlu dukungan untuk kasus posisi ditutup oleh SL/TP tanpa campur tangan bot.
-    
-    // Untuk sekarang, kita tidak record otomatis di sini. Akan dipanggil explicit saat posisi ditutup di tradingCycle.
   }
   return true;
 }
 
-// Fungsi baru: record outcome untuk posisi yang sudah ditutup (dipanggil dari tradingCycle setelah close)
-async function recordClosedPositionOutcome(symbol, side, netProfitTotal, strength, rr) {
-  if (!LEARNING_MEMORY_ENABLED) return;
-  const posKey = `${symbol}_${side.toUpperCase()}`;
-  const acc = pendingPositionPnL.get(posKey);
-  if (acc && !acc.recorded) {
+// ------------------------------
+//  Position Finalization (once per position)
+// ------------------------------
+
+async function finalizeClosedPosition(symbol, side, netProfitTotal, strength, rr) {
+  // Update risk state: consecutive losses & cooldown
+  if (netProfitTotal < 0) {
+    riskState.consecutiveLosses++;
+    if (SYMBOL_COOLDOWN_ENABLED) {
+      setSymbolCooldown(symbol, SYMBOL_COOLDOWN_MINUTES, `loss ${netProfitTotal.toFixed(2)} USDT`);
+    }
+  } else if (netProfitTotal > 0) {
+    riskState.consecutiveLosses = 0;
+  }
+  saveRiskState();
+
+  // Learning memory
+  if (LEARNING_MEMORY_ENABLED && strength && rr) {
     recordTradeOutcome(symbol, side, netProfitTotal, strength, rr);
-    acc.recorded = true;
-    pendingPositionPnL.delete(posKey);
-  } else {
-    // Jika tidak ada akumulasi, langsung record saja (misal dari close manual)
-    recordTradeOutcome(symbol, side, netProfitTotal, strength, rr);
+  }
+
+  // Send one close alert per position
+  await sendFonnteAlert(`[POSITION CLOSED] ${symbol} ${side} | Net PnL: ${netProfitTotal.toFixed(2)} USDT`);
+}
+
+async function finalizeAnyClosedPositions() {
+  const openPositions = await getOpenPositions();
+  const openKeys = new Set(openPositions.map(p => `${p.symbol}_${p.side.toUpperCase()}`));
+
+  for (const [posKey, acc] of pendingPositionPnL.entries()) {
+    if (acc.recorded) continue;
+    if (!openKeys.has(posKey)) {
+      const [symbol, side] = posKey.split('_');
+      const setup = pendingTradeSetups.get(posKey);
+      await finalizeClosedPosition(symbol, side, acc.netProfitSum, setup?.strength, setup?.rr);
+      acc.recorded = true;
+      pendingTradeSetups.delete(posKey);
+      pendingPositionPnL.delete(posKey);
+    }
   }
 }
 
@@ -1164,7 +1137,7 @@ async function openPosition(symbol, signal, price, setupData) {
   console.log(`[OPEN] ${signal} ${symbol} | contracts: ${amount} | margin: ${requiredMargin.toFixed(4)}`);
   const order = await retry(() => exchange.createMarketOrder(symbol, side, amount));
   
-  // Simpan setup untuk learning memory dengan key = symbol_side
+  // Save setup for learning memory
   if (setupData && LEARNING_MEMORY_ENABLED) {
     const posKey = `${symbol}_${signal}`;
     pendingTradeSetups.set(posKey, {
@@ -1183,45 +1156,12 @@ async function openPosition(symbol, signal, price, setupData) {
 
 async function closePosition(symbol, position) {
   const side = position.side === "long" ? "sell" : "buy";
-  // Sebelum close, catat entryPrice dan side untuk menghitung PnL nanti? Lebih baik ambil dari trade history.
-  // Kita akan record outcome setelah close berdasarkan pendingPositionPnL yang sudah diakumulasi oleh syncRiskState.
-  // Namun kita perlu memastikan bahwa kita punya strength dan rr dari setup.
-  const posKey = `${symbol}_${position.side.toUpperCase()}`;
-  const setup = pendingTradeSetups.get(posKey);
-  let totalNetProfit = 0;
-  // Ambil total net profit yang sudah diakumulasi untuk posisi ini dari pendingPositionPnL
-  const acc = pendingPositionPnL.get(posKey);
-  if (acc && !acc.recorded) {
-    totalNetProfit = acc.netProfitSum;
-  } else {
-    // Jika tidak ada akumulasi, hitung sendiri? Kita akan coba cari dari trade history setelah close.
-    // Alternatif: biarkan syncRiskState menangani.
-  }
-  
   await retry(() => exchange.createMarketOrder(symbol, side, position.contracts, { reduceOnly: true }));
   await cancelAllOrders(symbol);
-  console.log("[CLOSE] Position closed");
-  
-  // Tunggu sebentar agar trade history terupdate
+  console.log("[CLOSE] Position closed manually");
   await sleep(2000);
-  // Sinkron ulang risk state untuk mendapatkan PnL terbaru
-  await syncRiskState();
-  
-  // Setelah close, rekam outcome jika ada setup dan totalNetProfit diketahui
-  if (setup && LEARNING_MEMORY_ENABLED) {
-    // Dapatkan total net profit dari pendingPositionPnL yang mungkin sudah diupdate oleh syncRiskState
-    const updatedAcc = pendingPositionPnL.get(posKey);
-    if (updatedAcc && !updatedAcc.recorded) {
-      totalNetProfit = updatedAcc.netProfitSum;
-      recordClosedPositionOutcome(symbol, position.side.toUpperCase(), totalNetProfit, setup.strength, setup.rr);
-      updatedAcc.recorded = true;
-      pendingPositionPnL.delete(posKey);
-    } else if (!updatedAcc) {
-      // Jika tidak ada akumulasi, mungkin tidak ada trade yang direkam? coba fallback
-      console.warn(`[MEMORY] No accumulated PnL for ${posKey}, cannot record outcome`);
-    }
-  }
-  pendingTradeSetups.delete(posKey);
+  await syncRiskState(); // update PnL immediately
+  // The finalization will be picked up by finalizeAnyClosedPositions in the next cycle
 }
 
 async function createStopLossAndTakeProfit(symbol, position, slPrice, tpPrice) {
@@ -1253,9 +1193,17 @@ async function createStopLossAndTakeProfit(symbol, position, slPrice, tpPrice) {
   console.log(`[TP] Take profit placed at ${tpStopPrice} (${tpSide})`);
 }
 
+// Fixed calculateRR with division by zero guard
 function calculateRR(signal, entry, tp, sl) {
-  if (signal === "LONG") return (tp - entry) / (entry - sl);
-  return (entry - tp) / (sl - entry);
+  if (signal === "LONG") {
+    const risk = entry - sl;
+    if (risk <= 0) return 0;
+    return (tp - entry) / risk;
+  } else {
+    const risk = sl - entry;
+    if (risk <= 0) return 0;
+    return (entry - tp) / risk;
+  }
 }
 
 function fundingSafe(signal, fundingRate) {
@@ -1457,6 +1405,10 @@ async function tradingCycle() {
     circuitAllowed = true;
     await syncProfitLedger();
     await syncRiskState();
+
+    // Finalize any positions that were closed externally (by SL/TP) since last cycle
+    await finalizeAnyClosedPositions();
+
     cleanupAiSignalCache();
     cleanupSymbolCooldowns();
 
