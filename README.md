@@ -160,16 +160,19 @@ MIN_RR=1.5
 
 ### Take Profit Unrealized PnL
 
-Secara default bot tidak lagi memasang order `TAKE_PROFIT_MARKET` di exchange. Bot tetap memasang stop loss, lalu memonitor posisi terbuka selama waktu tunggu antarsiklus. Jika unrealized PnL sudah profit, bot langsung menutup posisi dengan market reduce-only tanpa delay settle tambahan untuk TP unrealized.
+Secara default bot tidak lagi memasang order `TAKE_PROFIT_MARKET` di exchange. Bot tetap memasang stop loss, lalu memonitor posisi terbuka selama waktu tunggu antarsiklus. Jika estimasi net unrealized PnL sudah profit setelah buffer fee, bot langsung menutup posisi dengan market reduce-only tanpa delay settle tambahan untuk TP unrealized.
 
 ```env
 UNREALIZED_PROFIT_CLOSE_ENABLED=true
 UNREALIZED_PROFIT_CLOSE_MIN_USDT=0
 UNREALIZED_PROFIT_CLOSE_MIN_PCT=0
+UNREALIZED_PROFIT_CLOSE_FEE_RATE=0.0004
+UNREALIZED_PROFIT_CLOSE_FEE_SIDES=2
+UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT=0
 UNREALIZED_PROFIT_MONITOR_INTERVAL_MS=1000
 ```
 
-Naikkan `UNREALIZED_PROFIT_CLOSE_MIN_USDT` atau `UNREALIZED_PROFIT_CLOSE_MIN_PCT` jika ingin posisi baru ditutup setelah profit minimal tertentu. Turunkan `UNREALIZED_PROFIT_MONITOR_INTERVAL_MS` jika ingin polling lebih cepat (minimum 250 ms). Set `UNREALIZED_PROFIT_CLOSE_ENABLED=false` untuk kembali memakai order TP exchange.
+Naikkan `UNREALIZED_PROFIT_CLOSE_MIN_USDT` atau `UNREALIZED_PROFIT_CLOSE_MIN_PCT` jika ingin posisi baru ditutup setelah estimasi net profit minimal tertentu. Bot mengurangi `unrealizedPnl` dengan estimasi fee `UNREALIZED_PROFIT_CLOSE_FEE_RATE * notional * UNREALIZED_PROFIT_CLOSE_FEE_SIDES` plus `UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT`, sehingga posisi tidak ditutup hanya karena gross unrealized PnL kecil yang masih habis oleh fee/slippage. Turunkan `UNREALIZED_PROFIT_MONITOR_INTERVAL_MS` jika ingin polling lebih cepat (minimum 250 ms). Set `UNREALIZED_PROFIT_CLOSE_ENABLED=false` untuk kembali memakai order TP exchange.
 
 ### AI Filter
 
