@@ -46,6 +46,9 @@ const ATR_SL_MULTIPLIER = envNumber("ATR_SL_MULTIPLIER", 1.5);
 const UNREALIZED_PROFIT_CLOSE_ENABLED = envBoolean("UNREALIZED_PROFIT_CLOSE_ENABLED", true);
 const UNREALIZED_PROFIT_CLOSE_MIN_USDT = envNumber("UNREALIZED_PROFIT_CLOSE_MIN_USDT", 0);
 const UNREALIZED_PROFIT_CLOSE_MIN_PCT = envNumber("UNREALIZED_PROFIT_CLOSE_MIN_PCT", 0);
+const UNREALIZED_PROFIT_CLOSE_FEE_RATE = envNumber("UNREALIZED_PROFIT_CLOSE_FEE_RATE", 0.0004);
+const UNREALIZED_PROFIT_CLOSE_FEE_SIDES = envNumber("UNREALIZED_PROFIT_CLOSE_FEE_SIDES", 2);
+const UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT = envNumber("UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT", 0);
 const UNREALIZED_PROFIT_MONITOR_INTERVAL_MS = Math.max(250, envNumber("UNREALIZED_PROFIT_MONITOR_INTERVAL_MS", 1000));
 const LONG_ONLY = envBoolean("LONG_ONLY");
 const REVERSAL_COOLDOWN_MINUTES = envNumber("REVERSAL_COOLDOWN_MINUTES", 10);
@@ -1126,7 +1129,7 @@ async function getCurrentPosition(symbol) {
   const contracts = Number(pos.contracts);
   const entryPrice = Number(pos.entryPrice);
   const markPrice = positionNumber(pos, ["markPrice", "info.markPrice"]);
-  const notional = positionNumber(pos, ["notional", "info.notional", "info.positionInitialMargin"]);
+  const notional = positionNumber(pos, ["notional", "info.notional"]);
   return {
     side: pos.side,
     symbol: pos.symbol,
@@ -1151,17 +1154,31 @@ async function getOpenPositions() {
   return open;
 }
 
-function getPositionUnrealizedProfitPct(position) {
-  if (!Number.isFinite(position.unrealizedPnl) || !Number.isFinite(position.notional) || position.notional <= 0) return null;
-  return (position.unrealizedPnl / position.notional) * 100;
+function getEstimatedUnrealizedCloseFees(position) {
+  if (!Number.isFinite(position.notional) || position.notional <= 0) return UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT;
+  const feeSides = Math.max(0, UNREALIZED_PROFIT_CLOSE_FEE_SIDES);
+  const feeRate = Math.max(0, UNREALIZED_PROFIT_CLOSE_FEE_RATE);
+  return position.notional * feeRate * feeSides + Math.max(0, UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT);
+}
+
+function getPositionEstimatedNetProfit(position) {
+  if (!Number.isFinite(position.unrealizedPnl)) return null;
+  return position.unrealizedPnl - getEstimatedUnrealizedCloseFees(position);
+}
+
+function getPositionEstimatedNetProfitPct(position) {
+  const estimatedNetProfit = getPositionEstimatedNetProfit(position);
+  if (estimatedNetProfit === null || !Number.isFinite(position.notional) || position.notional <= 0) return null;
+  return (estimatedNetProfit / position.notional) * 100;
 }
 
 function shouldCloseForUnrealizedProfit(position) {
   if (!UNREALIZED_PROFIT_CLOSE_ENABLED) return false;
-  if (!Number.isFinite(position.unrealizedPnl)) return false;
-  if (position.unrealizedPnl <= UNREALIZED_PROFIT_CLOSE_MIN_USDT) return false;
+  const estimatedNetProfit = getPositionEstimatedNetProfit(position);
+  if (estimatedNetProfit === null) return false;
+  if (estimatedNetProfit <= UNREALIZED_PROFIT_CLOSE_MIN_USDT) return false;
 
-  const profitPct = getPositionUnrealizedProfitPct(position);
+  const profitPct = getPositionEstimatedNetProfitPct(position);
   if (UNREALIZED_PROFIT_CLOSE_MIN_PCT > 0 && (profitPct === null || profitPct < UNREALIZED_PROFIT_CLOSE_MIN_PCT)) return false;
 
   return true;
@@ -1174,10 +1191,12 @@ async function closePositionsWithUnrealizedProfit(openPositions, closeOptions = 
   for (const position of openPositions) {
     if (!shouldCloseForUnrealizedProfit(position)) continue;
 
-    const profitPct = getPositionUnrealizedProfitPct(position);
+    const estimatedNetProfit = getPositionEstimatedNetProfit(position);
+    const estimatedFees = getEstimatedUnrealizedCloseFees(position);
+    const profitPct = getPositionEstimatedNetProfitPct(position);
     const pctLabel = profitPct === null ? "n/a" : `${profitPct.toFixed(4)}%`;
     console.log(
-      `[TP] ${position.symbol} ${position.side.toUpperCase()} unrealized profit ${position.unrealizedPnl.toFixed(6)} USDT (${pctLabel}) -> closing position`
+      `[TP] ${position.symbol} ${position.side.toUpperCase()} unrealized gross ${position.unrealizedPnl.toFixed(6)} USDT, estimated net ${estimatedNetProfit.toFixed(6)} USDT after ${estimatedFees.toFixed(6)} USDT fee buffer (${pctLabel}) -> closing position`
     );
     await closePosition(position.symbol, position, closeOptions);
     closedCount++;
