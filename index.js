@@ -44,11 +44,15 @@ const MAX_CONSECUTIVE_LOSSES = envNumber("MAX_CONSECUTIVE_LOSSES", 3);
 const ATR_TP_MULTIPLIER = envNumber("ATR_TP_MULTIPLIER", 1.8);
 const ATR_SL_MULTIPLIER = envNumber("ATR_SL_MULTIPLIER", 1.5);
 const UNREALIZED_PROFIT_CLOSE_ENABLED = envBoolean("UNREALIZED_PROFIT_CLOSE_ENABLED", true);
-const UNREALIZED_PROFIT_CLOSE_MIN_USDT = envNumber("UNREALIZED_PROFIT_CLOSE_MIN_USDT", 0);
+const UNREALIZED_PROFIT_CLOSE_MIN_USDT = envNumber("UNREALIZED_PROFIT_CLOSE_MIN_USDT", 0.02);
 const UNREALIZED_PROFIT_CLOSE_MIN_PCT = envNumber("UNREALIZED_PROFIT_CLOSE_MIN_PCT", 0);
-const UNREALIZED_PROFIT_CLOSE_FEE_RATE = envNumber("UNREALIZED_PROFIT_CLOSE_FEE_RATE", 0.0004);
+const UNREALIZED_PROFIT_CLOSE_FEE_RATE = envNumber("UNREALIZED_PROFIT_CLOSE_FEE_RATE", 0.0005);
 const UNREALIZED_PROFIT_CLOSE_FEE_SIDES = envNumber("UNREALIZED_PROFIT_CLOSE_FEE_SIDES", 2);
 const UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT = envNumber("UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT", 0);
+const UNREALIZED_CLOSE_SETTLE_DELAY_MS = Math.max(
+  0,
+  envNumber("UNREALIZED_CLOSE_SETTLE_DELAY_MS", envNumber("UNREALIZED_PROFIT_CLOSE_SETTLE_DELAY_MS", 2000))
+);
 const UNREALIZED_LOSS_CLOSE_ENABLED = envBoolean("UNREALIZED_LOSS_CLOSE_ENABLED", true);
 const UNREALIZED_LOSS_CLOSE_PCT = envNumber("UNREALIZED_LOSS_CLOSE_PCT", 30);
 const UNREALIZED_PROFIT_MONITOR_INTERVAL_MS = Math.max(250, envNumber("UNREALIZED_PROFIT_MONITOR_INTERVAL_MS", 1000));
@@ -1224,7 +1228,10 @@ async function closePositionsByUnrealizedPnl(openPositions, closeOptions = {}) {
       console.log(
         `[SL] ${position.symbol} ${position.side.toUpperCase()} unrealized PnL ${pnlLabel} USDT (${pctLabel} of margin ${marginLabel}) reached -${UNREALIZED_LOSS_CLOSE_PCT}% limit -> closing position`
       );
-      await closePosition(position.symbol, position, closeOptions);
+      await closePosition(position.symbol, position, {
+        settleDelayMs: UNREALIZED_CLOSE_SETTLE_DELAY_MS,
+        ...closeOptions,
+      });
       closedCount++;
       continue;
     }
@@ -1238,7 +1245,10 @@ async function closePositionsByUnrealizedPnl(openPositions, closeOptions = {}) {
     console.log(
       `[TP] ${position.symbol} ${position.side.toUpperCase()} unrealized gross ${position.unrealizedPnl.toFixed(6)} USDT, estimated net ${estimatedNetProfit.toFixed(6)} USDT after ${estimatedFees.toFixed(6)} USDT fee buffer (${pctLabel}) -> closing position`
     );
-    await closePosition(position.symbol, position, closeOptions);
+    await closePosition(position.symbol, position, {
+      settleDelayMs: UNREALIZED_CLOSE_SETTLE_DELAY_MS,
+      ...closeOptions,
+    });
     closedCount++;
   }
 
@@ -1567,7 +1577,7 @@ async function tradingCycle() {
     const openPositions = await getOpenPositions();
     console.log("Open positions:", openPositions.length ? openPositions.map(p => `${p.symbol} ${p.side}`).join(", ") : "none");
 
-    const closedByUnrealizedPnl = await closePositionsByUnrealizedPnl(openPositions, { settleDelayMs: 0 });
+    const closedByUnrealizedPnl = await closePositionsByUnrealizedPnl(openPositions);
     if (closedByUnrealizedPnl > 0) {
       console.log(`[PNL] Closed ${closedByUnrealizedPnl} position(s) by unrealized PnL guard; waiting until next cycle before new entries`);
       return;
@@ -1697,7 +1707,7 @@ async function waitForNextCycleWatchingUnrealizedProfit(delayMs) {
 
     try {
       const openPositions = await getOpenPositions();
-      const closedCount = await closePositionsByUnrealizedPnl(openPositions, { settleDelayMs: 0 });
+      const closedCount = await closePositionsByUnrealizedPnl(openPositions);
       if (closedCount > 0) {
         console.log(`[PNL] Closed ${closedCount} position(s) by unrealized PnL guard immediately during wait`);
       }
@@ -1724,6 +1734,7 @@ SR_WINDOW: ${SR_WINDOW_SIZE}, TOLERANCE: ${SR_LEVEL_TOLERANCE * 100}%
 MIN_AI_CONFIDENCE: ${MIN_AI_CONFIDENCE}
 ALLOWED_STRENGTHS: ${ALLOWED_AI_STRENGTHS.join(", ")}
 UNREALIZED TP MONITOR: ${UNREALIZED_PROFIT_CLOSE_ENABLED ? `${UNREALIZED_PROFIT_MONITOR_INTERVAL_MS}ms` : "OFF"}
+UNREALIZED CLOSE SETTLE DELAY: ${UNREALIZED_CLOSE_SETTLE_DELAY_MS}ms
 LEARNING MEMORY: ${LEARNING_MEMORY_ENABLED ? "ON" : "OFF"} (min trades ${LEARNING_MEMORY_MIN_TRADES}, bad WR ${LEARNING_MEMORY_BAD_WIN_RATE}%, penalty ${LEARNING_MEMORY_CONFIDENCE_PENALTY})
 `);
 
