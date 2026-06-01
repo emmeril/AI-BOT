@@ -12,7 +12,7 @@ Bot trading Binance Futures berbasis Node.js yang menggabungkan analisis teknika
 - Mode `LONG_ONLY` untuk membatasi entry hanya ke posisi long.
 - Risk guard: daily loss limit, consecutive loss limit, max notional, risk per trade, dan max open positions.
 - Kill switch lewat environment variable atau file `bot-paused.flag`.
-- Stop loss market dan take profit berbasis unrealized PnL profit.
+- Stop loss sistem berbasis unrealized PnL, serta take profit berbasis unrealized PnL profit.
 - Profit ledger lokal untuk ringkasan realized PnL.
 - Alert trade via Fonnte untuk info entry dan realized trade.
 - AI explain log untuk audit keputusan sinyal.
@@ -158,9 +158,9 @@ MAX_POSITION_NOTIONAL_USDT=1000
 MIN_RR=1.5
 ```
 
-### Take Profit Unrealized PnL
+### TP/SL Unrealized PnL
 
-Secara default bot tidak lagi memasang order `TAKE_PROFIT_MARKET` di exchange. Bot tetap memasang stop loss, lalu memonitor posisi terbuka selama waktu tunggu antarsiklus. Jika estimasi net unrealized PnL sudah profit setelah buffer fee, bot langsung menutup posisi dengan market reduce-only tanpa delay settle tambahan untuk TP unrealized.
+Secara default bot tidak lagi memasang order `TAKE_PROFIT_MARKET` di exchange. Bot juga memakai SL sistem berbasis unrealized PnL: jika unrealized PnL rugi mencapai batas persentase dari margin posisi, bot langsung menutup posisi dengan market reduce-only. Jika estimasi net unrealized PnL sudah profit setelah buffer fee, bot juga langsung menutup posisi dengan market reduce-only tanpa delay settle tambahan untuk TP unrealized.
 
 ```env
 UNREALIZED_PROFIT_CLOSE_ENABLED=true
@@ -169,10 +169,12 @@ UNREALIZED_PROFIT_CLOSE_MIN_PCT=0
 UNREALIZED_PROFIT_CLOSE_FEE_RATE=0.0004
 UNREALIZED_PROFIT_CLOSE_FEE_SIDES=2
 UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT=0
+UNREALIZED_LOSS_CLOSE_ENABLED=true
+UNREALIZED_LOSS_CLOSE_PCT=30
 UNREALIZED_PROFIT_MONITOR_INTERVAL_MS=1000
 ```
 
-Naikkan `UNREALIZED_PROFIT_CLOSE_MIN_USDT` atau `UNREALIZED_PROFIT_CLOSE_MIN_PCT` jika ingin posisi baru ditutup setelah estimasi net profit minimal tertentu. Bot mengurangi `unrealizedPnl` dengan estimasi fee `UNREALIZED_PROFIT_CLOSE_FEE_RATE * notional * UNREALIZED_PROFIT_CLOSE_FEE_SIDES` plus `UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT`, sehingga posisi tidak ditutup hanya karena gross unrealized PnL kecil yang masih habis oleh fee/slippage. Turunkan `UNREALIZED_PROFIT_MONITOR_INTERVAL_MS` jika ingin polling lebih cepat (minimum 250 ms). Set `UNREALIZED_PROFIT_CLOSE_ENABLED=false` untuk kembali memakai order TP exchange.
+Naikkan `UNREALIZED_PROFIT_CLOSE_MIN_USDT` atau `UNREALIZED_PROFIT_CLOSE_MIN_PCT` jika ingin posisi baru ditutup setelah estimasi net profit minimal tertentu. Bot mengurangi `unrealizedPnl` dengan estimasi fee `UNREALIZED_PROFIT_CLOSE_FEE_RATE * notional * UNREALIZED_PROFIT_CLOSE_FEE_SIDES` plus `UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT`, sehingga posisi tidak ditutup hanya karena gross unrealized PnL kecil yang masih habis oleh fee/slippage. `UNREALIZED_LOSS_CLOSE_PCT=30` berarti posisi ditutup ketika unrealized PnL mencapai rugi 30% dari margin posisi (`notional / LEVERAGE`). Set `UNREALIZED_LOSS_CLOSE_ENABLED=false` jika ingin kembali memasang order `STOP_MARKET` price-based di exchange. Turunkan `UNREALIZED_PROFIT_MONITOR_INTERVAL_MS` jika ingin polling lebih cepat (minimum 250 ms). Set `UNREALIZED_PROFIT_CLOSE_ENABLED=false` untuk kembali memakai order TP exchange.
 
 ### AI Filter
 

@@ -49,6 +49,8 @@ const UNREALIZED_PROFIT_CLOSE_MIN_PCT = envNumber("UNREALIZED_PROFIT_CLOSE_MIN_P
 const UNREALIZED_PROFIT_CLOSE_FEE_RATE = envNumber("UNREALIZED_PROFIT_CLOSE_FEE_RATE", 0.0004);
 const UNREALIZED_PROFIT_CLOSE_FEE_SIDES = envNumber("UNREALIZED_PROFIT_CLOSE_FEE_SIDES", 2);
 const UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT = envNumber("UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT", 0);
+const UNREALIZED_LOSS_CLOSE_ENABLED = envBoolean("UNREALIZED_LOSS_CLOSE_ENABLED", true);
+const UNREALIZED_LOSS_CLOSE_PCT = envNumber("UNREALIZED_LOSS_CLOSE_PCT", 30);
 const UNREALIZED_PROFIT_MONITOR_INTERVAL_MS = Math.max(250, envNumber("UNREALIZED_PROFIT_MONITOR_INTERVAL_MS", 1000));
 const LONG_ONLY = envBoolean("LONG_ONLY");
 const REVERSAL_COOLDOWN_MINUTES = envNumber("REVERSAL_COOLDOWN_MINUTES", 10);
@@ -1172,6 +1174,30 @@ function getPositionEstimatedNetProfitPct(position) {
   return (estimatedNetProfit / position.notional) * 100;
 }
 
+function getPositionMargin(position) {
+  if (!Number.isFinite(position.notional) || position.notional <= 0) return null;
+  if (!Number.isFinite(LEVERAGE) || LEVERAGE <= 0) return null;
+  return position.notional / LEVERAGE;
+}
+
+function getPositionUnrealizedPnlPct(position) {
+  if (!Number.isFinite(position.unrealizedPnl)) return null;
+  const margin = getPositionMargin(position);
+  if (margin === null || margin <= 0) return null;
+  return (position.unrealizedPnl / margin) * 100;
+}
+
+function shouldCloseForUnrealizedLoss(position) {
+  if (!UNREALIZED_LOSS_CLOSE_ENABLED) return false;
+  const lossPctLimit = Math.max(0, UNREALIZED_LOSS_CLOSE_PCT);
+  if (lossPctLimit <= 0) return false;
+
+  const pnlPct = getPositionUnrealizedPnlPct(position);
+  if (pnlPct === null) return false;
+
+  return pnlPct <= -lossPctLimit;
+}
+
 function shouldCloseForUnrealizedProfit(position) {
   if (!UNREALIZED_PROFIT_CLOSE_ENABLED) return false;
   const estimatedNetProfit = getPositionEstimatedNetProfit(position);
@@ -1184,11 +1210,25 @@ function shouldCloseForUnrealizedProfit(position) {
   return true;
 }
 
-async function closePositionsWithUnrealizedProfit(openPositions, closeOptions = {}) {
-  if (!UNREALIZED_PROFIT_CLOSE_ENABLED) return 0;
+async function closePositionsByUnrealizedPnl(openPositions, closeOptions = {}) {
+  if (!UNREALIZED_PROFIT_CLOSE_ENABLED && !UNREALIZED_LOSS_CLOSE_ENABLED) return 0;
 
   let closedCount = 0;
   for (const position of openPositions) {
+    if (shouldCloseForUnrealizedLoss(position)) {
+      const pnlPct = getPositionUnrealizedPnlPct(position);
+      const margin = getPositionMargin(position);
+      const pnlLabel = Number.isFinite(position.unrealizedPnl) ? position.unrealizedPnl.toFixed(6) : "n/a";
+      const pctLabel = pnlPct === null ? "n/a" : `${pnlPct.toFixed(4)}%`;
+      const marginLabel = margin === null ? "n/a" : `${margin.toFixed(6)} USDT`;
+      console.log(
+        `[SL] ${position.symbol} ${position.side.toUpperCase()} unrealized PnL ${pnlLabel} USDT (${pctLabel} of margin ${marginLabel}) reached -${UNREALIZED_LOSS_CLOSE_PCT}% limit -> closing position`
+      );
+      await closePosition(position.symbol, position, closeOptions);
+      closedCount++;
+      continue;
+    }
+
     if (!shouldCloseForUnrealizedProfit(position)) continue;
 
     const estimatedNetProfit = getPositionEstimatedNetProfit(position);
@@ -1264,15 +1304,21 @@ async function createStopLossAndTakeProfit(symbol, position, slPrice, tpPrice) {
   const tpSide = isLong ? "sell" : "buy";
   const quantity = position.contracts;
 
-  const slStopPrice = exchange.priceToPrecision(symbol, slPrice);
-  await retry(() =>
-    exchange.createOrder(symbol, "STOP_MARKET", slSide, quantity, undefined, {
-      stopPrice: slStopPrice,
-      reduceOnly: true,
-      workingType: "MARK_PRICE",
-    })
-  );
-  console.log(`[SL] Stop loss placed at ${slStopPrice} (${slSide})`);
+  if (UNREALIZED_LOSS_CLOSE_ENABLED) {
+    console.log(
+      `[SL] Exchange stop-loss skipped; ${symbol} will close when unrealized PnL reaches -${UNREALIZED_LOSS_CLOSE_PCT}% of margin`
+    );
+  } else {
+    const slStopPrice = exchange.priceToPrecision(symbol, slPrice);
+    await retry(() =>
+      exchange.createOrder(symbol, "STOP_MARKET", slSide, quantity, undefined, {
+        stopPrice: slStopPrice,
+        reduceOnly: true,
+        workingType: "MARK_PRICE",
+      })
+    );
+    console.log(`[SL] Stop loss placed at ${slStopPrice} (${slSide})`);
+  }
 
   if (UNREALIZED_PROFIT_CLOSE_ENABLED) {
     console.log(
@@ -1521,9 +1567,9 @@ async function tradingCycle() {
     const openPositions = await getOpenPositions();
     console.log("Open positions:", openPositions.length ? openPositions.map(p => `${p.symbol} ${p.side}`).join(", ") : "none");
 
-    const closedByUnrealizedProfit = await closePositionsWithUnrealizedProfit(openPositions, { settleDelayMs: 0 });
-    if (closedByUnrealizedProfit > 0) {
-      console.log(`[TP] Closed ${closedByUnrealizedProfit} profitable position(s); waiting until next cycle before new entries`);
+    const closedByUnrealizedPnl = await closePositionsByUnrealizedPnl(openPositions, { settleDelayMs: 0 });
+    if (closedByUnrealizedPnl > 0) {
+      console.log(`[PNL] Closed ${closedByUnrealizedPnl} position(s) by unrealized PnL guard; waiting until next cycle before new entries`);
       return;
     }
 
@@ -1637,7 +1683,7 @@ async function tradingCycle() {
 
 
 async function waitForNextCycleWatchingUnrealizedProfit(delayMs) {
-  if (!UNREALIZED_PROFIT_CLOSE_ENABLED) {
+  if (!UNREALIZED_PROFIT_CLOSE_ENABLED && !UNREALIZED_LOSS_CLOSE_ENABLED) {
     await sleep(delayMs);
     return;
   }
@@ -1651,12 +1697,12 @@ async function waitForNextCycleWatchingUnrealizedProfit(delayMs) {
 
     try {
       const openPositions = await getOpenPositions();
-      const closedCount = await closePositionsWithUnrealizedProfit(openPositions, { settleDelayMs: 0 });
+      const closedCount = await closePositionsByUnrealizedPnl(openPositions, { settleDelayMs: 0 });
       if (closedCount > 0) {
-        console.log(`[TP] Closed ${closedCount} profitable position(s) immediately during wait`);
+        console.log(`[PNL] Closed ${closedCount} position(s) by unrealized PnL guard immediately during wait`);
       }
     } catch (err) {
-      console.warn(`[TP] Unrealized profit monitor skipped: ${err.message}`);
+      console.warn(`[PNL] Unrealized PnL monitor skipped: ${err.message}`);
     }
   }
 }
