@@ -43,6 +43,9 @@ const MAX_DAILY_LOSS_USDT = envNumber("MAX_DAILY_LOSS_USDT", 0);
 const MAX_CONSECUTIVE_LOSSES = envNumber("MAX_CONSECUTIVE_LOSSES", 3);
 const ATR_TP_MULTIPLIER = envNumber("ATR_TP_MULTIPLIER", 1.8);
 const ATR_SL_MULTIPLIER = envNumber("ATR_SL_MULTIPLIER", 1.5);
+const UNREALIZED_PROFIT_CLOSE_ENABLED = envBoolean("UNREALIZED_PROFIT_CLOSE_ENABLED", true);
+const UNREALIZED_PROFIT_CLOSE_MIN_USDT = envNumber("UNREALIZED_PROFIT_CLOSE_MIN_USDT", 0);
+const UNREALIZED_PROFIT_CLOSE_MIN_PCT = envNumber("UNREALIZED_PROFIT_CLOSE_MIN_PCT", 0);
 const LONG_ONLY = envBoolean("LONG_ONLY");
 const REVERSAL_COOLDOWN_MINUTES = envNumber("REVERSAL_COOLDOWN_MINUTES", 10);
 const SYMBOL_COOLDOWN_ENABLED = envBoolean("SYMBOL_COOLDOWN_ENABLED");
@@ -1101,11 +1104,37 @@ function calculateRequiredMargin(amount, price) {
   return (amount * price) / LEVERAGE;
 }
 
+function numberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function positionNumber(position, keys) {
+  for (const key of keys) {
+    const value = key.startsWith("info.") ? position.info?.[key.slice(5)] : position[key];
+    const number = numberOrNull(value);
+    if (number !== null) return number;
+  }
+  return null;
+}
+
 async function getCurrentPosition(symbol) {
   const positions = await retry(() => exchange.fetchPositions([symbol]));
   const pos = positions.find(p => p.symbol === symbol && Number(p.contracts) > 0);
   if (!pos) return null;
-  return { side: pos.side, symbol: pos.symbol, contracts: Number(pos.contracts), entryPrice: Number(pos.entryPrice) };
+  const contracts = Number(pos.contracts);
+  const entryPrice = Number(pos.entryPrice);
+  const markPrice = positionNumber(pos, ["markPrice", "info.markPrice"]);
+  const notional = positionNumber(pos, ["notional", "info.notional", "info.positionInitialMargin"]);
+  return {
+    side: pos.side,
+    symbol: pos.symbol,
+    contracts,
+    entryPrice,
+    markPrice,
+    notional: notional === null ? contracts * (markPrice || entryPrice) : Math.abs(notional),
+    unrealizedPnl: positionNumber(pos, ["unrealizedPnl", "unrealisedPnl", "info.unRealizedProfit"]),
+  };
 }
 
 async function getOpenPositions() {
@@ -1119,6 +1148,42 @@ async function getOpenPositions() {
     }
   }
   return open;
+}
+
+function getPositionUnrealizedProfitPct(position) {
+  if (!Number.isFinite(position.unrealizedPnl) || !Number.isFinite(position.notional) || position.notional <= 0) return null;
+  return (position.unrealizedPnl / position.notional) * 100;
+}
+
+function shouldCloseForUnrealizedProfit(position) {
+  if (!UNREALIZED_PROFIT_CLOSE_ENABLED) return false;
+  if (!Number.isFinite(position.unrealizedPnl)) return false;
+  if (position.unrealizedPnl <= UNREALIZED_PROFIT_CLOSE_MIN_USDT) return false;
+
+  const profitPct = getPositionUnrealizedProfitPct(position);
+  if (UNREALIZED_PROFIT_CLOSE_MIN_PCT > 0 && (profitPct === null || profitPct < UNREALIZED_PROFIT_CLOSE_MIN_PCT)) return false;
+
+  return true;
+}
+
+async function closePositionsWithUnrealizedProfit(openPositions) {
+  if (!UNREALIZED_PROFIT_CLOSE_ENABLED) return 0;
+
+  let closedCount = 0;
+  for (const position of openPositions) {
+    if (!shouldCloseForUnrealizedProfit(position)) continue;
+
+    const profitPct = getPositionUnrealizedProfitPct(position);
+    const pctLabel = profitPct === null ? "n/a" : `${profitPct.toFixed(4)}%`;
+    console.log(
+      `[TP] ${position.symbol} ${position.side.toUpperCase()} unrealized profit ${position.unrealizedPnl.toFixed(6)} USDT (${pctLabel}) -> closing position`
+    );
+    await closePosition(position.symbol, position);
+    closedCount++;
+  }
+
+  if (closedCount > 0) await syncProfitLedger();
+  return closedCount;
 }
 
 async function cancelAllOrders(symbol) {
@@ -1187,6 +1252,13 @@ async function createStopLossAndTakeProfit(symbol, position, slPrice, tpPrice) {
     })
   );
   console.log(`[SL] Stop loss placed at ${slStopPrice} (${slSide})`);
+
+  if (UNREALIZED_PROFIT_CLOSE_ENABLED) {
+    console.log(
+      `[TP] Exchange take-profit skipped; ${symbol} will close when unrealized PnL is profitable`
+    );
+    return;
+  }
 
   const tpStopPrice = exchange.priceToPrecision(symbol, tpPrice);
   await retry(() =>
@@ -1427,6 +1499,12 @@ async function tradingCycle() {
 
     const openPositions = await getOpenPositions();
     console.log("Open positions:", openPositions.length ? openPositions.map(p => `${p.symbol} ${p.side}`).join(", ") : "none");
+
+    const closedByUnrealizedProfit = await closePositionsWithUnrealizedProfit(openPositions);
+    if (closedByUnrealizedProfit > 0) {
+      console.log(`[TP] Closed ${closedByUnrealizedProfit} profitable position(s); waiting until next cycle before new entries`);
+      return;
+    }
 
     if (killSwitchActive()) {
       console.log("[KILL] Cycle stopped");
