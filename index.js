@@ -46,6 +46,7 @@ const ATR_SL_MULTIPLIER = envNumber("ATR_SL_MULTIPLIER", 1.5);
 const UNREALIZED_PROFIT_CLOSE_ENABLED = envBoolean("UNREALIZED_PROFIT_CLOSE_ENABLED", true);
 const UNREALIZED_PROFIT_CLOSE_MIN_USDT = envNumber("UNREALIZED_PROFIT_CLOSE_MIN_USDT", 0);
 const UNREALIZED_PROFIT_CLOSE_MIN_PCT = envNumber("UNREALIZED_PROFIT_CLOSE_MIN_PCT", 0);
+const UNREALIZED_PROFIT_MONITOR_INTERVAL_MS = Math.max(250, envNumber("UNREALIZED_PROFIT_MONITOR_INTERVAL_MS", 1000));
 const LONG_ONLY = envBoolean("LONG_ONLY");
 const REVERSAL_COOLDOWN_MINUTES = envNumber("REVERSAL_COOLDOWN_MINUTES", 10);
 const SYMBOL_COOLDOWN_ENABLED = envBoolean("SYMBOL_COOLDOWN_ENABLED");
@@ -1166,7 +1167,7 @@ function shouldCloseForUnrealizedProfit(position) {
   return true;
 }
 
-async function closePositionsWithUnrealizedProfit(openPositions) {
+async function closePositionsWithUnrealizedProfit(openPositions, closeOptions = {}) {
   if (!UNREALIZED_PROFIT_CLOSE_ENABLED) return 0;
 
   let closedCount = 0;
@@ -1178,7 +1179,7 @@ async function closePositionsWithUnrealizedProfit(openPositions) {
     console.log(
       `[TP] ${position.symbol} ${position.side.toUpperCase()} unrealized profit ${position.unrealizedPnl.toFixed(6)} USDT (${pctLabel}) -> closing position`
     );
-    await closePosition(position.symbol, position);
+    await closePosition(position.symbol, position, closeOptions);
     closedCount++;
   }
 
@@ -1225,12 +1226,13 @@ async function openPosition(symbol, signal, price, setupData) {
   return await getCurrentPosition(symbol);
 }
 
-async function closePosition(symbol, position) {
+async function closePosition(symbol, position, options = {}) {
+  const settleDelayMs = options.settleDelayMs ?? 2000;
   const side = position.side === "long" ? "sell" : "buy";
   await retry(() => exchange.createMarketOrder(symbol, side, position.contracts, { reduceOnly: true }));
   await cancelAllOrders(symbol);
   console.log("[CLOSE] Position closed manually");
-  await sleep(2000);
+  if (settleDelayMs > 0) await sleep(settleDelayMs);
   await syncRiskState(); // update PnL immediately
   // The finalization will be picked up by finalizeAnyClosedPositions in the next cycle
 }
@@ -1500,7 +1502,7 @@ async function tradingCycle() {
     const openPositions = await getOpenPositions();
     console.log("Open positions:", openPositions.length ? openPositions.map(p => `${p.symbol} ${p.side}`).join(", ") : "none");
 
-    const closedByUnrealizedProfit = await closePositionsWithUnrealizedProfit(openPositions);
+    const closedByUnrealizedProfit = await closePositionsWithUnrealizedProfit(openPositions, { settleDelayMs: 0 });
     if (closedByUnrealizedProfit > 0) {
       console.log(`[TP] Closed ${closedByUnrealizedProfit} profitable position(s); waiting until next cycle before new entries`);
       return;
@@ -1614,6 +1616,32 @@ async function tradingCycle() {
   }
 }
 
+
+async function waitForNextCycleWatchingUnrealizedProfit(delayMs) {
+  if (!UNREALIZED_PROFIT_CLOSE_ENABLED) {
+    await sleep(delayMs);
+    return;
+  }
+
+  const deadline = Date.now() + delayMs;
+  while (Date.now() < deadline) {
+    const remainingMs = deadline - Date.now();
+    await sleep(Math.min(UNREALIZED_PROFIT_MONITOR_INTERVAL_MS, remainingMs));
+
+    if (isTrading) continue;
+
+    try {
+      const openPositions = await getOpenPositions();
+      const closedCount = await closePositionsWithUnrealizedProfit(openPositions, { settleDelayMs: 0 });
+      if (closedCount > 0) {
+        console.log(`[TP] Closed ${closedCount} profitable position(s) immediately during wait`);
+      }
+    } catch (err) {
+      console.warn(`[TP] Unrealized profit monitor skipped: ${err.message}`);
+    }
+  }
+}
+
 // ------------------------------
 //  Main Loop
 // ------------------------------
@@ -1630,6 +1658,7 @@ LONG ONLY: ${LONG_ONLY}
 SR_WINDOW: ${SR_WINDOW_SIZE}, TOLERANCE: ${SR_LEVEL_TOLERANCE * 100}%
 MIN_AI_CONFIDENCE: ${MIN_AI_CONFIDENCE}
 ALLOWED_STRENGTHS: ${ALLOWED_AI_STRENGTHS.join(", ")}
+UNREALIZED TP MONITOR: ${UNREALIZED_PROFIT_CLOSE_ENABLED ? `${UNREALIZED_PROFIT_MONITOR_INTERVAL_MS}ms` : "OFF"}
 LEARNING MEMORY: ${LEARNING_MEMORY_ENABLED ? "ON" : "OFF"} (min trades ${LEARNING_MEMORY_MIN_TRADES}, bad WR ${LEARNING_MEMORY_BAD_WIN_RATE}%, penalty ${LEARNING_MEMORY_CONFIDENCE_PENALTY})
 `);
 
@@ -1642,7 +1671,7 @@ LEARNING MEMORY: ${LEARNING_MEMORY_ENABLED ? "ON" : "OFF"} (min trades ${LEARNIN
     try {
       const delay = getNextCandleDelay();
       console.log(`\n[WAIT] Next cycle in ${Math.floor(delay / 1000)}s`);
-      await sleep(delay);
+      await waitForNextCycleWatchingUnrealizedProfit(delay);
       await tradingCycle();
     } catch (err) {
       console.error(err);

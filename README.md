@@ -160,15 +160,16 @@ MIN_RR=1.5
 
 ### Take Profit Unrealized PnL
 
-Secara default bot tidak lagi memasang order `TAKE_PROFIT_MARKET` di exchange. Bot tetap memasang stop loss, lalu setiap siklus akan mengecek posisi terbuka. Jika unrealized PnL sudah profit, bot menutup posisi dengan market reduce-only dan menunggu siklus berikutnya sebelum mencari entry baru.
+Secara default bot tidak lagi memasang order `TAKE_PROFIT_MARKET` di exchange. Bot tetap memasang stop loss, lalu memonitor posisi terbuka selama waktu tunggu antarsiklus. Jika unrealized PnL sudah profit, bot langsung menutup posisi dengan market reduce-only tanpa delay settle tambahan untuk TP unrealized.
 
 ```env
 UNREALIZED_PROFIT_CLOSE_ENABLED=true
 UNREALIZED_PROFIT_CLOSE_MIN_USDT=0
 UNREALIZED_PROFIT_CLOSE_MIN_PCT=0
+UNREALIZED_PROFIT_MONITOR_INTERVAL_MS=1000
 ```
 
-Naikkan `UNREALIZED_PROFIT_CLOSE_MIN_USDT` atau `UNREALIZED_PROFIT_CLOSE_MIN_PCT` jika ingin posisi baru ditutup setelah profit minimal tertentu. Set `UNREALIZED_PROFIT_CLOSE_ENABLED=false` untuk kembali memakai order TP exchange.
+Naikkan `UNREALIZED_PROFIT_CLOSE_MIN_USDT` atau `UNREALIZED_PROFIT_CLOSE_MIN_PCT` jika ingin posisi baru ditutup setelah profit minimal tertentu. Turunkan `UNREALIZED_PROFIT_MONITOR_INTERVAL_MS` jika ingin polling lebih cepat (minimum 250 ms). Set `UNREALIZED_PROFIT_CLOSE_ENABLED=false` untuk kembali memakai order TP exchange.
 
 ### AI Filter
 
