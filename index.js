@@ -340,18 +340,37 @@ async function sendFonnteAlert(message) {
 }
 
 function formatTradeOpenAlert({ symbol, signal, entryPrice, contracts, slPrice, tpPrice, rr, confidence, strength }) {
-  return [
+  const lines = [
     "[TRADE OPEN]",
     `Symbol: ${symbol}`,
     `Side: ${signal}`,
     `Entry: ${roundNumber(entryPrice, 10)}`,
     `Contracts: ${roundNumber(contracts, 8)}`,
-    `SL: ${roundNumber(slPrice, 10)}`,
-    `TP: ${roundNumber(tpPrice, 10)}`,
+  ];
+
+  if (UNREALIZED_LOSS_CLOSE_ENABLED) {
+    lines.push(`SL Guard: Unrealized PnL <= -${UNREALIZED_LOSS_CLOSE_PCT}% of margin`);
+  } else {
+    lines.push(`SL: ${roundNumber(slPrice, 10)}`);
+  }
+
+  if (UNREALIZED_PROFIT_CLOSE_ENABLED) {
+    const profitParts = [`TP Guard: Unrealized net PnL >= ${roundNumber(UNREALIZED_PROFIT_CLOSE_MIN_USDT, 10)} USDT after fees`];
+    if (UNREALIZED_PROFIT_CLOSE_MIN_PCT > 0) {
+      profitParts.push(`>= ${UNREALIZED_PROFIT_CLOSE_MIN_PCT}% of notional`);
+    }
+    lines.push(profitParts.join(" | "));
+  } else {
+    lines.push(`TP: ${roundNumber(tpPrice, 10)}`);
+  }
+
+  lines.push(
     `RR: ${roundNumber(rr, 2)}`,
     `Confidence: ${confidence ?? "-"}`,
-    `Strength: ${strength || "-"}`,
-  ].join("\n");
+    `Strength: ${strength || "-"}`
+  );
+
+  return lines.join("\n");
 }
 
 // ------------------------------
