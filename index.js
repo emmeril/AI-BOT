@@ -18,6 +18,7 @@ const TIMEFRAME = envValue("TIMEFRAME", "15m");
 const LOOKBACK_CANDLES = envNumber("LOOKBACK_CANDLES", 200);
 const INTERVAL_MINUTES = envNumber("INTERVAL_MINUTES", 5);
 const INTERVAL_MS = INTERVAL_MINUTES * 60 * 1000;
+const SCAN_ROTATION_BATCH_SIZE = Math.max(0, envNumber("SCAN_ROTATION_BATCH_SIZE", 0));
 const AI_SIGNAL_CACHE_ENABLED = envBoolean("AI_SIGNAL_CACHE_ENABLED", true);
 const AI_SIGNAL_CACHE_TTL_MS = envNumber(
   "AI_SIGNAL_CACHE_TTL_MS",
@@ -180,6 +181,21 @@ function getAiSignalCacheKey(symbol, ohlcv) {
   return [symbol, TIMEFRAME, candleBucket, LONG_ONLY ? "LONG_ONLY" : "BOTH"].join("|");
 }
 
+function getSymbolsForCurrentCycle(activeSymbols = SYMBOLS) {
+  const symbols = Array.isArray(activeSymbols) ? activeSymbols.filter(Boolean) : [];
+  if (symbols.length <= 1) return symbols;
+
+  const batchSize = Math.max(0, SCAN_ROTATION_BATCH_SIZE);
+  if (!batchSize || batchSize >= symbols.length) return symbols;
+
+  const start = scanRotationOffset % symbols.length;
+  const end = start + batchSize;
+  scanRotationOffset = (start + batchSize) % symbols.length;
+
+  if (end <= symbols.length) return symbols.slice(start, end);
+  return symbols.slice(start).concat(symbols.slice(0, end - symbols.length));
+}
+
 function getCachedAISignal(cacheKey) {
   if (!AI_SIGNAL_CACHE_ENABLED) return null;
   const entry = aiSignalCache.get(cacheKey);
@@ -234,6 +250,7 @@ if (process.env.EXCHANGE_DEMO === "true") {
 
 let isTrading = false;
 let lastPositionChangeTime = 0;
+let scanRotationOffset = 0;
 let profitLedger = loadProfitLedger();
 let riskState = loadRiskState();
 let aiSignalCache = new Map();
@@ -1608,8 +1625,17 @@ async function tradingCycle() {
     }
     if (!riskGateAllowsTrading()) return;
 
+    const symbolsToScan = openPositions.length >= MAX_OPEN_POSITIONS
+      ? openPositions.map(p => p.symbol).filter(Boolean)
+      : getSymbolsForCurrentCycle(SYMBOLS);
+
+    console.log(
+      `[SCAN] ${symbolsToScan.length}/${SYMBOLS.length} symbols this cycle` +
+      (SCAN_ROTATION_BATCH_SIZE > 0 && symbolsToScan.length < SYMBOLS.length ? ` (batch size ${SCAN_ROTATION_BATCH_SIZE})` : "")
+    );
+
     const candidates = [];
-    for (const sym of SYMBOLS) {
+    for (const sym of symbolsToScan) {
       const cand = await analyzeSymbol(sym);
       if (cand) candidates.push(cand);
     }
@@ -1748,6 +1774,7 @@ TIMEFRAME: ${TIMEFRAME}
 LEVERAGE: ${LEVERAGE}x
 ORDER SIZE: ${ORDER_SIZE_USDT} USDT
 MAX POSITIONS: ${MAX_OPEN_POSITIONS}
+SCAN ROTATION BATCH: ${SCAN_ROTATION_BATCH_SIZE > 0 ? SCAN_ROTATION_BATCH_SIZE : "OFF"}
 LONG ONLY: ${LONG_ONLY}
 SR_WINDOW: ${SR_WINDOW_SIZE}, TOLERANCE: ${SR_LEVEL_TOLERANCE * 100}%
 MIN_AI_CONFIDENCE: ${MIN_AI_CONFIDENCE}

@@ -104,9 +104,9 @@ Bot akan menunggu candle berikutnya sesuai `INTERVAL_MINUTES`, lalu menjalankan 
 
 Kalau ingin lebih hemat rate limit AI, atur `SCAN_ROTATION_BATCH_SIZE` supaya bot hanya memeriksa sebagian simbol per siklus secara bergiliran. Misalnya `2` akan membuat bot scan 2 simbol dulu, lalu lanjut ke batch berikutnya di siklus berikutnya.
 
-Saat mode rotating aktif, konfirmasi sinyal otomatis dipercepat ke `1` supaya setup yang lolos tidak keburu basi menunggu putaran scan berikutnya. Kalau rotating tidak aktif, bot kembali memakai `REQUIRED_CONFIRMATION`.
+Saat jumlah posisi terbuka sudah mencapai `MAX_OPEN_POSITIONS`, bot akan memfokuskan scan ke simbol yang sedang terbuka saja. Ini mencegah panggilan Gemini terbuang ke simbol baru yang memang tidak bisa dibuka lagi pada siklus tersebut.
 
-Bot juga punya cache ringan berbasis candle untuk market snapshot dan hasil AI. Itu membantu mengurangi hitungan indikator berulang dan panggilan Gemini yang sama. Kalau perlu, cache bisa dimatikan lewat `MARKET_SNAPSHOT_CACHE_ENABLED=false` atau `AI_SIGNAL_CACHE_ENABLED=false`.
+Bot juga punya cache berbasis candle untuk hasil AI. Itu membantu mencegah panggilan Gemini yang sama berulang pada candle yang sama. Kalau perlu, cache bisa dimatikan lewat `AI_SIGNAL_CACHE_ENABLED=false`.
 
 ## Menjalankan Optimizer
 
@@ -142,9 +142,8 @@ TIMEFRAME=15m
 HTF_TIMEFRAME=30m
 INTERVAL_MINUTES=5
 SCAN_ROTATION_BATCH_SIZE=2
-MARKET_SNAPSHOT_CACHE_ENABLED=true
 AI_SIGNAL_CACHE_ENABLED=true
-CACHE_MAX_ENTRIES=500
+AI_SIGNAL_CACHE_TTL_MS=900000
 ```
 
 ### Risk Management
