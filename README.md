@@ -125,11 +125,24 @@ GEMINI_API_KEY=your_gemini_api_key
 AI_VALIDATION_ENABLED=true
 GEMINI_MODEL=gemini-2.0-flash-lite
 AI_VALIDATION_TIMEFRAME=15m
-AI_VALIDATION_LOOKBACK=80
+AI_VALIDATION_LOOKBACK=40
+AI_VALIDATION_CACHE_TTL_MS=900000
+AI_VALIDATION_MIN_INTERVAL_MS=300000
+AI_VALIDATION_BACKOFF_MS=900000
+AI_VALIDATION_PRICE_BUCKET_PCT=0.25
+AI_VALIDATION_RETRIES=1
 AI_MIN_CONFIDENCE=60
 ```
 
 Jika Gemini menolak kondisi market, bot tidak memasang order baru pada siklus itu. Jika validasi AI gagal atau confidence di bawah `AI_MIN_CONFIDENCE`, bot juga tidak memasang order baru.
+
+Untuk mengurangi risiko rate limit Gemini:
+
+- `AI_VALIDATION_CACHE_TTL_MS`: berapa lama keputusan AI dipakai ulang.
+- `AI_VALIDATION_MIN_INTERVAL_MS`: jeda minimum panggilan Gemini per symbol.
+- `AI_VALIDATION_BACKOFF_MS`: jeda otomatis setelah respons rate limit/quota.
+- `AI_VALIDATION_PRICE_BUCKET_PCT`: perubahan harga kecil tetap memakai cache yang sama.
+- `AI_VALIDATION_RETRIES`: gunakan nilai kecil karena retry juga menghabiskan quota.
 
 ## Reset atau Buat Ulang Grid
 

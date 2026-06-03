@@ -66,6 +66,9 @@ const AI_VALIDATION_ENABLED = Config.boolean('AI_VALIDATION_ENABLED', false);
 const AI_VALIDATION_TIMEFRAME = Config.get('AI_VALIDATION_TIMEFRAME', '15m');
 const AI_VALIDATION_LOOKBACK = Config.number('AI_VALIDATION_LOOKBACK', 80);
 const AI_VALIDATION_CACHE_TTL_MS = Config.number('AI_VALIDATION_CACHE_TTL_MS', Math.max(INTERVAL_MS * 3, 60000));
+const AI_VALIDATION_MIN_INTERVAL_MS = Config.number('AI_VALIDATION_MIN_INTERVAL_MS', 60000);
+const AI_VALIDATION_BACKOFF_MS = Config.number('AI_VALIDATION_BACKOFF_MS', 10 * 60000);
+const AI_VALIDATION_PRICE_BUCKET_PCT = Config.number('AI_VALIDATION_PRICE_BUCKET_PCT', 0.25);
 const AI_VALIDATION_RETRIES = Config.number('AI_VALIDATION_RETRIES', 2);
 const AI_MIN_CONFIDENCE = Config.number('AI_MIN_CONFIDENCE', 60);
 const GEMINI_MODEL = Config.get('GEMINI_MODEL', 'gemini-2.0-flash-lite');
@@ -233,6 +236,8 @@ class GridState {
 // ------------------------------
 class AIGridValidator {
   static cache = new Map();
+  static lastDecisionBySymbol = new Map();
+  static rateLimitedUntil = 0;
 
   constructor(exchange) {
     this.exchange = exchange;
@@ -257,7 +262,21 @@ class AIGridValidator {
   cacheKey(symbol, currentPrice, levels) {
     const bucket = Math.floor(Date.now() / AI_VALIDATION_CACHE_TTL_MS);
     const rangeKey = `${roundNumber(levels[0])}-${roundNumber(levels[levels.length - 1])}`;
-    return `${symbol}|${AI_VALIDATION_TIMEFRAME}|${bucket}|${roundNumber(currentPrice)}|${rangeKey}`;
+    const priceBucket = this.priceBucket(currentPrice, levels);
+    return `${symbol}|${AI_VALIDATION_TIMEFRAME}|${bucket}|${priceBucket}|${rangeKey}`;
+  }
+
+  priceBucket(currentPrice, levels) {
+    const lower = Number(levels[0]);
+    const upper = Number(levels[levels.length - 1]);
+    const gridStepPct = lower > 0 && levels.length > 1
+      ? Math.abs((Number(levels[1]) - lower) / lower) * 100
+      : AI_VALIDATION_PRICE_BUCKET_PCT;
+    const bucketPct = Math.max(AI_VALIDATION_PRICE_BUCKET_PCT, gridStepPct / 2, 0.01);
+    const bucketSize = currentPrice * (bucketPct / 100);
+    const bucketedPrice = bucketSize > 0 ? Math.round(currentPrice / bucketSize) * bucketSize : currentPrice;
+    const position = upper > lower ? Math.round(((currentPrice - lower) / (upper - lower)) * GRID_COUNT) : 0;
+    return `${roundNumber(bucketedPrice)}|pos=${position}`;
   }
 
   getCached(key) {
@@ -269,6 +288,28 @@ class AIGridValidator {
 
   setCached(key, value) {
     AIGridValidator.cache.set(key, { value, expiresAt: Date.now() + AI_VALIDATION_CACHE_TTL_MS });
+  }
+
+  getLastDecision(symbol, allowStale = false) {
+    const entry = AIGridValidator.lastDecisionBySymbol.get(symbol);
+    if (!entry) return null;
+    const age = Date.now() - entry.at;
+    if (allowStale || age < AI_VALIDATION_CACHE_TTL_MS) return entry;
+    return null;
+  }
+
+  rememberDecision(symbol, decision) {
+    AIGridValidator.lastDecisionBySymbol.set(symbol, { value: decision, at: Date.now() });
+  }
+
+  isRateLimitError(err) {
+    const message = String(err?.message || err || '').toLowerCase();
+    return err?.status === 429 ||
+      err?.code === 429 ||
+      message.includes('429') ||
+      message.includes('rate limit') ||
+      message.includes('quota') ||
+      message.includes('resource_exhausted');
   }
 
   summarizeCandles(ohlcv) {
@@ -355,10 +396,21 @@ Candle Summary: ${JSON.stringify(candleSummary)}
     const cached = this.getCached(cacheKey);
     if (cached) return cached;
 
+    const lastDecision = this.getLastDecision(symbol);
+    if (lastDecision && Date.now() - lastDecision.at < AI_VALIDATION_MIN_INTERVAL_MS) {
+      return lastDecision.value;
+    }
+
+    if (AIGridValidator.rateLimitedUntil > Date.now()) {
+      const stale = this.getLastDecision(symbol, true);
+      if (stale) return stale.value;
+      return AIGridValidator.block('AI validation skipped: Gemini rate-limit backoff active');
+    }
+
     try {
       const ohlcv = await retry(
         () => this.exchange.fetchOHLCV(symbol, AI_VALIDATION_TIMEFRAME, undefined, AI_VALIDATION_LOOKBACK),
-        AI_VALIDATION_RETRIES
+        Math.max(AI_VALIDATION_RETRIES, 1)
       );
       const prompt = this.buildPrompt(symbol, context, this.summarizeCandles(ohlcv));
       for (let attempt = 1; attempt <= AI_VALIDATION_RETRIES + 1; attempt++) {
@@ -368,18 +420,33 @@ Candle Summary: ${JSON.stringify(candleSummary)}
           if (decision.confidence < AI_MIN_CONFIDENCE) {
             const blocked = AIGridValidator.block(`Low AI confidence: ${decision.reason}`, decision.confidence);
             this.setCached(cacheKey, blocked);
+            this.rememberDecision(symbol, blocked);
             return blocked;
           }
           this.setCached(cacheKey, decision);
+          this.rememberDecision(symbol, decision);
           return decision;
         } catch (err) {
+          if (this.isRateLimitError(err)) {
+            AIGridValidator.rateLimitedUntil = Date.now() + AI_VALIDATION_BACKOFF_MS;
+            const stale = this.getLastDecision(symbol, true);
+            if (stale) return stale.value;
+            throw err;
+          }
           if (attempt > AI_VALIDATION_RETRIES) throw err;
           await sleep(1000 * attempt);
         }
       }
     } catch (err) {
-      const blocked = AIGridValidator.block(`AI validation failed: ${err.message}`);
+      const reason = this.isRateLimitError(err)
+        ? `AI validation rate-limited; paused Gemini calls for ${Math.round(AI_VALIDATION_BACKOFF_MS / 60000)}m`
+        : `AI validation failed: ${err.message}`;
+      if (this.isRateLimitError(err)) {
+        AIGridValidator.rateLimitedUntil = Date.now() + AI_VALIDATION_BACKOFF_MS;
+      }
+      const blocked = AIGridValidator.block(reason);
       this.setCached(cacheKey, blocked);
+      this.rememberDecision(symbol, blocked);
       return blocked;
     }
 
