@@ -619,13 +619,36 @@ class SpotGridEngine {
   }
 
   getBaseFree(balance, symbol) {
-    const base = symbol.split('/')[0];
-    return Number(balance?.free?.[base] || 0);
+    return Number(balance?.free?.[this.getBaseAsset(symbol)] || 0);
   }
 
   getQuoteFree(balance, symbol) {
-    const quote = symbol.split('/')[1].split(':')[0];
-    return Number(balance?.free?.[quote] || 0);
+    return Number(balance?.free?.[this.getQuoteAsset(symbol)] || 0);
+  }
+
+  getBaseAsset(symbol) {
+    return symbol.split('/')[0];
+  }
+
+  getQuoteAsset(symbol) {
+    return symbol.split('/')[1].split(':')[0];
+  }
+
+  getTradeFeeCurrency(trade) {
+    return String(trade.fee?.currency || trade.info?.commissionAsset || '').toUpperCase();
+  }
+
+  getTradeFeeCost(trade) {
+    return Number(trade.fee?.cost || trade.info?.commission || 0);
+  }
+
+  amountAfterBuyFee(symbol, trade) {
+    const amount = Number(trade.amount);
+    const feeCost = this.getTradeFeeCost(trade);
+    const feeCurrency = this.getTradeFeeCurrency(trade);
+    const base = this.getBaseAsset(symbol).toUpperCase();
+    if (feeCurrency === base) return Math.max(0, amount - feeCost);
+    return amount;
   }
 
   amountForBuy(symbol, price) {
@@ -660,16 +683,21 @@ class SpotGridEngine {
       const price = Number(trade.price);
       const amount = Number(trade.amount);
       const levelIndex = Number(orderMeta.levelIndex);
-      const fee = Number(trade.fee?.cost || 0);
+      const fee = this.getTradeFeeCost(trade);
 
       if (side === 'buy') {
-        symState.lastBuyByLevel[levelIndex] = { price, amount, fee, at: trade.datetime };
+        const sellableAmount = this.amountAfterBuyFee(symbol, trade);
+        symState.lastBuyByLevel[levelIndex] = { price, amount, sellableAmount, fee, at: trade.datetime };
         this.state.data.totals.filledBuys++;
-        await this._sendAlert(`[GRID BUY] ${symbol} amount=${amount} @ ${price}`);
+        await this._sendAlert(`[GRID BUY] ${symbol} amount=${amount} @ ${price} | sellable=${sellableAmount}`);
         if (GRID_REFILL_ON_FILLED && aiDecision.allowTrading && aiDecision.allowSell && levelIndex + 1 < levels.length) {
           const sellPrice = levels[levelIndex + 1];
           if ((sellPrice - price) / price >= GRID_MIN_PROFIT_PCT) {
-            await this.placeLimit(symbol, 'sell', levelIndex + 1, sellPrice, amount);
+            if (sellableAmount > 0) {
+              await this.placeLimit(symbol, 'sell', levelIndex + 1, sellPrice, sellableAmount);
+            } else {
+              console.warn(`[SKIP] ${symbol} SELL refill level=${levelIndex + 1} | sellable amount is zero after buy fee`);
+            }
           }
         }
       }
