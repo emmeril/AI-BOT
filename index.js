@@ -1,218 +1,108 @@
-require("dotenv").config();
-const ccxt = require("ccxt");
-const fs = require("fs");
-const path = require("path");
-const https = require("https");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+require('dotenv').config();
+const ccxt = require('ccxt');
+const fs = require('fs').promises;
+const path = require('path');
+const https = require('https');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 // ------------------------------
-//  Configuration
+//  Configuration Manager
 // ------------------------------
+class Config {
+  static get(key, fallback) {
+    const value = process.env[key];
+    return value === undefined || value === '' ? fallback : value;
+  }
 
-const DEFAULT_SYMBOLS = "BTC/USDT:USDT,ETH/USDT:USDT,DOGE/USDT:USDT";
-const SYMBOLS = envList("SYMBOLS", DEFAULT_SYMBOLS);
-const MAX_OPEN_POSITIONS = envNumber("MAX_OPEN_POSITIONS", 2);
-const LEVERAGE = envNumber("LEVERAGE", 10);
-const ORDER_SIZE_USDT = envNumber("ORDER_SIZE_USDT", 10);
-const TIMEFRAME = envValue("TIMEFRAME", "15m");
-const LOOKBACK_CANDLES = envNumber("LOOKBACK_CANDLES", 200);
-const INTERVAL_MINUTES = envNumber("INTERVAL_MINUTES", 5);
+  static number(key, fallback) {
+    const parsed = Number(Config.get(key, fallback));
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  static boolean(key, fallback = true) {
+    const value = process.env[key];
+    if (value === undefined || value === '') return fallback;
+    return value !== 'false';
+  }
+
+  static true(key) {
+    return process.env[key] === 'true';
+  }
+
+  static list(key, fallback) {
+    return String(Config.get(key, fallback))
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+  }
+}
+
+// ------------------------------
+//  Constants
+// ------------------------------
+const SYMBOLS = Config.list('SYMBOLS', 'BTC/USDT,ETH/USDT,DOGE/USDT');
+const MAX_OPEN_POSITIONS = Config.number('MAX_OPEN_POSITIONS', 2);
+const ORDER_SIZE_USDT = Config.number('ORDER_SIZE_USDT', 20);
+const TIMEFRAME = Config.get('TIMEFRAME', '15m');
+const LOOKBACK_CANDLES = Config.number('LOOKBACK_CANDLES', 200);
+const INTERVAL_MINUTES = Config.number('INTERVAL_MINUTES', 5);
 const INTERVAL_MS = INTERVAL_MINUTES * 60 * 1000;
-const SCAN_ROTATION_BATCH_SIZE = Math.max(0, envNumber("SCAN_ROTATION_BATCH_SIZE", 0));
-const AI_SIGNAL_CACHE_ENABLED = envBoolean("AI_SIGNAL_CACHE_ENABLED", true);
-const AI_SIGNAL_CACHE_TTL_MS = envNumber(
-  "AI_SIGNAL_CACHE_TTL_MS",
-  Math.max(INTERVAL_MS * 3, 60 * 1000)
-);
+const AI_SIGNAL_CACHE_ENABLED = Config.boolean('AI_SIGNAL_CACHE_ENABLED', true);
+const AI_SIGNAL_CACHE_TTL_MS = Config.number('AI_SIGNAL_CACHE_TTL_MS', Math.max(INTERVAL_MS * 3, 60000));
 
-const SR_WINDOW_SIZE = envNumber("SR_WINDOW_SIZE", 5);
-const SR_LEVEL_TOLERANCE = envNumber("SR_LEVEL_TOLERANCE", 0.005);
-const PRICE_PROXIMITY_THRESHOLD = envNumber("PRICE_PROXIMITY_THRESHOLD", 0.005);
+const SR_WINDOW_SIZE = Config.number('SR_WINDOW_SIZE', 5);
+const SR_LEVEL_TOLERANCE = Config.number('SR_LEVEL_TOLERANCE', 0.005);
+const PRICE_PROXIMITY_THRESHOLD = Config.number('PRICE_PROXIMITY_THRESHOLD', 0.005);
 
-const GEMINI_MODEL = envValue("GEMINI_MODEL", "gemini-1.5-flash-lite");
+const GEMINI_MODEL = Config.get('GEMINI_MODEL', 'gemini-1.5-flash-lite');
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-const MIN_AI_CONFIDENCE = envNumber("MIN_AI_CONFIDENCE", 65);
-const ALLOWED_AI_STRENGTHS = envList("ALLOWED_AI_STRENGTHS", "MEDIUM,STRONG,EXTREME").map(s => s.toUpperCase());
-const AI_RESPONSE_RETRIES = envNumber("AI_RESPONSE_RETRIES", 2);
+const MIN_AI_CONFIDENCE = Config.number('MIN_AI_CONFIDENCE', 65);
+const ALLOWED_AI_STRENGTHS = Config.list('ALLOWED_AI_STRENGTHS', 'MEDIUM,STRONG,EXTREME').map(s => s.toUpperCase());
+const AI_RESPONSE_RETRIES = Config.number('AI_RESPONSE_RETRIES', 2);
 
-const MAX_FUNDING_RATE = envNumber("MAX_FUNDING_RATE", 0.1) / 100;
-const MIN_RR = envNumber("MIN_RR", 1.5);
-const RISK_PER_TRADE_PCT = envNumber("RISK_PER_TRADE_PCT", 1) / 100;
-const MAX_DAILY_LOSS_PCT = envNumber("MAX_DAILY_LOSS_PCT", 3) / 100;
-const MAX_DAILY_LOSS_USDT = envNumber("MAX_DAILY_LOSS_USDT", 0);
-const MAX_CONSECUTIVE_LOSSES = envNumber("MAX_CONSECUTIVE_LOSSES", 3);
-const ATR_TP_MULTIPLIER = envNumber("ATR_TP_MULTIPLIER", 1.8);
-const ATR_SL_MULTIPLIER = envNumber("ATR_SL_MULTIPLIER", 1.5);
-const UNREALIZED_PROFIT_CLOSE_ENABLED = envBoolean("UNREALIZED_PROFIT_CLOSE_ENABLED", true);
-const UNREALIZED_PROFIT_CLOSE_MIN_USDT = envNumber("UNREALIZED_PROFIT_CLOSE_MIN_USDT", 0.02);
-const UNREALIZED_PROFIT_CLOSE_MIN_PCT = envNumber("UNREALIZED_PROFIT_CLOSE_MIN_PCT", 0);
-const UNREALIZED_PROFIT_CLOSE_FEE_RATE = envNumber("UNREALIZED_PROFIT_CLOSE_FEE_RATE", 0.0005);
-const UNREALIZED_PROFIT_CLOSE_FEE_SIDES = envNumber("UNREALIZED_PROFIT_CLOSE_FEE_SIDES", 2);
-const UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT = envNumber("UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT", 0);
-const UNREALIZED_CLOSE_SETTLE_DELAY_MS = Math.max(
-  0,
-  envNumber("UNREALIZED_CLOSE_SETTLE_DELAY_MS", envNumber("UNREALIZED_PROFIT_CLOSE_SETTLE_DELAY_MS", 2000))
-);
-const UNREALIZED_LOSS_CLOSE_ENABLED = envBoolean("UNREALIZED_LOSS_CLOSE_ENABLED", true);
-const UNREALIZED_LOSS_CLOSE_PCT = envNumber("UNREALIZED_LOSS_CLOSE_PCT", 30);
-const UNREALIZED_PROFIT_MONITOR_INTERVAL_MS = Math.max(250, envNumber("UNREALIZED_PROFIT_MONITOR_INTERVAL_MS", 1000));
-const LONG_ONLY = envBoolean("LONG_ONLY");
-const REVERSAL_COOLDOWN_MINUTES = envNumber("REVERSAL_COOLDOWN_MINUTES", 10);
-const SYMBOL_COOLDOWN_ENABLED = envBoolean("SYMBOL_COOLDOWN_ENABLED");
-const SYMBOL_COOLDOWN_MINUTES = envNumber("SYMBOL_COOLDOWN_MINUTES", 30);
-const SYMBOL_ERROR_COOLDOWN_MINUTES = envNumber("SYMBOL_ERROR_COOLDOWN_MINUTES", 5);
-const KILL_SWITCH_ENABLED = envBoolean("KILL_SWITCH_ENABLED");
-const STOP_TRADING = envTrue("STOP_TRADING");
-const KILL_SWITCH_FILE = envValue("KILL_SWITCH_FILE", "bot-paused.flag");
-const KILL_SWITCH_PATH = resolveProjectPath(KILL_SWITCH_FILE);
+const MIN_RR = Config.number('MIN_RR', 1.5);
+const MAX_DAILY_LOSS_PCT = Config.number('MAX_DAILY_LOSS_PCT', 3) / 100;
+const MAX_DAILY_LOSS_USDT = Config.number('MAX_DAILY_LOSS_USDT', 0);
+const MAX_CONSECUTIVE_LOSSES = Config.number('MAX_CONSECUTIVE_LOSSES', 3);
+const ATR_TP_MULTIPLIER = Config.number('ATR_TP_MULTIPLIER', 1.8);
+const ATR_SL_MULTIPLIER = Config.number('ATR_SL_MULTIPLIER', 1.5);
+const REVERSAL_COOLDOWN_MINUTES = Config.number('REVERSAL_COOLDOWN_MINUTES', 10);
+const SYMBOL_COOLDOWN_ENABLED = Config.boolean('SYMBOL_COOLDOWN_ENABLED');
+const SYMBOL_COOLDOWN_MINUTES = Config.number('SYMBOL_COOLDOWN_MINUTES', 30);
+const SYMBOL_ERROR_COOLDOWN_MINUTES = Config.number('SYMBOL_ERROR_COOLDOWN_MINUTES', 5);
+const KILL_SWITCH_ENABLED = Config.boolean('KILL_SWITCH_ENABLED');
+const STOP_TRADING = Config.true('STOP_TRADING');
+const KILL_SWITCH_FILE = Config.get('KILL_SWITCH_FILE', 'bot-paused.flag');
+const KILL_SWITCH_PATH = path.resolve(process.cwd(), KILL_SWITCH_FILE);
 
-const PROFIT_TRACKER_ENABLED = envBoolean("PROFIT_TRACKER_ENABLED");
-const PROFIT_TRACKER_FILE = envValue("PROFIT_TRACKER_FILE", "profit-ledger-sr.json");
-const PROFIT_LEDGER_PATH = resolveProjectPath(PROFIT_TRACKER_FILE);
-const RISK_STATE_FILE = envValue("RISK_STATE_FILE", "risk-state-sr.json");
-const RISK_STATE_PATH = resolveProjectPath(RISK_STATE_FILE);
+const PROFIT_TRACKER_ENABLED = Config.boolean('PROFIT_TRACKER_ENABLED');
+const PROFIT_TRACKER_FILE = Config.get('PROFIT_TRACKER_FILE', 'profit-ledger-spot.json');
+const PROFIT_LEDGER_PATH = path.resolve(process.cwd(), PROFIT_TRACKER_FILE);
+const RISK_STATE_FILE = Config.get('RISK_STATE_FILE', 'risk-state-spot.json');
+const RISK_STATE_PATH = path.resolve(process.cwd(), RISK_STATE_FILE);
 
-const FONNTE_ENABLED = envBoolean("FONNTE_ENABLED");
-const FONNTE_TOKEN = envValue("FONNTE_TOKEN", "");
-const FONNTE_TARGET = envValue("FONNTE_TARGET", "");
-const FONNTE_API_URL = envValue("FONNTE_API_URL", "https://api.fonnte.com/send");
-const FONNTE_COUNTRY_CODE = envValue("FONNTE_COUNTRY_CODE", "62");
+const FONNTE_ENABLED = Config.boolean('FONNTE_ENABLED');
+const FONNTE_TOKEN = Config.get('FONNTE_TOKEN', '');
+const FONNTE_TARGET = Config.get('FONNTE_TARGET', '');
+const FONNTE_API_URL = Config.get('FONNTE_API_URL', 'https://api.fonnte.com/send');
+const FONNTE_COUNTRY_CODE = Config.get('FONNTE_COUNTRY_CODE', '62');
 
-// ---------- LEARNING MEMORY ----------
-const LEARNING_MEMORY_ENABLED = envBoolean("LEARNING_MEMORY_ENABLED", true);
-const LEARNING_MEMORY_FILE = envValue("LEARNING_MEMORY_FILE", "learning-memory-sr.json");
-const LEARNING_MEMORY_PATH = resolveProjectPath(LEARNING_MEMORY_FILE);
-const LEARNING_MEMORY_MIN_TRADES = envNumber("LEARNING_MEMORY_MIN_TRADES", 5);
-const LEARNING_MEMORY_BAD_WIN_RATE = envNumber("LEARNING_MEMORY_BAD_WIN_RATE", 40); // percent
-const LEARNING_MEMORY_CONFIDENCE_PENALTY = envNumber("LEARNING_MEMORY_CONFIDENCE_PENALTY", 0.6);
+const LEARNING_MEMORY_ENABLED = Config.boolean('LEARNING_MEMORY_ENABLED', true);
+const LEARNING_MEMORY_FILE = Config.get('LEARNING_MEMORY_FILE', 'learning-memory-spot.json');
+const LEARNING_MEMORY_PATH = path.resolve(process.cwd(), LEARNING_MEMORY_FILE);
+const LEARNING_MEMORY_MIN_TRADES = Config.number('LEARNING_MEMORY_MIN_TRADES', 5);
+const LEARNING_MEMORY_BAD_WIN_RATE = Config.number('LEARNING_MEMORY_BAD_WIN_RATE', 40);
+const LEARNING_MEMORY_CONFIDENCE_PENALTY = Config.number('LEARNING_MEMORY_CONFIDENCE_PENALTY', 0.6);
 
 // ------------------------------
-//  Helper Functions
+//  Utility Functions
 // ------------------------------
-
-function envValue(key, fallback) {
-  const value = process.env[key];
-  return value === undefined || value === "" ? fallback : value;
-}
-
-function envNumber(key, fallback) {
-  const parsed = Number(envValue(key, fallback));
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function envBoolean(key, fallback = true) {
-  const value = process.env[key];
-  if (value === undefined || value === "") return fallback;
-  return value !== "false";
-}
-
-function envTrue(key) {
-  return process.env[key] === "true";
-}
-
-function envList(key, fallback) {
-  return String(envValue(key, fallback))
-    .split(",")
-    .map(value => value.trim())
-    .filter(Boolean);
-}
-
-function parseTimeframeToMs(timeframe) {
-  const text = String(timeframe || "").trim().toLowerCase();
-  const match = text.match(/^(\d+)(m|h|d|w)$/);
-  if (!match) return INTERVAL_MS;
-  const value = Number(match[1]);
-  const unit = match[2];
-  const unitMs = {
-    m: 60 * 1000,
-    h: 60 * 60 * 1000,
-    d: 24 * 60 * 60 * 1000,
-    w: 7 * 24 * 60 * 60 * 1000,
-  }[unit];
-  return value * unitMs;
-}
-
-function resolveProjectPath(fileName) {
-  return path.resolve(process.cwd(), fileName);
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function roundNumber(value, digits = 6) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return null;
-  return Number(number.toFixed(digits));
-}
-
-function isCacheEntryValid(entry) {
-  return Boolean(entry && entry.expiresAt > Date.now());
-}
-
-function pruneCacheEntries(cache, maxEntries) {
-  const now = Date.now();
-  for (const [key, entry] of cache.entries()) {
-    if (!entry?.expiresAt || entry.expiresAt <= now) {
-      cache.delete(key);
-    }
-  }
-
-  while (cache.size > maxEntries) {
-    const firstKey = cache.keys().next().value;
-    if (firstKey === undefined) break;
-    cache.delete(firstKey);
-  }
-}
-
-function cleanupAiSignalCache() {
-  if (!AI_SIGNAL_CACHE_ENABLED) {
-    aiSignalCache.clear();
-    return;
-  }
-  pruneCacheEntries(aiSignalCache, 500);
-}
-
-function getAiSignalCacheKey(symbol, ohlcv) {
-  const candleTimestamp = ohlcv?.[ohlcv.length - 1]?.[0] || 0;
-  const timeframeMs = parseTimeframeToMs(TIMEFRAME);
-  const candleBucket = candleTimestamp ? Math.floor(candleTimestamp / timeframeMs) : 0;
-  return [symbol, TIMEFRAME, candleBucket, LONG_ONLY ? "LONG_ONLY" : "BOTH"].join("|");
-}
-
-function getSymbolsForCurrentCycle(activeSymbols = SYMBOLS) {
-  const symbols = Array.isArray(activeSymbols) ? activeSymbols.filter(Boolean) : [];
-  if (symbols.length <= 1) return symbols;
-
-  const batchSize = Math.max(0, SCAN_ROTATION_BATCH_SIZE);
-  if (!batchSize || batchSize >= symbols.length) return symbols;
-
-  const start = scanRotationOffset % symbols.length;
-  const end = start + batchSize;
-  scanRotationOffset = (start + batchSize) % symbols.length;
-
-  if (end <= symbols.length) return symbols.slice(start, end);
-  return symbols.slice(start).concat(symbols.slice(0, end - symbols.length));
-}
-
-function getCachedAISignal(cacheKey) {
-  if (!AI_SIGNAL_CACHE_ENABLED) return null;
-  const entry = aiSignalCache.get(cacheKey);
-  if (!isCacheEntryValid(entry)) {
-    if (entry) aiSignalCache.delete(cacheKey);
-    return null;
-  }
-  return entry.value;
-}
-
-function setCachedAISignal(cacheKey, value, ttlMs = AI_SIGNAL_CACHE_TTL_MS) {
-  if (!AI_SIGNAL_CACHE_ENABLED) return;
-  aiSignalCache.set(cacheKey, {
-    value,
-    expiresAt: Date.now() + ttlMs,
-  });
-  pruneCacheEntries(aiSignalCache, 500);
+  const num = Number(value);
+  return Number.isFinite(num) ? Number(num.toFixed(digits)) : null;
 }
 
 async function retry(fn, retries = 3, delay = 2000) {
@@ -220,65 +110,10 @@ async function retry(fn, retries = 3, delay = 2000) {
     try {
       return await fn();
     } catch (err) {
-      const last = i === retries - 1;
-      console.warn(`[WARN] Retry ${i + 1}/${retries}:`, err.message);
-      if (last) throw err;
+      if (i === retries - 1) throw err;
       await sleep(delay);
     }
   }
-}
-
-// ------------------------------
-//  Exchange Setup
-// ------------------------------
-
-const exchange = new ccxt.binance({
-  apiKey: process.env.EXCHANGE_API_KEY,
-  secret: process.env.EXCHANGE_SECRET,
-  enableRateLimit: true,
-  options: { defaultType: "future" },
-});
-
-if (process.env.EXCHANGE_DEMO === "true") {
-  exchange.enable_demo_trading(true);
-  console.log("[DEMO] Futures demo mode enabled");
-}
-
-// ------------------------------
-//  Global State
-// ------------------------------
-
-let isTrading = false;
-let lastPositionChangeTime = 0;
-let scanRotationOffset = 0;
-let profitLedger = loadProfitLedger();
-let riskState = loadRiskState();
-let aiSignalCache = new Map();
-let circuitBreakerState = { consecutiveErrors: 0, pausedUntil: 0, lastError: null };
-let fonnteAlertWarningShown = false;
-
-// Learning memory state
-let learningMemory = null;
-// pendingTradeSetups: key = `${symbol}_${side}` (side uppercase LONG/SHORT)
-let pendingTradeSetups = new Map();
-// pendingPositionPnL: key = `${symbol}_${side}` -> { netProfitSum, strength, rr, recorded, lastUpdate }
-let pendingPositionPnL = new Map();
-
-// ------------------------------
-//  Kill Switch
-// ------------------------------
-
-function killSwitchActive() {
-  if (!KILL_SWITCH_ENABLED) return false;
-  if (STOP_TRADING) {
-    console.warn("[KILL] STOP_TRADING=true, new entries disabled");
-    return true;
-  }
-  if (fs.existsSync(KILL_SWITCH_PATH)) {
-    console.warn(`[KILL] ${KILL_SWITCH_FILE} exists, new entries disabled`);
-    return true;
-  }
-  return false;
 }
 
 function getNextCandleDelay() {
@@ -287,1519 +122,732 @@ function getNextCandleDelay() {
   return next - now;
 }
 
-// ------------------------------
-//  Alerts (Fonnte)
-// ------------------------------
-
-function shouldSendFonnteAlerts() {
-  return Boolean(FONNTE_ENABLED && FONNTE_TOKEN && FONNTE_TARGET);
-}
-
-async function postFormUrlEncoded(urlString, formBody, token) {
-  return new Promise((resolve, reject) => {
-    const url = new URL(urlString);
-    const request = https.request(
-      {
-        method: "POST",
-        hostname: url.hostname,
-        port: url.port || 443,
-        path: `${url.pathname}${url.search}`,
-        headers: {
-          Authorization: token,
-          "Content-Type": "application/x-www-form-urlencoded",
-          "Content-Length": Buffer.byteLength(formBody),
-        },
-      },
-      response => {
-        let data = "";
-        response.on("data", chunk => (data += chunk));
-        response.on("end", () => resolve({ statusCode: response.statusCode || 0, body: data }));
-      }
-    );
-    request.on("error", reject);
-    request.write(formBody);
-    request.end();
-  });
-}
-
-async function sendFonnteAlert(message) {
-  if (!shouldSendFonnteAlerts()) {
-    if (FONNTE_ENABLED && !fonnteAlertWarningShown) {
-      fonnteAlertWarningShown = true;
-      console.warn("[FONNTE] Alert skipped: set FONNTE_TOKEN and FONNTE_TARGET");
-    }
-    return false;
-  }
+function killSwitchActive() {
+  if (!KILL_SWITCH_ENABLED) return false;
+  if (STOP_TRADING) return true;
   try {
-    const formBody = new URLSearchParams({
-      target: FONNTE_TARGET,
-      message,
-      countryCode: String(FONNTE_COUNTRY_CODE),
-    }).toString();
-    const response = await postFormUrlEncoded(FONNTE_API_URL, formBody, FONNTE_TOKEN);
-    let payload = null;
-    try {
-      payload = JSON.parse(response.body);
-    } catch {
-      // ignore
-    }
-    const success =
-      response.statusCode >= 200 &&
-      response.statusCode < 300 &&
-      (payload?.status !== false && payload?.Status !== false);
-    if (!success) console.warn(`[FONNTE] Alert failed: ${response.statusCode} ${response.body}`);
-    else console.log("[FONNTE] Trade alert sent");
-    return success;
-  } catch (err) {
-    console.warn(`[FONNTE] Alert error: ${err.message}`);
+    return require('fs').existsSync(KILL_SWITCH_PATH);
+  } catch {
     return false;
   }
 }
 
-function formatTradeOpenAlert({ symbol, signal, entryPrice, contracts, slPrice, tpPrice, rr, confidence, strength }) {
-  const lines = [
-    "[TRADE OPEN]",
-    `Symbol: ${symbol}`,
-    `Side: ${signal}`,
-    `Entry: ${roundNumber(entryPrice, 10)}`,
-    `Contracts: ${roundNumber(contracts, 8)}`,
-  ];
-
-  if (UNREALIZED_LOSS_CLOSE_ENABLED) {
-    lines.push(`SL Guard: Unrealized PnL <= -${UNREALIZED_LOSS_CLOSE_PCT}% of margin`);
-  } else {
-    lines.push(`SL: ${roundNumber(slPrice, 10)}`);
-  }
-
-  if (UNREALIZED_PROFIT_CLOSE_ENABLED) {
-    const profitParts = [`TP Guard: Unrealized net PnL >= ${roundNumber(UNREALIZED_PROFIT_CLOSE_MIN_USDT, 10)} USDT after fees`];
-    if (UNREALIZED_PROFIT_CLOSE_MIN_PCT > 0) {
-      profitParts.push(`>= ${UNREALIZED_PROFIT_CLOSE_MIN_PCT}% of notional`);
-    }
-    lines.push(profitParts.join(" | "));
-  } else {
-    lines.push(`TP: ${roundNumber(tpPrice, 10)}`);
-  }
-
-  lines.push(
-    `RR: ${roundNumber(rr, 2)}`,
-    `Confidence: ${confidence ?? "-"}`,
-    `Strength: ${strength || "-"}`
-  );
-
-  return lines.join("\n");
-}
-
 // ------------------------------
-//  Profit Ledger
+//  Exchange Singleton
 // ------------------------------
+class ExchangeManager {
+  static instance = null;
 
-function createEmptyProfitLedger() {
-  const now = new Date().toISOString();
-  return {
-    symbol: SYMBOLS.join(","),
-    startedAt: now,
-    updatedAt: now,
-    lastTradeTimestamp: Date.now(),
-    processedTradeIds: [],
-    totals: {
-      grossRealizedPnl: 0,
-      fees: 0,
-      netProfit: 0,
-      tradeCount: 0,
-      profitEvents: 0,
-      lossEvents: 0,
-    },
-    recentTrades: [],
-  };
-}
-
-function normalizeProfitLedger(ledger) {
-  const empty = createEmptyProfitLedger();
-  return {
-    ...empty,
-    ...ledger,
-    processedTradeIds: Array.isArray(ledger?.processedTradeIds) ? ledger.processedTradeIds : [],
-    totals: { ...empty.totals, ...(ledger?.totals || {}) },
-    recentTrades: Array.isArray(ledger?.recentTrades) ? ledger.recentTrades : [],
-  };
-}
-
-function loadProfitLedger() {
-  if (!PROFIT_TRACKER_ENABLED) return createEmptyProfitLedger();
-  try {
-    if (fs.existsSync(PROFIT_LEDGER_PATH)) {
-      const data = JSON.parse(fs.readFileSync(PROFIT_LEDGER_PATH, "utf8"));
-      return normalizeProfitLedger(data);
-    }
-  } catch (err) {
-    console.warn("[WARN] Profit ledger reset:", err.message);
-  }
-  return createEmptyProfitLedger();
-}
-
-function saveProfitLedger() {
-  if (!PROFIT_TRACKER_ENABLED) return;
-  profitLedger.updatedAt = new Date().toISOString();
-  fs.writeFileSync(PROFIT_LEDGER_PATH, JSON.stringify(profitLedger, null, 2));
-}
-
-function tradeIdOf(trade) {
-  return String(trade.id || trade.info?.id || `${trade.timestamp}-${trade.order}-${trade.side}-${trade.amount}-${trade.price}`);
-}
-
-function numberFromTrade(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function getRealizedPnl(trade) {
-  return numberFromTrade(trade.info?.realizedPnl || trade.info?.realizedProfit || trade.realizedPnl);
-}
-
-function getTradeFee(trade) {
-  const feeCost = numberFromTrade(trade.fee?.cost);
-  if (feeCost > 0) return feeCost;
-  return Math.abs(numberFromTrade(trade.info?.commission));
-}
-
-async function syncTradesForSymbols({ since, onTrade, errorLabel }) {
-  let newTrades = 0;
-  for (const symbol of SYMBOLS) {
-    try {
-      const trades = await retry(() => exchange.fetchMyTrades(symbol, since, 100));
-      const sorted = trades.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-      for (const trade of sorted) {
-        if (await onTrade(trade)) newTrades++;
-      }
-    } catch (err) {
-      console.warn(`${symbol} ${errorLabel} sync error: ${err.message}`);
-    }
-  }
-  return newTrades;
-}
-
-function applyTradeToProfitLedger(trade) {
-  const id = tradeIdOf(trade);
-  if (profitLedger.processedTradeIds.includes(id)) return false;
-  const realizedPnl = getRealizedPnl(trade);
-  const fee = getTradeFee(trade);
-  const netProfit = realizedPnl - fee;
-  profitLedger.processedTradeIds.push(id);
-  profitLedger.processedTradeIds = profitLedger.processedTradeIds.slice(-1000);
-  profitLedger.lastTradeTimestamp = Math.max(profitLedger.lastTradeTimestamp || 0, trade.timestamp || 0);
-  profitLedger.totals.grossRealizedPnl += realizedPnl;
-  profitLedger.totals.fees += fee;
-  profitLedger.totals.netProfit += netProfit;
-  profitLedger.totals.tradeCount++;
-  if (netProfit > 0) profitLedger.totals.profitEvents++;
-  if (netProfit < 0) profitLedger.totals.lossEvents++;
-  profitLedger.recentTrades.unshift({
-    id,
-    symbol: trade.symbol,
-    time: trade.datetime || new Date(trade.timestamp).toISOString(),
-    side: trade.side,
-    price: numberFromTrade(trade.price),
-    amount: numberFromTrade(trade.amount),
-    realizedPnl,
-    fee,
-    netProfit,
-  });
-  profitLedger.recentTrades = profitLedger.recentTrades.slice(0, 30);
-  return true;
-}
-
-async function syncProfitLedger() {
-  if (!PROFIT_TRACKER_ENABLED) return;
-  try {
-    const since = profitLedger.lastTradeTimestamp ? profitLedger.lastTradeTimestamp - 1 : undefined;
-    const newTrades = await syncTradesForSymbols({ since, onTrade: applyTradeToProfitLedger, errorLabel: "profit" });
-    if (newTrades > 0) saveProfitLedger();
-    console.log(`[PROFIT] Synced ${newTrades} trades. Net profit: ${profitLedger.totals.netProfit.toFixed(6)} USDT`);
-  } catch (err) {
-    console.warn("[WARN] Profit sync:", err.message);
-  }
-}
-
-// ------------------------------
-//  Risk State (cooldown, daily PnL, consecutive losses)
-// ------------------------------
-
-function createEmptyRiskState() {
-  return {
-    dayKey: null,
-    dayStartEquity: 0,
-    dailyNetPnL: 0,
-    consecutiveLosses: 0,
-    processedTradeIds: [],
-    symbolCooldowns: {},
-    lastSyncedAt: 0,
-    updatedAt: new Date().toISOString(),
-  };
-}
-
-function normalizeRiskState(state) {
-  const empty = createEmptyRiskState();
-  return {
-    ...empty,
-    ...state,
-    processedTradeIds: Array.isArray(state?.processedTradeIds) ? state.processedTradeIds : [],
-    symbolCooldowns: state?.symbolCooldowns && typeof state.symbolCooldowns === "object" ? state.symbolCooldowns : {},
-  };
-}
-
-function loadRiskState() {
-  try {
-    if (fs.existsSync(RISK_STATE_PATH)) {
-      const data = JSON.parse(fs.readFileSync(RISK_STATE_PATH, "utf8"));
-      return normalizeRiskState(data);
-    }
-  } catch (err) {
-    console.warn("[WARN] Risk state reset:", err.message);
-  }
-  return createEmptyRiskState();
-}
-
-function saveRiskState() {
-  riskState.updatedAt = new Date().toISOString();
-  fs.writeFileSync(RISK_STATE_PATH, JSON.stringify(riskState, null, 2));
-}
-
-async function getAccountEquity() {
-  const balance = await retry(() => exchange.fetchBalance());
-  return Number(balance?.USDT?.total || balance?.USDT?.free || 0);
-}
-
-function isRealizedTrade(trade) {
-  return Math.abs(getRealizedPnl(trade)) > 0.0000001;
-}
-
-// ---------- LEARNING MEMORY IMPLEMENTATION ----------
-function getRRRange(rr) {
-  if (rr < 1.5) return "<1.5";
-  if (rr < 2) return "1.5-2";
-  return ">2";
-}
-
-function createEmptyLearningMemory() {
-  return {
-    version: 1,
-    stats: {
-      bySymbolSide: {},
-      bySymbolStrength: {},
-      byRRRange: {},
-    },
-    lastUpdated: new Date().toISOString(),
-  };
-}
-
-function loadLearningMemory() {
-  if (!LEARNING_MEMORY_ENABLED) return createEmptyLearningMemory();
-  try {
-    if (fs.existsSync(LEARNING_MEMORY_PATH)) {
-      const data = JSON.parse(fs.readFileSync(LEARNING_MEMORY_PATH, "utf8"));
-      if (!data.stats) data.stats = createEmptyLearningMemory().stats;
-      if (!data.stats.bySymbolSide) data.stats.bySymbolSide = {};
-      if (!data.stats.bySymbolStrength) data.stats.bySymbolStrength = {};
-      if (!data.stats.byRRRange) data.stats.byRRRange = {};
-      return data;
-    }
-  } catch (err) {
-    console.warn("[MEMORY] Failed to load, starting fresh:", err.message);
-  }
-  return createEmptyLearningMemory();
-}
-
-function saveLearningMemory() {
-  if (!LEARNING_MEMORY_ENABLED) return;
-  learningMemory.lastUpdated = new Date().toISOString();
-  fs.writeFileSync(LEARNING_MEMORY_PATH, JSON.stringify(learningMemory, null, 2));
-}
-
-function updateMemoryCategory(categoryType, key, isWin, pnl) {
-  const category = learningMemory.stats[categoryType];
-  if (!category) {
-    console.error(`[MEMORY] Unknown category type: ${categoryType}`);
-    return;
-  }
-  if (!category[key]) {
-    category[key] = { wins: 0, losses: 0, totalPnl: 0 };
-  }
-  const entry = category[key];
-  if (isWin) entry.wins++;
-  else entry.losses++;
-  entry.totalPnl += pnl;
-}
-
-function recordTradeOutcome(symbol, side, netProfit, strength, rr) {
-  if (!LEARNING_MEMORY_ENABLED) return;
-  
-  const isWin = netProfit > 0;
-  const pnl = netProfit;
-
-  const symbolSideKey = `${symbol}_${side.toUpperCase()}`;
-  updateMemoryCategory("bySymbolSide", symbolSideKey, isWin, pnl);
-
-  const symbolStrengthKey = `${symbol}_${strength}`;
-  updateMemoryCategory("bySymbolStrength", symbolStrengthKey, isWin, pnl);
-
-  const rrRange = getRRRange(rr);
-  updateMemoryCategory("byRRRange", rrRange, isWin, pnl);
-
-  saveLearningMemory();
-  console.log(`[MEMORY] Recorded ${isWin ? "WIN" : "LOSS"} for ${symbol} ${side} | strength=${strength} | RR=${rrRange} | PnL=${pnl.toFixed(2)}`);
-}
-
-function getWinRate(categoryStats) {
-  if (!categoryStats) return null;
-  const total = categoryStats.wins + categoryStats.losses;
-  if (total === 0) return null;
-  return (categoryStats.wins / total) * 100;
-}
-
-function adjustConfidenceWithMemory(symbol, signal, strength, rr, originalConfidence) {
-  if (!LEARNING_MEMORY_ENABLED) return originalConfidence;
-
-  const symbolSideKey = `${symbol}_${signal.toUpperCase()}`;
-  const symbolStrengthKey = `${symbol}_${strength}`;
-  const rrRange = getRRRange(rr);
-
-  let worstWinRate = 100;
-  let worstCategory = null;
-
-  const checkCategory = (key, categoryType) => {
-    const cat = learningMemory.stats[categoryType]?.[key];
-    if (!cat) return;
-    const total = cat.wins + cat.losses;
-    if (total >= LEARNING_MEMORY_MIN_TRADES) {
-      const wr = getWinRate(cat);
-      if (wr !== null && wr < worstWinRate) {
-        worstWinRate = wr;
-        worstCategory = `${categoryType}.${key}`;
-      }
-    }
-  };
-
-  checkCategory(symbolSideKey, "bySymbolSide");
-  checkCategory(symbolStrengthKey, "bySymbolStrength");
-  checkCategory(rrRange, "byRRRange");
-
-  if (worstCategory && worstWinRate < LEARNING_MEMORY_BAD_WIN_RATE) {
-    const penalty = LEARNING_MEMORY_CONFIDENCE_PENALTY;
-    const newConf = Math.floor(originalConfidence * penalty);
-    console.log(`[MEMORY] Penalty applied: win rate ${worstWinRate.toFixed(1)}% in ${worstCategory} → confidence ${originalConfidence} → ${newConf}`);
-    return newConf;
-  }
-
-  return originalConfidence;
-}
-
-// ------------------------------
-//  Risk State Trade Processing (without per‑fill side effects)
-// ------------------------------
-
-async function applyTradeToRiskState(trade) {
-  const id = tradeIdOf(trade);
-  if (riskState.processedTradeIds.includes(id)) return false;
-  
-  const realizedPnl = getRealizedPnl(trade);
-  const fee = getTradeFee(trade);
-  const netProfit = realizedPnl - fee;
-  
-  riskState.processedTradeIds.push(id);
-  riskState.processedTradeIds = riskState.processedTradeIds.slice(-1000);
-  riskState.lastSyncedAt = Math.max(riskState.lastSyncedAt || 0, trade.timestamp || 0);
-  riskState.dailyNetPnL += netProfit;
-  saveRiskState();   // persist after each trade for durability
-  
-  const symbol = trade.symbol;
-  const realizedTrade = isRealizedTrade(trade);
-  // Realized PnL is reported on the closing fill. A sell closes a LONG,
-  // while a buy closes a SHORT, so use the inverse of the fill side for
-  // position-level learning-memory keys.
-  const side = realizedTrade
-    ? trade.side === "sell" ? "LONG" : "SHORT"
-    : trade.side === "buy" ? "LONG" : "SHORT";
-  const posKey = `${symbol}_${side}`;
-  
-  if (realizedTrade) {
-    if (!pendingPositionPnL.has(posKey)) {
-      const setup = pendingTradeSetups.get(posKey);
-      pendingPositionPnL.set(posKey, {
-        netProfitSum: 0,
-        strength: setup?.strength || null,
-        rr: setup?.rr || null,
-        recorded: false,
-        lastUpdate: Date.now()
+  static getInstance() {
+    if (!this.instance) {
+      this.instance = new ccxt.binance({
+        apiKey: process.env.EXCHANGE_API_KEY,
+        secret: process.env.EXCHANGE_SECRET,
+        enableRateLimit: true,
+        options: { defaultType: 'spot' },
       });
     }
-    const acc = pendingPositionPnL.get(posKey);
-    acc.netProfitSum += netProfit;
-    acc.lastUpdate = Date.now();
+    return this.instance;
   }
-  return true;
 }
 
 // ------------------------------
-//  Position Finalization (once per position)
+//  Technical Indicators
 // ------------------------------
-
-async function finalizeClosedPosition(symbol, side, netProfitTotal, strength, rr) {
-  // Update risk state: consecutive losses & cooldown
-  if (netProfitTotal < 0) {
-    riskState.consecutiveLosses++;
-    if (SYMBOL_COOLDOWN_ENABLED) {
-      setSymbolCooldown(symbol, SYMBOL_COOLDOWN_MINUTES, `loss ${netProfitTotal.toFixed(2)} USDT`);
+class Indicators {
+  static calculateATR(ohlcv, period = 14) {
+    if (!ohlcv?.length || ohlcv.length <= period) return null;
+    const trs = [];
+    for (let i = 1; i < ohlcv.length; i++) {
+      const prevClose = ohlcv[i - 1][4];
+      const high = ohlcv[i][2];
+      const low = ohlcv[i][3];
+      const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
+      trs.push(tr);
     }
-  } else if (netProfitTotal > 0) {
-    riskState.consecutiveLosses = 0;
-  }
-  saveRiskState();
-
-  // Learning memory
-  if (LEARNING_MEMORY_ENABLED && strength && rr) {
-    recordTradeOutcome(symbol, side, netProfitTotal, strength, rr);
+    const recent = trs.slice(-period);
+    if (recent.length < period) return null;
+    return recent.reduce((a, b) => a + b, 0) / recent.length;
   }
 
-  // Send one close alert per position
-  await sendFonnteAlert(`[POSITION CLOSED] ${symbol} ${side} | Net PnL: ${netProfitTotal.toFixed(2)} USDT`);
-}
-
-async function finalizeAnyClosedPositions() {
-  const openPositions = await getOpenPositions();
-  const openKeys = new Set(openPositions.map(p => `${p.symbol}_${p.side.toUpperCase()}`));
-
-  for (const [posKey, acc] of pendingPositionPnL.entries()) {
-    if (acc.recorded) continue;
-    if (!openKeys.has(posKey)) {
-      const [symbol, side] = posKey.split('_');
-      const setup = pendingTradeSetups.get(posKey);
-      await finalizeClosedPosition(symbol, side, acc.netProfitSum, setup?.strength, setup?.rr);
-      acc.recorded = true;
-      pendingTradeSetups.delete(posKey);
-      pendingPositionPnL.delete(posKey);
+  static calculateEMA(data, period) {
+    const k = 2 / (period + 1);
+    let ema = data[0];
+    for (let i = 1; i < data.length; i++) {
+      ema = data[i] * k + ema * (1 - k);
     }
+    return ema;
   }
-}
 
-function getDailyLossLimit() {
-  if (riskState.dayStartEquity <= 0) return MAX_DAILY_LOSS_USDT > 0 ? MAX_DAILY_LOSS_USDT : Infinity;
-  const percentLimit = riskState.dayStartEquity * MAX_DAILY_LOSS_PCT;
-  if (MAX_DAILY_LOSS_USDT > 0) return Math.min(percentLimit, MAX_DAILY_LOSS_USDT);
-  return percentLimit;
-}
-
-function resetDailyRiskState(dayKey, equity) {
-  riskState = { ...createEmptyRiskState(), dayKey, dayStartEquity: equity };
-  saveRiskState();
-}
-
-function ensureDailyRiskState(dayKey, equity) {
-  if (riskState.dayKey !== dayKey) {
-    resetDailyRiskState(dayKey, equity);
-  } else if (!riskState.dayStartEquity && equity > 0) {
-    riskState.dayStartEquity = equity;
-    saveRiskState();
+  static getVolumeTrend(ohlcv) {
+    const volumes = ohlcv.map(c => c[5]);
+    const recentAvg = volumes.slice(-5).reduce((a, b) => a + b, 0) / 5;
+    const prevAvg = volumes.slice(-10, -5).reduce((a, b) => a + b, 0) / 5;
+    return recentAvg > prevAvg ? 'increasing' : 'decreasing';
   }
-}
 
-async function syncRiskState() {
-  try {
-    const equity = await getAccountEquity();
-    const dayKey = new Date().toISOString().slice(0, 10);
-    ensureDailyRiskState(dayKey, equity);
-    const dayStart = new Date(`${dayKey}T00:00:00.000Z`).getTime();
-    const since = Math.max(dayStart, (riskState.lastSyncedAt || 0) > 0 ? riskState.lastSyncedAt - 1 : dayStart);
-    const newTrades = await syncTradesForSymbols({ since, onTrade: applyTradeToRiskState, errorLabel: "risk" });
-    if (newTrades > 0) saveRiskState();
-    console.log(`[RISK] Daily PnL: ${riskState.dailyNetPnL.toFixed(2)} USDT, consecutive losses: ${riskState.consecutiveLosses}`);
-  } catch (err) {
-    console.warn("[WARN] Risk sync:", err.message);
+  static getShortTrend(ohlcv) {
+    const closes = ohlcv.map(c => c[4]);
+    const ema5 = this.calculateEMA(closes.slice(-20), 5);
+    const prevEma5 = this.calculateEMA(closes.slice(-21, -1), 5);
+    return ema5 > prevEma5 ? 'bullish' : 'bearish';
   }
-}
-
-function riskGateAllowsTrading() {
-  const dailyLossLimit = getDailyLossLimit();
-  if (dailyLossLimit > 0 && riskState.dailyNetPnL <= -dailyLossLimit) {
-    console.warn(`[BLOCK] Daily loss limit -${dailyLossLimit.toFixed(2)} USDT reached`);
-    return false;
-  }
-  if (MAX_CONSECUTIVE_LOSSES > 0 && riskState.consecutiveLosses >= MAX_CONSECUTIVE_LOSSES) {
-    console.warn(`[BLOCK] Consecutive losses ${riskState.consecutiveLosses}/${MAX_CONSECUTIVE_LOSSES}`);
-    return false;
-  }
-  return true;
-}
-
-function setSymbolCooldown(symbol, minutes, reason) {
-  if (!SYMBOL_COOLDOWN_ENABLED || minutes <= 0) return;
-  riskState.symbolCooldowns[symbol] = {
-    until: Date.now() + minutes * 60 * 1000,
-    reason,
-    updatedAt: new Date().toISOString(),
-  };
-  console.warn(`[COOLDOWN] ${symbol} paused ${minutes}m: ${reason}`);
-  saveRiskState();
-}
-
-function symbolCooldownAllowsTrading(symbol) {
-  if (!SYMBOL_COOLDOWN_ENABLED) return true;
-  const cd = riskState.symbolCooldowns?.[symbol];
-  if (!cd) return true;
-  if (cd.until <= Date.now()) {
-    delete riskState.symbolCooldowns[symbol];
-    saveRiskState();
-    return true;
-  }
-  console.log(`[COOLDOWN] ${symbol} skipped for ${Math.ceil((cd.until - Date.now()) / 60000)}m: ${cd.reason}`);
-  return false;
-}
-
-function cleanupSymbolCooldowns() {
-  if (!riskState.symbolCooldowns) return false;
-  let changed = false;
-  const now = Date.now();
-  for (const [sym, cd] of Object.entries(riskState.symbolCooldowns)) {
-    if (cd.until <= now) {
-      delete riskState.symbolCooldowns[sym];
-      changed = true;
-    }
-  }
-  if (changed) saveRiskState();
-  return changed;
-}
-
-// ------------------------------
-//  Circuit Breaker
-// ------------------------------
-
-function circuitBreakerAllowsTrading() {
-  if (circuitBreakerState.pausedUntil <= Date.now()) return true;
-  console.warn(`[CIRCUIT] Paused for ${Math.ceil((circuitBreakerState.pausedUntil - Date.now()) / 60000)}m`);
-  return false;
-}
-
-function recordCircuitBreakerError(source, err) {
-  circuitBreakerState.consecutiveErrors++;
-  circuitBreakerState.lastError = `${source}: ${err?.message || err}`;
-  if (circuitBreakerState.consecutiveErrors >= 5) {
-    circuitBreakerState.pausedUntil = Date.now() + 15 * 60 * 1000;
-    console.warn("[CIRCUIT] Trading paused 15m");
-  }
-}
-
-function recordCircuitBreakerSuccess() {
-  if (circuitBreakerState.consecutiveErrors > 0) console.log("[CIRCUIT] Error streak cleared");
-  circuitBreakerState.consecutiveErrors = 0;
-  circuitBreakerState.lastError = null;
 }
 
 // ------------------------------
 //  Support & Resistance Detection
 // ------------------------------
+class SupportResistance {
+  static detectSwingPoints(ohlcv, windowSize) {
+    const highs = ohlcv.map(c => c[2]);
+    const lows = ohlcv.map(c => c[3]);
+    const swingHighs = [];
+    const swingLows = [];
 
-function detectSwingPoints(ohlcv, windowSize) {
-  const highs = ohlcv.map(c => c[2]);
-  const lows = ohlcv.map(c => c[3]);
-  const swingHighs = [];
-  const swingLows = [];
-
-  for (let i = windowSize; i < ohlcv.length - windowSize; i++) {
-    let isHigh = true;
-    for (let j = 1; j <= windowSize; j++) {
-      if (highs[i] <= highs[i - j] || highs[i] <= highs[i + j]) {
-        isHigh = false;
-        break;
+    for (let i = windowSize; i < ohlcv.length - windowSize; i++) {
+      let isHigh = true;
+      for (let j = 1; j <= windowSize; j++) {
+        if (highs[i] <= highs[i - j] || highs[i] <= highs[i + j]) {
+          isHigh = false;
+          break;
+        }
       }
-    }
-    if (isHigh) {
-      swingHighs.push({ price: highs[i], index: i, timestamp: ohlcv[i][0] });
-    }
+      if (isHigh) swingHighs.push({ price: highs[i], index: i, timestamp: ohlcv[i][0] });
 
-    let isLow = true;
-    for (let j = 1; j <= windowSize; j++) {
-      if (lows[i] >= lows[i - j] || lows[i] >= lows[i + j]) {
-        isLow = false;
-        break;
+      let isLow = true;
+      for (let j = 1; j <= windowSize; j++) {
+        if (lows[i] >= lows[i - j] || lows[i] >= lows[i + j]) {
+          isLow = false;
+          break;
+        }
       }
+      if (isLow) swingLows.push({ price: lows[i], index: i, timestamp: ohlcv[i][0] });
     }
-    if (isLow) {
-      swingLows.push({ price: lows[i], index: i, timestamp: ohlcv[i][0] });
-    }
+    return { swingHighs, swingLows };
   }
 
-  return { swingHighs, swingLows };
-}
-
-function clusterLevels(points, tolerance) {
-  if (!points.length) return [];
-  const sorted = [...points].sort((a, b) => a.price - b.price);
-  const clusters = [];
-  let currentCluster = [sorted[0]];
-
-  for (let i = 1; i < sorted.length; i++) {
-    const prevPrice = currentCluster[currentCluster.length - 1].price;
-    if ((sorted[i].price - prevPrice) / prevPrice <= tolerance) {
-      currentCluster.push(sorted[i]);
-    } else {
-      clusters.push(currentCluster);
-      currentCluster = [sorted[i]];
+  static clusterLevels(points, tolerance) {
+    if (!points.length) return [];
+    const sorted = [...points].sort((a, b) => a.price - b.price);
+    const clusters = [];
+    let current = [sorted[0]];
+    for (let i = 1; i < sorted.length; i++) {
+      const prevPrice = current[current.length - 1].price;
+      if ((sorted[i].price - prevPrice) / prevPrice <= tolerance) {
+        current.push(sorted[i]);
+      } else {
+        clusters.push(current);
+        current = [sorted[i]];
+      }
     }
-  }
-  clusters.push(currentCluster);
-
-  return clusters
-    .map(cl => ({
+    clusters.push(current);
+    return clusters.map(cl => ({
       price: cl.reduce((sum, p) => sum + p.price, 0) / cl.length,
-      points: cl,
       strength: cl.length,
-    }))
-    .sort((a, b) => b.strength - a.strength);
-}
+    })).sort((a, b) => b.strength - a.strength);
+  }
 
-function getSupportResistanceLevels(ohlcv, windowSize = SR_WINDOW_SIZE, tolerance = SR_LEVEL_TOLERANCE) {
-  const { swingHighs, swingLows } = detectSwingPoints(ohlcv, windowSize);
-  const resistanceClusters = clusterLevels(swingHighs, tolerance);
-  const supportClusters = clusterLevels(swingLows, tolerance);
-  return {
-    support: supportClusters.map(c => ({ price: c.price, strength: c.strength })),
-    resistance: resistanceClusters.map(c => ({ price: c.price, strength: c.strength })),
-  };
+  static getLevels(ohlcv) {
+    const { swingHighs, swingLows } = this.detectSwingPoints(ohlcv, SR_WINDOW_SIZE);
+    return {
+      support: this.clusterLevels(swingLows, SR_LEVEL_TOLERANCE),
+      resistance: this.clusterLevels(swingHighs, SR_LEVEL_TOLERANCE),
+    };
+  }
 }
 
 // ------------------------------
-//  AI Prompt & Signal
+//  AI Signal Module
 // ------------------------------
+class AISignalGenerator {
+  static aiSignalCache = new Map();
 
-function createHoldAISignal(reason) {
-  return { signal: "HOLD", strength: "WEAK", confidence: 0, tradeAllowed: false, reason };
-}
+  static getCacheKey(symbol, ohlcv) {
+    const lastTs = ohlcv?.[ohlcv.length - 1]?.[0] || 0;
+    const bucket = lastTs ? Math.floor(lastTs / (INTERVAL_MS)) : 0;
+    return `${symbol}|${TIMEFRAME}|${bucket}|SPOT`;
+  }
 
-function extractJsonObject(text) {
-  const cleaned = String(text)
-    .replace(/```json/gi, "")
-    .replace(/```/g, "")
-    .trim();
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-  if (start === -1 || end === -1) throw new Error("No JSON object");
-  return cleaned.slice(start, end + 1);
-}
+  static getCached(key) {
+    if (!AI_SIGNAL_CACHE_ENABLED) return null;
+    const entry = this.aiSignalCache.get(key);
+    if (entry && entry.expiresAt > Date.now()) return entry.value;
+    if (entry) this.aiSignalCache.delete(key);
+    return null;
+  }
 
-function normalizeAIStrength(value) {
-  const s = String(value).trim().toUpperCase();
-  const map = {
-    LOW: "WEAK",
-    MILD: "WEAK",
-    MODERATE: "MEDIUM",
-    HIGH: "STRONG",
-    VERY_HIGH: "EXTREME",
-    VERYHIGH: "EXTREME",
-  };
-  return map[s] || s;
-}
+  static setCached(key, value, ttl = AI_SIGNAL_CACHE_TTL_MS) {
+    if (!AI_SIGNAL_CACHE_ENABLED) return;
+    this.aiSignalCache.set(key, { value, expiresAt: Date.now() + ttl });
+  }
 
-function normalizeAISignal(raw) {
-  if (!raw || typeof raw !== "object") throw new Error("Invalid AI response");
-  const signal = String(raw.signal || "").trim().toUpperCase();
-  const strength = normalizeAIStrength(raw.strength);
-  const confidence = Number(raw.confidence);
-  const tradeAllowed = typeof raw.tradeAllowed === "boolean" ? raw.tradeAllowed : signal !== "HOLD";
-  const reason = String(raw.reason || "").slice(0, 500);
-  if (!["LONG", "SHORT", "HOLD"].includes(signal)) throw new Error(`Invalid signal: ${signal}`);
-  if (!["WEAK", "MEDIUM", "STRONG", "EXTREME"].includes(strength))
-    throw new Error(`Invalid strength: ${strength}`);
-  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 100)
-    throw new Error(`Invalid confidence: ${confidence}`);
-  return { signal, strength, confidence, tradeAllowed, reason };
-}
+  static normalizeStrength(value) {
+    const s = String(value).trim().toUpperCase();
+    const map = { LOW: 'WEAK', MILD: 'WEAK', MODERATE: 'MEDIUM', HIGH: 'STRONG', VERY_HIGH: 'EXTREME', VERYHIGH: 'EXTREME' };
+    return map[s] || s;
+  }
 
-function parseAISignal(text) {
-  return normalizeAISignal(JSON.parse(extractJsonObject(text)));
-}
+  static parseResponse(text) {
+    const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start === -1 || end === -1) throw new Error('No JSON object');
+    const parsed = JSON.parse(cleaned.slice(start, end + 1));
+    const signal = String(parsed.signal || '').trim().toUpperCase();
+    if (!['LONG', 'HOLD'].includes(signal)) throw new Error(`Invalid signal: ${signal}`);
+    return {
+      signal,
+      strength: this.normalizeStrength(parsed.strength),
+      confidence: Number(parsed.confidence),
+      tradeAllowed: typeof parsed.tradeAllowed === 'boolean' ? parsed.tradeAllowed : signal !== 'HOLD',
+      reason: String(parsed.reason || '').slice(0, 500),
+    };
+  }
 
-function buildSRPrompt({
-  symbol,
-  currentPrice,
-  nearestSupport,
-  nearestResistance,
-  supportStrength,
-  resistanceStrength,
-  volumeTrend,
-  shortTrend,
-  longOnly,
-}) {
-  const allowedSignals = longOnly ? "LONG, HOLD" : "LONG, SHORT, HOLD";
-  const directionHint = longOnly ? "LONG only" : "LONG or SHORT";
-  return `
-You are a professional crypto futures trader AI. Analyze support/resistance levels and decide LONG, SHORT, or HOLD.
+  static buildPrompt(symbol, price, support, resistance, ohlcv) {
+    const supportsBelow = support.filter(s => s.price < price).sort((a, b) => b.price - a.price);
+    const resistancesAbove = resistance.filter(r => r.price > price).sort((a, b) => a.price - b.price);
+    const nearestSupport = supportsBelow[0] || null;
+    const nearestResistance = resistancesAbove[0] || null;
+    const volumeTrend = Indicators.getVolumeTrend(ohlcv);
+    const shortTrend = Indicators.getShortTrend(ohlcv);
+    return `
+You are a spot trader AI. Decide LONG or HOLD based on support/resistance.
 
 Rules:
-- LONG when price is near a strong support level and shows bullish reversal signals.
-- SHORT when price is near a strong resistance level and shows bearish reversal signals.
-- HOLD when price is in the middle of levels, levels are weak, or momentum unclear.
-- Do not trade against the nearest key level.
-- Volume trend: increasing volume near a level increases confidence.
-- Short-term trend (5-period EMA slope) should align with trade direction.
+- LONG when price near strong support with bullish reversal.
+- HOLD if price middle, weak levels, or momentum unclear.
+- Volume increase near support adds confidence.
+- Short-term trend must be bullish for LONG.
 
 Data:
 Symbol: ${symbol}
-Current price: ${currentPrice}
-Nearest support: ${nearestSupport?.price ?? "none"} (strength: ${nearestSupport?.strength ?? 0})
-Nearest resistance: ${nearestResistance?.price ?? "none"} (strength: ${nearestResistance?.strength ?? 0})
-Price distance to support: ${nearestSupport ? ((currentPrice - nearestSupport.price) / currentPrice * 100).toFixed(2) : "N/A"}%
-Price distance to resistance: ${nearestResistance ? ((nearestResistance.price - currentPrice) / currentPrice * 100).toFixed(2) : "N/A"}%
-Volume trend (last 5 candles): ${volumeTrend} (positive = increasing)
-Short trend (EMA5 slope): ${shortTrend} (positive = bullish)
+Price: ${price}
+Nearest Support: ${nearestSupport?.price ?? 'none'} (strength ${nearestSupport?.strength ?? 0})
+Nearest Resistance: ${nearestResistance?.price ?? 'none'} (strength ${nearestResistance?.strength ?? 0})
+Dist to Support: ${nearestSupport ? ((price - nearestSupport.price) / price * 100).toFixed(2) : 'N/A'}%
+Dist to Resistance: ${nearestResistance ? ((nearestResistance.price - price) / price * 100).toFixed(2) : 'N/A'}%
+Volume Trend: ${volumeTrend}
+Short Trend: ${shortTrend}
 
-Allowed signals: ${allowedSignals}
-Strengths: WEAK, MEDIUM, STRONG, EXTREME
-Direction preference: ${directionHint}
-
-Return JSON:
-{
-  "signal": "LONG/SHORT/HOLD",
-  "strength": "WEAK/MEDIUM/STRONG/EXTREME",
-  "confidence": 0-100,
-  "tradeAllowed": true/false,
-  "reason": "brief explanation"
-}`;
-}
-
-function calculateEMA(data, period) {
-  const k = 2 / (period + 1);
-  let ema = data[0];
-  for (let i = 1; i < data.length; i++) {
-    ema = data[i] * k + ema * (1 - k);
-  }
-  return ema;
-}
-
-async function getAISignal(symbol, currentPrice, supportLevels, resistanceLevels, ohlcv) {
-  const cacheKey = getAiSignalCacheKey(symbol, ohlcv);
-  const cachedSignal = getCachedAISignal(cacheKey);
-  if (cachedSignal) {
-    console.log(`[AI CACHE] Hit for ${symbol}`);
-    return cachedSignal;
+Allowed: LONG, HOLD. Strength: WEAK/MEDIUM/STRONG/EXTREME.
+Return JSON: {"signal":"LONG/HOLD","strength":"...","confidence":0-100,"tradeAllowed":true/false,"reason":"..."}
+`;
   }
 
-  const supportsBelow = supportLevels.filter(s => s.price < currentPrice).sort((a, b) => b.price - a.price);
-  const resistancesAbove = resistanceLevels.filter(r => r.price > currentPrice).sort((a, b) => a.price - b.price);
-  const nearestSupport = supportsBelow[0] || null;
-  const nearestResistance = resistancesAbove[0] || null;
+  static async getSignal(symbol, price, support, resistance, ohlcv) {
+    const cacheKey = this.getCacheKey(symbol, ohlcv);
+    const cached = this.getCached(cacheKey);
+    if (cached) return cached;
 
-  const volumes = ohlcv.map(c => c[5]);
-  const recentVolAvg = volumes.slice(-5).reduce((a, b) => a + b, 0) / 5;
-  const prevVolAvg = volumes.slice(-10, -5).reduce((a, b) => a + b, 0) / 5;
-  const volumeTrend = recentVolAvg > prevVolAvg ? "increasing" : "decreasing";
+    const prompt = this.buildPrompt(symbol, price, support, resistance, ohlcv);
+    for (let attempt = 1; attempt <= AI_RESPONSE_RETRIES + 1; attempt++) {
+      try {
+        const result = await model.generateContent(prompt);
+        const signal = this.parseResponse(result.response.text());
+        this.setCached(cacheKey, signal);
+        return signal;
+      } catch (err) {
+        if (attempt <= AI_RESPONSE_RETRIES) await sleep(1000 * attempt);
+      }
+    }
+    const fallback = { signal: 'HOLD', strength: 'WEAK', confidence: 0, tradeAllowed: false, reason: 'AI fallback' };
+    this.setCached(cacheKey, fallback, 60000);
+    return fallback;
+  }
+}
 
-  const closes = ohlcv.map(c => c[4]);
-  const ema5 = calculateEMA(closes.slice(-20), 5);
-  const prevEma5 = calculateEMA(closes.slice(-21, -1), 5);
-  const shortTrend = ema5 > prevEma5 ? "bullish" : "bearish";
+// ------------------------------
+//  Risk & State Management (Persistent)
+// ------------------------------
+class RiskState {
+  constructor() {
+    this.data = this._load();
+    this.costBasis = new Map(); // in-memory FIFO for PnL
+  }
 
-  const prompt = buildSRPrompt({
-    symbol,
-    currentPrice,
-    nearestSupport,
-    nearestResistance,
-    supportStrength: nearestSupport?.strength || 0,
-    resistanceStrength: nearestResistance?.strength || 0,
-    volumeTrend,
-    shortTrend,
-    longOnly: LONG_ONLY,
-  });
-
-  for (let attempt = 1; attempt <= AI_RESPONSE_RETRIES + 1; attempt++) {
+  _load() {
     try {
-      const result = await model.generateContent(prompt);
-      const text = result.response.text();
-      const signal = parseAISignal(text);
-      setCachedAISignal(cacheKey, signal);
-      return signal;
-    } catch (err) {
-      console.warn(`[AI] Attempt ${attempt} failed for ${symbol}: ${err.message}`);
-      if (attempt <= AI_RESPONSE_RETRIES) await sleep(1000 * attempt);
-    }
-  }
-  recordCircuitBreakerError(`AI ${symbol}`, new Error("AI response failed"));
-  const fallbackSignal = createHoldAISignal("AI fallback to HOLD");
-  setCachedAISignal(cacheKey, fallbackSignal, Math.min(AI_SIGNAL_CACHE_TTL_MS, 60 * 1000));
-  return fallbackSignal;
-}
-
-// ------------------------------
-//  Risk & Order Management (TP/SL)
-// ------------------------------
-
-async function getAvailableBalance() {
-  const balance = await retry(() => exchange.fetchBalance());
-  return Number(balance?.USDT?.free || 0);
-}
-
-async function calculateContracts(symbol, price) {
-  const market = exchange.markets[symbol];
-  const targetNotional = ORDER_SIZE_USDT * LEVERAGE;
-  const minCost = market?.limits?.cost?.min || 5;
-  const finalNotional = Math.max(minCost, targetNotional);
-  const contracts = finalNotional / price;
-  return Number(exchange.amountToPrecision(symbol, contracts));
-}
-
-function calculateRequiredMargin(amount, price) {
-  return (amount * price) / LEVERAGE;
-}
-
-function numberOrNull(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
-}
-
-function positionNumber(position, keys) {
-  for (const key of keys) {
-    const value = key.startsWith("info.") ? position.info?.[key.slice(5)] : position[key];
-    const number = numberOrNull(value);
-    if (number !== null) return number;
-  }
-  return null;
-}
-
-async function getCurrentPosition(symbol) {
-  const positions = await retry(() => exchange.fetchPositions([symbol]));
-  const pos = positions.find(p => p.symbol === symbol && Number(p.contracts) > 0);
-  if (!pos) return null;
-  const contracts = Number(pos.contracts);
-  const entryPrice = Number(pos.entryPrice);
-  const markPrice = positionNumber(pos, ["markPrice", "info.markPrice"]);
-  const notional = positionNumber(pos, ["notional", "info.notional"]);
-  return {
-    side: pos.side,
-    symbol: pos.symbol,
-    contracts,
-    entryPrice,
-    markPrice,
-    notional: notional === null ? contracts * (markPrice || entryPrice) : Math.abs(notional),
-    unrealizedPnl: positionNumber(pos, ["unrealizedPnl", "unrealisedPnl", "info.unRealizedProfit"]),
-  };
-}
-
-async function getOpenPositions() {
-  const open = [];
-  for (const sym of SYMBOLS) {
-    try {
-      const pos = await getCurrentPosition(sym);
-      if (pos) open.push(pos);
-    } catch (err) {
-      console.warn(`${sym} position check: ${err.message}`);
-    }
-  }
-  return open;
-}
-
-function getEstimatedUnrealizedCloseFees(position) {
-  if (!Number.isFinite(position.notional) || position.notional <= 0) return UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT;
-  const feeSides = Math.max(0, UNREALIZED_PROFIT_CLOSE_FEE_SIDES);
-  const feeRate = Math.max(0, UNREALIZED_PROFIT_CLOSE_FEE_RATE);
-  return position.notional * feeRate * feeSides + Math.max(0, UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT);
-}
-
-function getPositionEstimatedNetProfit(position) {
-  if (!Number.isFinite(position.unrealizedPnl)) return null;
-  return position.unrealizedPnl - getEstimatedUnrealizedCloseFees(position);
-}
-
-function getPositionEstimatedNetProfitPct(position) {
-  const estimatedNetProfit = getPositionEstimatedNetProfit(position);
-  if (estimatedNetProfit === null || !Number.isFinite(position.notional) || position.notional <= 0) return null;
-  return (estimatedNetProfit / position.notional) * 100;
-}
-
-function getPositionMargin(position) {
-  if (!Number.isFinite(position.notional) || position.notional <= 0) return null;
-  if (!Number.isFinite(LEVERAGE) || LEVERAGE <= 0) return null;
-  return position.notional / LEVERAGE;
-}
-
-function getPositionUnrealizedPnlPct(position) {
-  if (!Number.isFinite(position.unrealizedPnl)) return null;
-  const margin = getPositionMargin(position);
-  if (margin === null || margin <= 0) return null;
-  return (position.unrealizedPnl / margin) * 100;
-}
-
-function shouldCloseForUnrealizedLoss(position) {
-  if (!UNREALIZED_LOSS_CLOSE_ENABLED) return false;
-  const lossPctLimit = Math.max(0, UNREALIZED_LOSS_CLOSE_PCT);
-  if (lossPctLimit <= 0) return false;
-
-  const pnlPct = getPositionUnrealizedPnlPct(position);
-  if (pnlPct === null) return false;
-
-  return pnlPct <= -lossPctLimit;
-}
-
-function shouldCloseForUnrealizedProfit(position) {
-  if (!UNREALIZED_PROFIT_CLOSE_ENABLED) return false;
-  const estimatedNetProfit = getPositionEstimatedNetProfit(position);
-  if (estimatedNetProfit === null) return false;
-  if (estimatedNetProfit <= UNREALIZED_PROFIT_CLOSE_MIN_USDT) return false;
-
-  const profitPct = getPositionEstimatedNetProfitPct(position);
-  if (UNREALIZED_PROFIT_CLOSE_MIN_PCT > 0 && (profitPct === null || profitPct < UNREALIZED_PROFIT_CLOSE_MIN_PCT)) return false;
-
-  return true;
-}
-
-async function closePositionsByUnrealizedPnl(openPositions, closeOptions = {}) {
-  if (!UNREALIZED_PROFIT_CLOSE_ENABLED && !UNREALIZED_LOSS_CLOSE_ENABLED) return 0;
-
-  let closedCount = 0;
-  for (const position of openPositions) {
-    if (shouldCloseForUnrealizedLoss(position)) {
-      const pnlPct = getPositionUnrealizedPnlPct(position);
-      const margin = getPositionMargin(position);
-      const pnlLabel = Number.isFinite(position.unrealizedPnl) ? position.unrealizedPnl.toFixed(6) : "n/a";
-      const pctLabel = pnlPct === null ? "n/a" : `${pnlPct.toFixed(4)}%`;
-      const marginLabel = margin === null ? "n/a" : `${margin.toFixed(6)} USDT`;
-      console.log(
-        `[SL] ${position.symbol} ${position.side.toUpperCase()} unrealized PnL ${pnlLabel} USDT (${pctLabel} of margin ${marginLabel}) reached -${UNREALIZED_LOSS_CLOSE_PCT}% limit -> closing position`
-      );
-      await closePosition(position.symbol, position, {
-        settleDelayMs: UNREALIZED_CLOSE_SETTLE_DELAY_MS,
-        ...closeOptions,
-      });
-      closedCount++;
-      continue;
-    }
-
-    if (!shouldCloseForUnrealizedProfit(position)) continue;
-
-    const estimatedNetProfit = getPositionEstimatedNetProfit(position);
-    const estimatedFees = getEstimatedUnrealizedCloseFees(position);
-    const profitPct = getPositionEstimatedNetProfitPct(position);
-    const pctLabel = profitPct === null ? "n/a" : `${profitPct.toFixed(4)}%`;
-    console.log(
-      `[TP] ${position.symbol} ${position.side.toUpperCase()} unrealized gross ${position.unrealizedPnl.toFixed(6)} USDT, estimated net ${estimatedNetProfit.toFixed(6)} USDT after ${estimatedFees.toFixed(6)} USDT fee buffer (${pctLabel}) -> closing position`
-    );
-    await closePosition(position.symbol, position, {
-      settleDelayMs: UNREALIZED_CLOSE_SETTLE_DELAY_MS,
-      ...closeOptions,
-    });
-    closedCount++;
-  }
-
-  if (closedCount > 0) await syncProfitLedger();
-  return closedCount;
-}
-
-async function cancelAllOrders(symbol) {
-  try {
-    const orders = await retry(() => exchange.fetchOpenOrders(symbol));
-    for (const o of orders) await retry(() => exchange.cancelOrder(o.id, symbol));
-  } catch (err) {
-    console.error(err.message);
-  }
-}
-
-async function openPosition(symbol, signal, price, setupData) {
-  await retry(() => exchange.setLeverage(LEVERAGE, symbol));
-  const side = signal === "LONG" ? "buy" : "sell";
-  const amount = await calculateContracts(symbol, price);
-  const requiredMargin = calculateRequiredMargin(amount, price);
-  const balance = await getAvailableBalance();
-  if (balance < requiredMargin) {
-    console.warn(`[BLOCK] Insufficient balance: need ${requiredMargin.toFixed(4)} USDT`);
-    return null;
-  }
-  console.log(`[OPEN] ${signal} ${symbol} | contracts: ${amount} | margin: ${requiredMargin.toFixed(4)}`);
-  const order = await retry(() => exchange.createMarketOrder(symbol, side, amount));
-  
-  // Save setup for learning memory
-  if (setupData && LEARNING_MEMORY_ENABLED) {
-    const posKey = `${symbol}_${signal}`;
-    pendingTradeSetups.set(posKey, {
-      ...setupData,
-      symbol,
-      signal,
-      entryPrice: price,
-      timestamp: Date.now(),
-    });
-  }
-
-  lastPositionChangeTime = Date.now();
-  await sleep(3000);
-  return await getCurrentPosition(symbol);
-}
-
-async function closePosition(symbol, position, options = {}) {
-  const settleDelayMs = options.settleDelayMs ?? 2000;
-  const side = position.side === "long" ? "sell" : "buy";
-  await retry(() => exchange.createMarketOrder(symbol, side, position.contracts, { reduceOnly: true }));
-  await cancelAllOrders(symbol);
-  console.log("[CLOSE] Position closed manually");
-  if (settleDelayMs > 0) await sleep(settleDelayMs);
-  await syncRiskState(); // update PnL immediately
-  // The finalization will be picked up by finalizeAnyClosedPositions in the next cycle
-}
-
-async function createStopLossAndTakeProfit(symbol, position, slPrice, tpPrice) {
-  await cancelAllOrders(symbol);
-
-  const isLong = position.side === "long";
-  const slSide = isLong ? "sell" : "buy";
-  const tpSide = isLong ? "sell" : "buy";
-  const quantity = position.contracts;
-
-  if (UNREALIZED_LOSS_CLOSE_ENABLED) {
-    console.log(
-      `[SL] Exchange stop-loss skipped; ${symbol} will close when unrealized PnL reaches -${UNREALIZED_LOSS_CLOSE_PCT}% of margin`
-    );
-  } else {
-    const slStopPrice = exchange.priceToPrecision(symbol, slPrice);
-    await retry(() =>
-      exchange.createOrder(symbol, "STOP_MARKET", slSide, quantity, undefined, {
-        stopPrice: slStopPrice,
-        reduceOnly: true,
-        workingType: "MARK_PRICE",
-      })
-    );
-    console.log(`[SL] Stop loss placed at ${slStopPrice} (${slSide})`);
-  }
-
-  if (UNREALIZED_PROFIT_CLOSE_ENABLED) {
-    console.log(
-      `[TP] Exchange take-profit skipped; ${symbol} will close when unrealized PnL is profitable`
-    );
-    return;
-  }
-
-  const tpStopPrice = exchange.priceToPrecision(symbol, tpPrice);
-  await retry(() =>
-    exchange.createOrder(symbol, "TAKE_PROFIT_MARKET", tpSide, quantity, undefined, {
-      stopPrice: tpStopPrice,
-      reduceOnly: true,
-      workingType: "MARK_PRICE",
-    })
-  );
-  console.log(`[TP] Take profit placed at ${tpStopPrice} (${tpSide})`);
-}
-
-// Fixed calculateRR with division by zero guard
-function calculateRR(signal, entry, tp, sl) {
-  if (signal === "LONG") {
-    const risk = entry - sl;
-    if (risk <= 0) return 0;
-    return (tp - entry) / risk;
-  } else {
-    const risk = sl - entry;
-    if (risk <= 0) return 0;
-    return (entry - tp) / risk;
-  }
-}
-
-function fundingSafe(signal, fundingRate) {
-  if (signal === "LONG" && fundingRate > MAX_FUNDING_RATE) return false;
-  if (signal === "SHORT" && fundingRate < -MAX_FUNDING_RATE) return false;
-  return true;
-}
-
-function calculateATR(ohlcv, period = 14) {
-  if (!Array.isArray(ohlcv) || ohlcv.length <= period) return null;
-  const trs = [];
-  for (let i = 1; i < ohlcv.length; i++) {
-    const prevClose = ohlcv[i - 1][4];
-    const high = ohlcv[i][2];
-    const low = ohlcv[i][3];
-    const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
-    trs.push(tr);
-  }
-  const recentTrs = trs.slice(-period);
-  if (recentTrs.length < period) return null;
-  return recentTrs.reduce((a, b) => a + b, 0) / recentTrs.length;
-}
-
-// ------------------------------
-//  Analyze Symbol (TP/SL based on S/R + ATR fallback)
-// ------------------------------
-
-async function analyzeSymbol(symbol) {
-  try {
-    console.log(`\n========== SCAN ${symbol} ==========`);
-    if (!symbolCooldownAllowsTrading(symbol)) return null;
-
-    const [ticker, funding, ohlcv] = await Promise.all([
-      retry(() => exchange.fetchTicker(symbol)),
-      retry(() => exchange.fetchFundingRate(symbol)),
-      retry(() => exchange.fetchOHLCV(symbol, TIMEFRAME, undefined, LOOKBACK_CANDLES)),
-    ]);
-
-    const currentPrice = ticker.last;
-    const fundingRate = funding.fundingRate || 0;
-
-    const { support, resistance } = getSupportResistanceLevels(ohlcv, SR_WINDOW_SIZE, SR_LEVEL_TOLERANCE);
-    if (!support.length && !resistance.length) {
-      console.log(`${symbol} no S/R levels found`);
-      return null;
-    }
-
-    const supportsBelow = support.filter(s => s.price < currentPrice).sort((a, b) => b.price - a.price);
-    const resistancesAbove = resistance.filter(r => r.price > currentPrice).sort((a, b) => a.price - b.price);
-    const nearestSupport = supportsBelow[0] || null;
-    const nearestResistance = resistancesAbove[0] || null;
-
-    let distanceToSupport = Infinity;
-    let distanceToResistance = Infinity;
-    if (nearestSupport) distanceToSupport = (currentPrice - nearestSupport.price) / currentPrice;
-    if (nearestResistance) distanceToResistance = (nearestResistance.price - currentPrice) / currentPrice;
-
-    if (distanceToSupport > PRICE_PROXIMITY_THRESHOLD && distanceToResistance > PRICE_PROXIMITY_THRESHOLD) {
-      console.log(
-        `${symbol} price not near any S/R level (dist to S: ${(distanceToSupport * 100).toFixed(2)}%, to R: ${(distanceToResistance * 100).toFixed(2)}%) > threshold ${(PRICE_PROXIMITY_THRESHOLD * 100).toFixed(2)}% -> skip AI`
-      );
-      return null;
-    }
-    console.log(
-      `${symbol} price near level: ${distanceToSupport <= PRICE_PROXIMITY_THRESHOLD ? "SUPPORT" : "RESISTANCE"} (dist ${(Math.min(distanceToSupport, distanceToResistance) * 100).toFixed(2)}%)`
-    );
-
-    let ai = await getAISignal(symbol, currentPrice, support, resistance, ohlcv);
-    const originalConfidence = ai.confidence;
-
-    console.log("[AI]", ai);
-
-    const signal = ai.signal;
-    if (signal === "HOLD" || (LONG_ONLY && signal === "SHORT")) {
-      console.log(`${symbol} skipped: ${signal}`);
-      return null;
-    }
-    if (!ai.tradeAllowed) {
-      console.log(`${symbol} tradeAllowed false`);
-      return null;
-    }
-
-    if (!ALLOWED_AI_STRENGTHS.includes(ai.strength)) {
-      console.log(`${symbol} strength ${ai.strength} not allowed`);
-      return null;
-    }
-    if (!fundingSafe(signal, fundingRate)) {
-      console.log(`${symbol} funding unsafe`);
-      return null;
-    }
-
-    const atr = calculateATR(ohlcv.slice(-20), 14);
-    if (!atr || atr <= 0) {
-      console.log(`${symbol} invalid ATR`);
-      return null;
-    }
-    const buffer = currentPrice * 0.002;
-    let slPrice, tpPrice;
-    let usedSR = false;
-    let slPercent, tpPercent;
-
-    if (signal === "LONG") {
-      if (nearestSupport) {
-        slPrice = nearestSupport.price - buffer;
-        usedSR = true;
-      } else {
-        slPrice = currentPrice - atr * ATR_SL_MULTIPLIER;
+      if (require('fs').existsSync(RISK_STATE_PATH)) {
+        return JSON.parse(require('fs').readFileSync(RISK_STATE_PATH, 'utf8'));
       }
-      if (nearestResistance) {
-        tpPrice = nearestResistance.price;
-        usedSR = true;
-      } else {
-        tpPrice = currentPrice + atr * ATR_TP_MULTIPLIER;
-      }
-
-      if (slPrice >= currentPrice) slPrice = currentPrice - atr * ATR_SL_MULTIPLIER;
-      if (tpPrice <= currentPrice) tpPrice = currentPrice + atr * ATR_TP_MULTIPLIER;
-
-      slPercent = (currentPrice - slPrice) / currentPrice;
-      tpPercent = (tpPrice - currentPrice) / currentPrice;
-    } else {
-      if (nearestResistance) {
-        slPrice = nearestResistance.price + buffer;
-        usedSR = true;
-      } else {
-        slPrice = currentPrice + atr * ATR_SL_MULTIPLIER;
-      }
-      if (nearestSupport) {
-        tpPrice = nearestSupport.price;
-        usedSR = true;
-      } else {
-        tpPrice = currentPrice - atr * ATR_TP_MULTIPLIER;
-      }
-
-      if (slPrice <= currentPrice) slPrice = currentPrice + atr * ATR_SL_MULTIPLIER;
-      if (tpPrice >= currentPrice) tpPrice = currentPrice - atr * ATR_TP_MULTIPLIER;
-
-      slPercent = (slPrice - currentPrice) / currentPrice;
-      tpPercent = (currentPrice - tpPrice) / currentPrice;
-    }
-
-    const rr = calculateRR(signal, currentPrice, tpPrice, slPrice);
-    if (rr < MIN_RR) {
-      console.log(`${symbol} RR ${rr.toFixed(2)} < ${MIN_RR} (${usedSR ? "S/R based" : "ATR fallback"})`);
-      return null;
-    }
-
-    if (ai.signal !== "HOLD") {
-      const adjustedConfidence = adjustConfidenceWithMemory(
-        symbol,
-        ai.signal,
-        ai.strength,
-        rr,
-        originalConfidence
-      );
-      ai = { ...ai, confidence: adjustedConfidence };
-    }
-
-    if (ai.confidence < MIN_AI_CONFIDENCE) {
-      console.log(`${symbol} low confidence ${ai.confidence} (original ${originalConfidence})`);
-      return null;
-    }
-
-    console.log(`${symbol} → TP/SL based on ${usedSR ? "S/R levels" : "ATR"} (RR=${rr.toFixed(2)})`);
-
+    } catch (e) {}
     return {
-      symbol,
-      signal,
-      ai,
-      currentPrice,
-      atr,
-      slPrice,
-      tpPrice,
-      rr,
-      confidence: ai.confidence,
-      strength: ai.strength,
-      reason: ai.reason,
-      usedSR,
-      slPercent,
-      tpPercent,
+      dayKey: null,
+      dayStartEquity: 0,
+      dailyNetPnL: 0,
+      consecutiveLosses: 0,
+      symbolCooldowns: {},
+      lastSyncedAt: 0,
+      updatedAt: new Date().toISOString(),
     };
-  } catch (err) {
-    console.warn(`${symbol} error: ${err.message}`);
-    recordCircuitBreakerError(`scan ${symbol}`, err);
-    setSymbolCooldown(symbol, SYMBOL_ERROR_COOLDOWN_MINUTES, "scan error");
-    saveRiskState();
-    return null;
+  }
+
+  save() {
+    this.data.updatedAt = new Date().toISOString();
+    require('fs').writeFileSync(RISK_STATE_PATH, JSON.stringify(this.data, null, 2));
+  }
+
+  get dailyLossLimit() {
+    const equity = this.data.dayStartEquity || 0;
+    const percentLimit = equity * MAX_DAILY_LOSS_PCT;
+    if (MAX_DAILY_LOSS_USDT > 0) return Math.min(percentLimit, MAX_DAILY_LOSS_USDT);
+    return percentLimit;
+  }
+
+  allowsTrading() {
+    if (this.dailyLossLimit > 0 && this.data.dailyNetPnL <= -this.dailyLossLimit) return false;
+    if (MAX_CONSECUTIVE_LOSSES > 0 && this.data.consecutiveLosses >= MAX_CONSECUTIVE_LOSSES) return false;
+    return true;
+  }
+
+  setSymbolCooldown(symbol, minutes, reason) {
+    if (!SYMBOL_COOLDOWN_ENABLED) return;
+    this.data.symbolCooldowns[symbol] = { until: Date.now() + minutes * 60000, reason };
+    this.save();
+  }
+
+  symbolAllows(symbol) {
+    if (!SYMBOL_COOLDOWN_ENABLED) return true;
+    const cd = this.data.symbolCooldowns[symbol];
+    if (!cd) return true;
+    if (cd.until <= Date.now()) {
+      delete this.data.symbolCooldowns[symbol];
+      this.save();
+      return true;
+    }
+    return false;
+  }
+
+  updateDailyPnL(delta, isLoss) {
+    this.data.dailyNetPnL += delta;
+    if (isLoss) this.data.consecutiveLosses++;
+    else this.data.consecutiveLosses = 0;
+    this.save();
+  }
+
+  async syncEquity() {
+    const exchange = ExchangeManager.getInstance();
+    const balance = await retry(() => exchange.fetchBalance());
+    const equity = Number(balance?.total?.USDT || 0);
+    const dayKey = new Date().toISOString().slice(0, 10);
+    if (this.data.dayKey !== dayKey) {
+      this.data.dayKey = dayKey;
+      this.data.dayStartEquity = equity;
+      this.data.dailyNetPnL = 0;
+      this.save();
+    } else if (!this.data.dayStartEquity && equity > 0) {
+      this.data.dayStartEquity = equity;
+      this.save();
+    }
+    return equity;
   }
 }
 
 // ------------------------------
-//  Main Trading Cycle
+//  Profit Ledger (Spot FIFO)
 // ------------------------------
-
-async function tradingCycle() {
-  if (isTrading) {
-    console.log("[WAIT] Previous cycle still running");
-    return;
-  }
-  isTrading = true;
-  const errorsAtStart = circuitBreakerState.consecutiveErrors;
-  let circuitAllowed = false;
-  try {
-    console.log(`\n========== ${new Date().toISOString()} ==========`);
-    if (!circuitBreakerAllowsTrading()) return;
-    circuitAllowed = true;
-    await syncProfitLedger();
-    await syncRiskState();
-
-    // Finalize any positions that were closed externally (by SL/TP) since last cycle
-    await finalizeAnyClosedPositions();
-
-    cleanupAiSignalCache();
-    cleanupSymbolCooldowns();
-
-    const openPositions = await getOpenPositions();
-    console.log("Open positions:", openPositions.length ? openPositions.map(p => `${p.symbol} ${p.side}`).join(", ") : "none");
-
-    const closedByUnrealizedPnl = await closePositionsByUnrealizedPnl(openPositions);
-    if (closedByUnrealizedPnl > 0) {
-      console.log(`[PNL] Closed ${closedByUnrealizedPnl} position(s) by unrealized PnL guard; waiting until next cycle before new entries`);
-      return;
-    }
-
-    if (killSwitchActive()) {
-      console.log("[KILL] Cycle stopped");
-      return;
-    }
-    if (!riskGateAllowsTrading()) return;
-
-    const symbolsToScan = openPositions.length >= MAX_OPEN_POSITIONS
-      ? openPositions.map(p => p.symbol).filter(Boolean)
-      : getSymbolsForCurrentCycle(SYMBOLS);
-
-    console.log(
-      `[SCAN] ${symbolsToScan.length}/${SYMBOLS.length} symbols this cycle` +
-      (SCAN_ROTATION_BATCH_SIZE > 0 && symbolsToScan.length < SYMBOLS.length ? ` (batch size ${SCAN_ROTATION_BATCH_SIZE})` : "")
-    );
-
-    const candidates = [];
-    for (const sym of symbolsToScan) {
-      const cand = await analyzeSymbol(sym);
-      if (cand) candidates.push(cand);
-    }
-    if (candidates.length === 0) {
-      console.log("No valid setup");
-      return;
-    }
-
-    const weightMap = { WEAK: 1, MEDIUM: 2, STRONG: 3, EXTREME: 4 };
-    candidates.sort((a, b) => {
-      return b.confidence * (weightMap[b.strength] || 1) - a.confidence * (weightMap[a.strength] || 1);
-    });
-    const best = candidates[0];
-    console.log(`[BEST] ${best.symbol} ${best.signal} | conf ${best.confidence} ${best.strength} | RR ${best.rr.toFixed(2)}`);
-
-    const existing = openPositions.find(p => p.symbol === best.symbol);
-    if (existing && existing.side === best.signal.toLowerCase()) {
-      console.log(`${best.symbol} position already exists`);
-      return;
-    }
-    if (!existing && openPositions.length >= MAX_OPEN_POSITIONS) {
-      console.log(`Max open positions reached (${MAX_OPEN_POSITIONS})`);
-      return;
-    }
-
-    const cooldownMs = REVERSAL_COOLDOWN_MINUTES * 60 * 1000;
-    if (existing && Date.now() - lastPositionChangeTime < cooldownMs) {
-      console.log(`${best.symbol} reversal cooldown`);
-      return;
-    }
-
-    if (existing) await closePosition(best.symbol, existing);
-    await cancelAllOrders(best.symbol);
-
-    const setupData = {
-      signal: best.signal,
-      strength: best.strength,
-      confidence: best.confidence,
-      rr: best.rr,
-    };
-
-    const newPos = await openPosition(best.symbol, best.signal, best.currentPrice, setupData);
-    if (!newPos) return;
-
-    const actualEntry = newPos.entryPrice;
-    let actualSL, actualTP;
-
-    if (best.usedSR) {
-      if (best.signal === "LONG") {
-        actualSL = actualEntry * (1 - best.slPercent);
-        actualTP = actualEntry * (1 + best.tpPercent);
-      } else {
-        actualSL = actualEntry * (1 + best.slPercent);
-        actualTP = actualEntry * (1 - best.tpPercent);
-      }
-    } else {
-      if (best.signal === "LONG") {
-        actualSL = actualEntry - best.atr * ATR_SL_MULTIPLIER;
-        actualTP = actualEntry + best.atr * ATR_TP_MULTIPLIER;
-      } else {
-        actualSL = actualEntry + best.atr * ATR_SL_MULTIPLIER;
-        actualTP = actualEntry - best.atr * ATR_TP_MULTIPLIER;
-      }
-    }
-
-    if (best.signal === "LONG") {
-      if (actualSL >= actualEntry) actualSL = actualEntry - best.atr * ATR_SL_MULTIPLIER;
-      if (actualTP <= actualEntry) actualTP = actualEntry + best.atr * ATR_TP_MULTIPLIER;
-    } else {
-      if (actualSL <= actualEntry) actualSL = actualEntry + best.atr * ATR_SL_MULTIPLIER;
-      if (actualTP >= actualEntry) actualTP = actualEntry - best.atr * ATR_TP_MULTIPLIER;
-    }
-
-    const actualRR = calculateRR(best.signal, actualEntry, actualTP, actualSL);
-    console.log(`[ADAPT] Entry=${actualEntry}, usedSR=${best.usedSR}, RR=${actualRR.toFixed(2)}`);
-
-    await createStopLossAndTakeProfit(best.symbol, newPos, actualSL, actualTP);
-
-    await sendFonnteAlert(
-      formatTradeOpenAlert({
-        symbol: best.symbol,
-        signal: best.signal,
-        entryPrice: actualEntry,
-        contracts: newPos.contracts,
-        slPrice: actualSL,
-        tpPrice: actualTP,
-        rr: actualRR,
-        confidence: best.confidence,
-        strength: best.strength,
-      })
-    );
-  } catch (err) {
-    console.error("[ERROR] Trading cycle:", err.message);
-    recordCircuitBreakerError("trading cycle", err);
-  } finally {
-    if (circuitAllowed && circuitBreakerState.consecutiveErrors === errorsAtStart) recordCircuitBreakerSuccess();
-    isTrading = false;
-  }
-}
-
-
-async function waitForNextCycleWatchingUnrealizedProfit(delayMs) {
-  if (!UNREALIZED_PROFIT_CLOSE_ENABLED && !UNREALIZED_LOSS_CLOSE_ENABLED) {
-    await sleep(delayMs);
-    return;
+class ProfitLedger {
+  constructor() {
+    this.data = this._load();
+    this.costBasis = new Map(); // symbol -> { totalCost, totalAmount }
   }
 
-  const deadline = Date.now() + delayMs;
-  while (Date.now() < deadline) {
-    const remainingMs = deadline - Date.now();
-    await sleep(Math.min(UNREALIZED_PROFIT_MONITOR_INTERVAL_MS, remainingMs));
-
-    if (isTrading) continue;
-
+  _load() {
+    if (!PROFIT_TRACKER_ENABLED) return this._empty();
     try {
-      const openPositions = await getOpenPositions();
-      const closedCount = await closePositionsByUnrealizedPnl(openPositions);
-      if (closedCount > 0) {
-        console.log(`[PNL] Closed ${closedCount} position(s) by unrealized PnL guard immediately during wait`);
+      if (require('fs').existsSync(PROFIT_LEDGER_PATH)) {
+        const raw = require('fs').readFileSync(PROFIT_LEDGER_PATH, 'utf8');
+        return JSON.parse(raw);
       }
-    } catch (err) {
-      console.warn(`[PNL] Unrealized PnL monitor skipped: ${err.message}`);
+    } catch (e) {}
+    return this._empty();
+  }
+
+  _empty() {
+    return {
+      symbols: SYMBOLS.join(','),
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      processedTradeIds: [],
+      totals: { grossRealizedPnl: 0, fees: 0, netProfit: 0, tradeCount: 0, profitEvents: 0, lossEvents: 0 },
+      recentTrades: [],
+    };
+  }
+
+  save() {
+    if (!PROFIT_TRACKER_ENABLED) return;
+    this.data.updatedAt = new Date().toISOString();
+    require('fs').writeFileSync(PROFIT_LEDGER_PATH, JSON.stringify(this.data, null, 2));
+  }
+
+  updateCostBasis(symbol, amount, price, fee) {
+    const cost = amount * price;
+    const basis = this.costBasis.get(symbol) || { totalCost: 0, totalAmount: 0 };
+    basis.totalCost += cost + fee;
+    basis.totalAmount += amount;
+    this.costBasis.set(symbol, basis);
+  }
+
+  computeSellPnl(symbol, amount, price, fee) {
+    const basis = this.costBasis.get(symbol);
+    if (!basis || basis.totalAmount <= 0) return { netProfit: 0, remainingAmount: 0 };
+    const avgPrice = basis.totalCost / basis.totalAmount;
+    const sellValue = amount * price;
+    const costToSell = amount * avgPrice;
+    const netProfit = sellValue - costToSell - fee;
+    const remainingAmount = basis.totalAmount - amount;
+    if (remainingAmount <= 1e-8) {
+      this.costBasis.delete(symbol);
+    } else {
+      basis.totalCost -= costToSell;
+      basis.totalAmount = remainingAmount;
+      this.costBasis.set(symbol, basis);
     }
+    return { netProfit, remainingAmount };
+  }
+
+  async syncFromExchange() {
+    const exchange = ExchangeManager.getInstance();
+    let newCount = 0;
+    for (const symbol of SYMBOLS) {
+      const since = this.data.lastTradeTimestamp ? this.data.lastTradeTimestamp - 1 : undefined;
+      const trades = await retry(() => exchange.fetchMyTrades(symbol, since, 100));
+      for (const trade of trades.sort((a, b) => a.timestamp - b.timestamp)) {
+        const id = String(trade.id || trade.info?.id || `${trade.timestamp}-${trade.order}`);
+        if (this.data.processedTradeIds.includes(id)) continue;
+        const fee = Number(trade.fee?.cost || 0);
+        const amount = Number(trade.amount);
+        const price = Number(trade.price);
+        if (trade.side === 'buy') {
+          this.updateCostBasis(symbol, amount, price, fee);
+        } else if (trade.side === 'sell') {
+          const { netProfit } = this.computeSellPnl(symbol, amount, price, fee);
+          this.data.totals.grossRealizedPnl += netProfit > 0 ? netProfit : 0;
+          this.data.totals.netProfit += netProfit;
+          this.data.totals.tradeCount++;
+          if (netProfit > 0) this.data.totals.profitEvents++;
+          if (netProfit < 0) this.data.totals.lossEvents++;
+          this.data.recentTrades.unshift({
+            id, symbol, time: trade.datetime, side: trade.side, price, amount, netProfit, fee,
+          });
+          this.data.recentTrades = this.data.recentTrades.slice(0, 30);
+        }
+        this.data.processedTradeIds.push(id);
+        this.data.lastTradeTimestamp = Math.max(this.data.lastTradeTimestamp || 0, trade.timestamp);
+        newCount++;
+      }
+    }
+    if (newCount > 0) this.save();
+    return newCount;
   }
 }
 
 // ------------------------------
-//  Main Loop
+//  Learning Memory Module
 // ------------------------------
+class LearningMemory {
+  constructor() {
+    this.data = this._load();
+  }
 
-async function main() {
-  console.log(`
-[START]
-SYMBOLS: ${SYMBOLS.join(", ")}
-TIMEFRAME: ${TIMEFRAME}
-LEVERAGE: ${LEVERAGE}x
-ORDER SIZE: ${ORDER_SIZE_USDT} USDT
-MAX POSITIONS: ${MAX_OPEN_POSITIONS}
-SCAN ROTATION BATCH: ${SCAN_ROTATION_BATCH_SIZE > 0 ? SCAN_ROTATION_BATCH_SIZE : "OFF"}
-LONG ONLY: ${LONG_ONLY}
-SR_WINDOW: ${SR_WINDOW_SIZE}, TOLERANCE: ${SR_LEVEL_TOLERANCE * 100}%
-MIN_AI_CONFIDENCE: ${MIN_AI_CONFIDENCE}
-ALLOWED_STRENGTHS: ${ALLOWED_AI_STRENGTHS.join(", ")}
-UNREALIZED TP MONITOR: ${UNREALIZED_PROFIT_CLOSE_ENABLED ? `${UNREALIZED_PROFIT_MONITOR_INTERVAL_MS}ms` : "OFF"}
-UNREALIZED CLOSE SETTLE DELAY: ${UNREALIZED_CLOSE_SETTLE_DELAY_MS}ms
-LEARNING MEMORY: ${LEARNING_MEMORY_ENABLED ? "ON" : "OFF"} (min trades ${LEARNING_MEMORY_MIN_TRADES}, bad WR ${LEARNING_MEMORY_BAD_WIN_RATE}%, penalty ${LEARNING_MEMORY_CONFIDENCE_PENALTY})
+  _load() {
+    if (!LEARNING_MEMORY_ENABLED) return { stats: { bySymbolSide: {}, bySymbolStrength: {}, byRRRange: {} } };
+    try {
+      if (require('fs').existsSync(LEARNING_MEMORY_PATH)) {
+        return JSON.parse(require('fs').readFileSync(LEARNING_MEMORY_PATH, 'utf8'));
+      }
+    } catch (e) {}
+    return { stats: { bySymbolSide: {}, bySymbolStrength: {}, byRRRange: {} }, version: 1 };
+  }
+
+  save() {
+    if (!LEARNING_MEMORY_ENABLED) return;
+    require('fs').writeFileSync(LEARNING_MEMORY_PATH, JSON.stringify(this.data, null, 2));
+  }
+
+  _updateCategory(cat, key, isWin, pnl) {
+    const category = this.data.stats[cat];
+    if (!category[key]) category[key] = { wins: 0, losses: 0, totalPnl: 0 };
+    const entry = category[key];
+    if (isWin) entry.wins++;
+    else entry.losses++;
+    entry.totalPnl += pnl;
+  }
+
+  record(symbol, side, netProfit, strength, rr) {
+    const isWin = netProfit > 0;
+    const rrRange = rr < 1.5 ? '<1.5' : rr < 2 ? '1.5-2' : '>2';
+    this._updateCategory('bySymbolSide', `${symbol}_${side}`, isWin, netProfit);
+    this._updateCategory('bySymbolStrength', `${symbol}_${strength}`, isWin, netProfit);
+    this._updateCategory('byRRRange', rrRange, isWin, netProfit);
+    this.save();
+  }
+
+  getWinRate(catStats) {
+    if (!catStats) return null;
+    const total = catStats.wins + catStats.losses;
+    return total === 0 ? null : (catStats.wins / total) * 100;
+  }
+
+  adjustConfidence(symbol, signal, strength, rr, originalConf) {
+    if (!LEARNING_MEMORY_ENABLED) return originalConf;
+    const keys = [
+      { cat: 'bySymbolSide', key: `${symbol}_${signal}` },
+      { cat: 'bySymbolStrength', key: `${symbol}_${strength}` },
+      { cat: 'byRRRange', key: rr < 1.5 ? '<1.5' : rr < 2 ? '1.5-2' : '>2' },
+    ];
+    let worstWR = 100;
+    for (const { cat, key } of keys) {
+      const stats = this.data.stats[cat]?.[key];
+      if (stats && (stats.wins + stats.losses) >= LEARNING_MEMORY_MIN_TRADES) {
+        const wr = this.getWinRate(stats);
+        if (wr !== null && wr < worstWR) worstWR = wr;
+      }
+    }
+    if (worstWR < LEARNING_MEMORY_BAD_WIN_RATE) {
+      return Math.floor(originalConf * LEARNING_MEMORY_CONFIDENCE_PENALTY);
+    }
+    return originalConf;
+  }
+}
+
+// ------------------------------
+//  Spot Trading Engine
+// ------------------------------
+class SpotTradingEngine {
+  constructor() {
+    this.exchange = ExchangeManager.getInstance();
+    this.risk = new RiskState();
+    this.ledger = new ProfitLedger();
+    this.memory = new LearningMemory();
+    this.openPositions = new Map(); // symbol -> { amount, entryPrice, tpOrderId, slOrderId }
+    this.pendingSetups = new Map(); // posKey -> setup
+    this.pendingPnL = new Map(); // posKey -> { netProfitSum, strength, rr, recorded }
+    this.lastTradeTime = 0;
+    this.isRunning = false;
+    this.circuitBreaker = { errors: 0, pausedUntil: 0 };
+  }
+
+  async init() {
+    await retry(() => this.exchange.loadMarkets());
+    await this.risk.syncEquity();
+    await this.ledger.syncFromExchange();
+    await this._syncPositionsFromBalance();
+  }
+
+  async _syncPositionsFromBalance() {
+    for (const symbol of SYMBOLS) {
+      const base = symbol.split('/')[0];
+      const balance = await retry(() => this.exchange.fetchBalance());
+      const amount = Number(balance?.free?.[base] || 0);
+      if (amount > 0 && !this.openPositions.has(symbol)) {
+        // approximate entry: could be stored in risk state, but for simplicity we keep only amount
+        this.openPositions.set(symbol, { amount, entryPrice: 0, tpOrderId: null, slOrderId: null });
+      } else if (amount <= 0 && this.openPositions.has(symbol)) {
+        this.openPositions.delete(symbol);
+      }
+    }
+  }
+
+  circuitAllows() {
+    if (this.circuitBreaker.pausedUntil > Date.now()) return false;
+    return true;
+  }
+
+  recordError() {
+    this.circuitBreaker.errors++;
+    if (this.circuitBreaker.errors >= 5) {
+      this.circuitBreaker.pausedUntil = Date.now() + 15 * 60000;
+      console.warn('[CIRCUIT] Paused 15m');
+    }
+  }
+
+  recordSuccess() {
+    this.circuitBreaker.errors = 0;
+  }
+
+  async getQuoteBalance() {
+    const balance = await retry(() => this.exchange.fetchBalance());
+    return Number(balance?.free?.USDT || 0);
+  }
+
+  async calculateBuyAmount(symbol, price) {
+    const target = ORDER_SIZE_USDT;
+    const market = this.exchange.markets[symbol];
+    const minCost = market?.limits?.cost?.min || 10;
+    const finalNotional = Math.max(minCost, target);
+    const amount = finalNotional / price;
+    return this.exchange.amountToPrecision(symbol, amount);
+  }
+
+  async placeBuy(symbol, amount) {
+    const order = await retry(() => this.exchange.createMarketOrder(symbol, 'buy', amount));
+    const filledAmount = Number(order.filled);
+    const avgPrice = order.price || (order.cost / filledAmount);
+    return { amount: filledAmount, entryPrice: avgPrice };
+  }
+
+  async placeSell(symbol, amount) {
+    await retry(() => this.exchange.createMarketOrder(symbol, 'sell', amount));
+  }
+
+  async cancelAllOrders(symbol) {
+    const orders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+    for (const o of orders) await retry(() => this.exchange.cancelOrder(o.id, symbol));
+  }
+
+  async setTPSL(symbol, amount, entry, slPrice, tpPrice) {
+    await this.cancelAllOrders(symbol);
+    const tpOrder = await retry(() => this.exchange.createOrder(symbol, 'TAKE_PROFIT_LIMIT', 'sell', amount, tpPrice, { stopPrice: tpPrice }));
+    const slOrder = await retry(() => this.exchange.createOrder(symbol, 'STOP_LOSS_LIMIT', 'sell', amount, slPrice * 0.999, { stopPrice: slPrice }));
+    return { tpOrderId: tpOrder.id, slOrderId: slOrder.id };
+  }
+
+  async closePosition(symbol) {
+    const pos = this.openPositions.get(symbol);
+    if (!pos) return;
+    await this.cancelAllOrders(symbol);
+    await this.placeSell(symbol, pos.amount);
+    this.openPositions.delete(symbol);
+    await this.ledger.syncFromExchange();
+  }
+
+  async finalizeClosedPositions() {
+    const openSymbols = new Set(this.openPositions.keys());
+    for (const [posKey, acc] of this.pendingPnL.entries()) {
+      if (acc.recorded) continue;
+      const [symbol] = posKey.split('_');
+      if (!openSymbols.has(symbol)) {
+        const setup = this.pendingSetups.get(posKey);
+        const isLoss = acc.netProfitSum < 0;
+        this.risk.updateDailyPnL(acc.netProfitSum, isLoss);
+        if (LEARNING_MEMORY_ENABLED && setup?.strength && setup?.rr) {
+          this.memory.record(symbol, 'LONG', acc.netProfitSum, setup.strength, setup.rr);
+        }
+        acc.recorded = true;
+        this.pendingSetups.delete(posKey);
+        this.pendingPnL.delete(posKey);
+        await this._sendAlert(`[CLOSED] ${symbol} LONG | PnL: ${acc.netProfitSum.toFixed(2)} USDT`);
+      }
+    }
+  }
+
+  async analyzeSymbol(symbol) {
+    if (!this.risk.symbolAllows(symbol)) return null;
+    const [ticker, ohlcv] = await Promise.all([
+      retry(() => this.exchange.fetchTicker(symbol)),
+      retry(() => this.exchange.fetchOHLCV(symbol, TIMEFRAME, undefined, LOOKBACK_CANDLES)),
+    ]);
+    const price = ticker.last;
+    const { support, resistance } = SupportResistance.getLevels(ohlcv);
+    const nearestSupport = support.filter(s => s.price < price).sort((a, b) => b.price - a.price)[0];
+    const nearestResistance = resistance.filter(r => r.price > price).sort((a, b) => a.price - b.price)[0];
+    const distToSupport = nearestSupport ? (price - nearestSupport.price) / price : Infinity;
+    const distToResist = nearestResistance ? (nearestResistance.price - price) / price : Infinity;
+    if (distToSupport > PRICE_PROXIMITY_THRESHOLD && distToResist > PRICE_PROXIMITY_THRESHOLD) return null;
+
+    let ai = await AISignalGenerator.getSignal(symbol, price, support, resistance, ohlcv);
+    if (ai.signal !== 'LONG' || !ai.tradeAllowed) return null;
+    if (!ALLOWED_AI_STRENGTHS.includes(ai.strength)) return null;
+
+    const atr = Indicators.calculateATR(ohlcv.slice(-20));
+    if (!atr) return null;
+    const buffer = price * 0.002;
+    let sl = nearestSupport ? nearestSupport.price - buffer : price - atr * ATR_SL_MULTIPLIER;
+    let tp = nearestResistance ? nearestResistance.price : price + atr * ATR_TP_MULTIPLIER;
+    if (sl >= price) sl = price - atr * ATR_SL_MULTIPLIER;
+    if (tp <= price) tp = price + atr * ATR_TP_MULTIPLIER;
+    const rr = (tp - price) / (price - sl);
+    if (rr < MIN_RR) return null;
+
+    let conf = ai.confidence;
+    conf = this.memory.adjustConfidence(symbol, 'LONG', ai.strength, rr, conf);
+    if (conf < MIN_AI_CONFIDENCE) return null;
+
+    return { symbol, price, sl, tp, rr, confidence: conf, strength: ai.strength, usedSR: !!nearestSupport };
+  }
+
+  async executeCycle() {
+    if (this.isRunning) return;
+    this.isRunning = true;
+    try {
+      if (!this.circuitAllows() || killSwitchActive()) return;
+      await this.risk.syncEquity();
+      await this.ledger.syncFromExchange();
+      await this.finalizeClosedPositions();
+
+      const open = Array.from(this.openPositions.values());
+      if (open.length >= MAX_OPEN_POSITIONS) return;
+      if (!this.risk.allowsTrading()) return;
+
+      const candidates = [];
+      for (const sym of SYMBOLS) {
+        const cand = await this.analyzeSymbol(sym);
+        if (cand) candidates.push(cand);
+      }
+      if (!candidates.length) return;
+
+      candidates.sort((a, b) => (b.confidence * (b.strength === 'EXTREME' ? 4 : b.strength === 'STRONG' ? 3 : b.strength === 'MEDIUM' ? 2 : 1)) -
+        (a.confidence * (a.strength === 'EXTREME' ? 4 : a.strength === 'STRONG' ? 3 : a.strength === 'MEDIUM' ? 2 : 1)));
+      const best = candidates[0];
+      if (this.openPositions.has(best.symbol)) return;
+
+      const balance = await this.getQuoteBalance();
+      const amount = await this.calculateBuyAmount(best.symbol, best.price);
+      if (balance < amount * best.price) return;
+
+      const { entryPrice, amount: filled } = await this.placeBuy(best.symbol, amount);
+      const sl = best.usedSR ? entryPrice * (1 - (entryPrice - best.sl) / entryPrice) : entryPrice - Indicators.calculateATR(await this.exchange.fetchOHLCV(best.symbol, TIMEFRAME, undefined, 20)) * ATR_SL_MULTIPLIER;
+      const tp = best.usedSR ? entryPrice * (1 + (best.tp - entryPrice) / entryPrice) : entryPrice + Indicators.calculateATR(await this.exchange.fetchOHLCV(best.symbol, TIMEFRAME, undefined, 20)) * ATR_TP_MULTIPLIER;
+      const finalRR = (tp - entryPrice) / (entryPrice - sl);
+      const { tpOrderId, slOrderId } = await this.setTPSL(best.symbol, filled, entryPrice, sl, tp);
+      this.openPositions.set(best.symbol, { amount: filled, entryPrice, tpOrderId, slOrderId });
+      const posKey = `${best.symbol}_LONG`;
+      this.pendingSetups.set(posKey, { strength: best.strength, rr: finalRR });
+      this.lastTradeTime = Date.now();
+      await this._sendAlert(`[BUY] ${best.symbol} @ ${entryPrice} | SL=${sl} TP=${tp} RR=${finalRR.toFixed(2)}`);
+    } catch (err) {
+      console.error('[CYCLE]', err);
+      this.recordError();
+    } finally {
+      this.isRunning = false;
+    }
+  }
+
+  async _sendAlert(msg) {
+    if (!FONNTE_ENABLED || !FONNTE_TOKEN || !FONNTE_TARGET) return;
+    try {
+      const form = new URLSearchParams({ target: FONNTE_TARGET, message: msg, countryCode: FONNTE_COUNTRY_CODE }).toString();
+      const req = https.request(FONNTE_API_URL, { method: 'POST', headers: { Authorization: FONNTE_TOKEN, 'Content-Type': 'application/x-www-form-urlencoded' } });
+      req.write(form);
+      req.end();
+    } catch (e) {}
+  }
+
+  async start() {
+    console.log(`
+[SPOT BOT STARTED]
+Symbols: ${SYMBOLS.join(', ')}
+Order Size: ${ORDER_SIZE_USDT} USDT
+Max Positions: ${MAX_OPEN_POSITIONS}
+Min RR: ${MIN_RR}
+AI Confidence: ${MIN_AI_CONFIDENCE}
+Learning Memory: ${LEARNING_MEMORY_ENABLED ? 'ON' : 'OFF'}
 `);
-
-  learningMemory = loadLearningMemory();
-  console.log("[MEMORY] Loaded", Object.keys(learningMemory.stats.bySymbolSide).length, "symbol-side records");
-
-  await retry(() => exchange.loadMarkets());
-  await syncProfitLedger();
-  while (true) {
-    try {
+    await this.init();
+    while (true) {
       const delay = getNextCandleDelay();
-      console.log(`\n[WAIT] Next cycle in ${Math.floor(delay / 1000)}s`);
-      await waitForNextCycleWatchingUnrealizedProfit(delay);
-      await tradingCycle();
-    } catch (err) {
-      console.error(err);
-      await sleep(5000);
+      await sleep(delay);
+      await this.executeCycle();
     }
   }
 }
 
-main().catch(console.error);
+// ------------------------------
+//  Bootstrap
+// ------------------------------
+(async () => {
+  const engine = new SpotTradingEngine();
+  await engine.start();
+})().catch(console.error);
