@@ -15,6 +15,7 @@ Binance tidak menyediakan endpoint publik standar untuk membuat atau mengelola S
 - Range manual (`GRID_LOWER_PRICE` dan `GRID_UPPER_PRICE`) atau range otomatis dari harga berjalan.
 - Batas jumlah active buy/sell order agar saldo tidak langsung terkunci semua.
 - Refill order setelah fill: buy terisi akan memasang sell di level atas, sell terisi akan memasang buy di level bawah.
+- Validasi optional dengan Gemini AI sebelum memasang/refill order baru.
 - State lokal di `grid-state-spot.json`.
 - Kill switch via env atau file `bot-paused.flag`.
 - Alert optional via Fonnte.
@@ -60,6 +61,7 @@ GRID_ORDER_SIZE_USDT=20
 GRID_MAX_ACTIVE_BUY_ORDERS=5
 GRID_MAX_ACTIVE_SELL_ORDERS=5
 GRID_RECREATE_ON_START=false
+AI_VALIDATION_ENABLED=false
 ```
 
 Jika `GRID_LOWER_PRICE` dan `GRID_UPPER_PRICE` bernilai `0`, bot membuat range otomatis saat grid pertama kali dibuat: harga saat itu plus/minus `GRID_RANGE_PCT`. Range tersebut disimpan di `grid-state-spot.json` agar tidak bergeser setiap siklus.
@@ -98,6 +100,21 @@ GRID_MIN_PROFIT_PCT=0.1
 - `GRID_ORDER_SIZE_USDT`: nominal per order grid.
 - `GRID_TOTAL_INVESTMENT_USDT`: jika lebih dari `0`, modal dibagi rata ke jumlah grid.
 - `GRID_MIN_PROFIT_PCT`: jarak minimal sell refill dari harga buy agar tidak terlalu tipis.
+
+## Gemini AI Validation
+
+AI validation bersifat optional. Saat aktif, Gemini hanya menjadi filter untuk order baru dan refill order. Bot tetap mengelola order lama yang sudah terbuka.
+
+```env
+GEMINI_API_KEY=your_gemini_api_key
+AI_VALIDATION_ENABLED=true
+GEMINI_MODEL=gemini-1.5-flash-lite
+AI_VALIDATION_TIMEFRAME=15m
+AI_VALIDATION_LOOKBACK=80
+AI_MIN_CONFIDENCE=60
+```
+
+Jika Gemini menolak kondisi market, bot tidak memasang order baru pada siklus itu. Jika validasi AI gagal atau confidence di bawah `AI_MIN_CONFIDENCE`, bot juga tidak memasang order baru.
 
 ## Reset atau Buat Ulang Grid
 

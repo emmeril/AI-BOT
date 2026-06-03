@@ -3,6 +3,7 @@ const ccxt = require('ccxt');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 // ------------------------------
 //  Configuration Manager
@@ -58,6 +59,14 @@ const GRID_REFILL_ON_FILLED = Config.boolean('GRID_REFILL_ON_FILLED', true);
 const GRID_MIN_PROFIT_PCT = Config.number('GRID_MIN_PROFIT_PCT', 0.1) / 100;
 const GRID_STATE_FILE = Config.get('GRID_STATE_FILE', 'grid-state-spot.json');
 const GRID_STATE_PATH = path.resolve(process.cwd(), GRID_STATE_FILE);
+
+const AI_VALIDATION_ENABLED = Config.boolean('AI_VALIDATION_ENABLED', false);
+const AI_VALIDATION_TIMEFRAME = Config.get('AI_VALIDATION_TIMEFRAME', '15m');
+const AI_VALIDATION_LOOKBACK = Config.number('AI_VALIDATION_LOOKBACK', 80);
+const AI_VALIDATION_CACHE_TTL_MS = Config.number('AI_VALIDATION_CACHE_TTL_MS', Math.max(INTERVAL_MS * 3, 60000));
+const AI_VALIDATION_RETRIES = Config.number('AI_VALIDATION_RETRIES', 2);
+const AI_MIN_CONFIDENCE = Config.number('AI_MIN_CONFIDENCE', 60);
+const GEMINI_MODEL = Config.get('GEMINI_MODEL', 'gemini-1.5-flash-lite');
 
 const STOP_LOSS_PRICE = Config.number('GRID_STOP_LOSS_PRICE', 0);
 const TAKE_PROFIT_PRICE = Config.number('GRID_TAKE_PROFIT_PRICE', 0);
@@ -200,11 +209,171 @@ class GridState {
 }
 
 // ------------------------------
+//  Gemini Grid Validation
+// ------------------------------
+class AIGridValidator {
+  static cache = new Map();
+
+  constructor(exchange) {
+    this.exchange = exchange;
+    this.model = null;
+    if (AI_VALIDATION_ENABLED) {
+      if (!process.env.GEMINI_API_KEY) {
+        throw new Error('AI_VALIDATION_ENABLED=true membutuhkan GEMINI_API_KEY.');
+      }
+      const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+      this.model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+    }
+  }
+
+  static allow(reason = 'AI validation disabled') {
+    return { allowTrading: true, allowBuy: true, allowSell: true, confidence: 100, reason };
+  }
+
+  static block(reason, confidence = 0) {
+    return { allowTrading: false, allowBuy: false, allowSell: false, confidence, reason };
+  }
+
+  cacheKey(symbol, currentPrice, levels) {
+    const bucket = Math.floor(Date.now() / AI_VALIDATION_CACHE_TTL_MS);
+    const rangeKey = `${roundNumber(levels[0])}-${roundNumber(levels[levels.length - 1])}`;
+    return `${symbol}|${AI_VALIDATION_TIMEFRAME}|${bucket}|${roundNumber(currentPrice)}|${rangeKey}`;
+  }
+
+  getCached(key) {
+    const entry = AIGridValidator.cache.get(key);
+    if (entry && entry.expiresAt > Date.now()) return entry.value;
+    if (entry) AIGridValidator.cache.delete(key);
+    return null;
+  }
+
+  setCached(key, value) {
+    AIGridValidator.cache.set(key, { value, expiresAt: Date.now() + AI_VALIDATION_CACHE_TTL_MS });
+  }
+
+  summarizeCandles(ohlcv) {
+    if (!ohlcv.length) return {};
+    const closes = ohlcv.map(c => Number(c[4]));
+    const highs = ohlcv.map(c => Number(c[2]));
+    const lows = ohlcv.map(c => Number(c[3]));
+    const volumes = ohlcv.map(c => Number(c[5]));
+    const first = closes[0];
+    const last = closes[closes.length - 1];
+    const high = Math.max(...highs);
+    const low = Math.min(...lows);
+    const avgVolume = volumes.reduce((sum, value) => sum + value, 0) / volumes.length;
+    const recentVolume = volumes.slice(-10).reduce((sum, value) => sum + value, 0) / Math.min(10, volumes.length);
+    return {
+      firstClose: roundNumber(first),
+      lastClose: roundNumber(last),
+      changePct: roundNumber(((last - first) / first) * 100, 4),
+      high: roundNumber(high),
+      low: roundNumber(low),
+      rangePct: roundNumber(((high - low) / last) * 100, 4),
+      avgVolume: roundNumber(avgVolume, 4),
+      recentVolume: roundNumber(recentVolume, 4),
+    };
+  }
+
+  buildPrompt(symbol, context, candleSummary) {
+    const { currentPrice, lower, upper, levels } = context;
+    const distLowerPct = ((currentPrice - lower) / currentPrice) * 100;
+    const distUpperPct = ((upper - currentPrice) / currentPrice) * 100;
+    return `
+You validate whether a Binance spot grid bot may place new orders.
+
+Return only JSON with:
+{
+  "allowTrading": true/false,
+  "allowBuy": true/false,
+  "allowSell": true/false,
+  "confidence": 0-100,
+  "reason": "short reason"
+}
+
+Decision rules:
+- Grid works best in ranging or mildly volatile markets.
+- Block new orders when trend is strongly one-directional, price is breaking out of range, volatility is extreme, or market data is unclear.
+- allowBuy can be false if downside pressure is high.
+- allowSell can be false if upside breakout pressure is high.
+- Be conservative. Existing open orders are managed by the bot; you only validate new orders.
+
+Symbol: ${symbol}
+Current Price: ${currentPrice}
+Grid Lower: ${lower}
+Grid Upper: ${upper}
+Grid Count: ${GRID_COUNT}
+Grid Mode: ${GRID_MODE}
+Distance to Lower: ${distLowerPct.toFixed(3)}%
+Distance to Upper: ${distUpperPct.toFixed(3)}%
+Nearest Levels: ${levels.map(level => roundNumber(level)).join(', ')}
+Candle Timeframe: ${AI_VALIDATION_TIMEFRAME}
+Candle Summary: ${JSON.stringify(candleSummary)}
+`;
+  }
+
+  parseResponse(text) {
+    const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start === -1 || end === -1) throw new Error('No JSON object in Gemini response');
+    const parsed = JSON.parse(cleaned.slice(start, end + 1));
+    const confidence = Number(parsed.confidence);
+    return {
+      allowTrading: parsed.allowTrading === true,
+      allowBuy: parsed.allowBuy === true,
+      allowSell: parsed.allowSell === true,
+      confidence: Number.isFinite(confidence) ? confidence : 0,
+      reason: String(parsed.reason || '').slice(0, 300),
+    };
+  }
+
+  async validate(symbol, context) {
+    if (!AI_VALIDATION_ENABLED) return AIGridValidator.allow();
+
+    const cacheKey = this.cacheKey(symbol, context.currentPrice, context.levels);
+    const cached = this.getCached(cacheKey);
+    if (cached) return cached;
+
+    try {
+      const ohlcv = await retry(
+        () => this.exchange.fetchOHLCV(symbol, AI_VALIDATION_TIMEFRAME, undefined, AI_VALIDATION_LOOKBACK),
+        AI_VALIDATION_RETRIES
+      );
+      const prompt = this.buildPrompt(symbol, context, this.summarizeCandles(ohlcv));
+      for (let attempt = 1; attempt <= AI_VALIDATION_RETRIES + 1; attempt++) {
+        try {
+          const result = await this.model.generateContent(prompt);
+          const decision = this.parseResponse(result.response.text());
+          if (decision.confidence < AI_MIN_CONFIDENCE) {
+            const blocked = AIGridValidator.block(`Low AI confidence: ${decision.reason}`, decision.confidence);
+            this.setCached(cacheKey, blocked);
+            return blocked;
+          }
+          this.setCached(cacheKey, decision);
+          return decision;
+        } catch (err) {
+          if (attempt > AI_VALIDATION_RETRIES) throw err;
+          await sleep(1000 * attempt);
+        }
+      }
+    } catch (err) {
+      const blocked = AIGridValidator.block(`AI validation failed: ${err.message}`);
+      this.setCached(cacheKey, blocked);
+      return blocked;
+    }
+
+    return AIGridValidator.block('AI validation unavailable');
+  }
+}
+
+// ------------------------------
 //  Binance-Style Spot Grid Engine
 // ------------------------------
 class SpotGridEngine {
   constructor() {
     this.exchange = ExchangeManager.getInstance();
+    this.aiValidator = new AIGridValidator(this.exchange);
     this.state = new GridState();
     this.isRunning = false;
     this.circuitBreaker = { errors: 0, pausedUntil: 0 };
@@ -361,7 +530,7 @@ class SpotGridEngine {
     return price >= lower && price <= upper;
   }
 
-  async handleFilledTrades(symbol, levels) {
+  async handleFilledTrades(symbol, levels, aiDecision) {
     const symState = this.state.getSymbol(symbol);
     const [trades, openOrders] = await Promise.all([
       retry(() => this.exchange.fetchMyTrades(symbol, undefined, 100)),
@@ -387,7 +556,7 @@ class SpotGridEngine {
         symState.lastBuyByLevel[levelIndex] = { price, amount, fee, at: trade.datetime };
         this.state.data.totals.filledBuys++;
         await this._sendAlert(`[GRID BUY] ${symbol} amount=${amount} @ ${price}`);
-        if (GRID_REFILL_ON_FILLED && levelIndex + 1 < levels.length) {
+        if (GRID_REFILL_ON_FILLED && aiDecision.allowTrading && aiDecision.allowSell && levelIndex + 1 < levels.length) {
           const sellPrice = levels[levelIndex + 1];
           if ((sellPrice - price) / price >= GRID_MIN_PROFIT_PCT) {
             await this.placeLimit(symbol, 'sell', levelIndex + 1, sellPrice, amount);
@@ -402,7 +571,7 @@ class SpotGridEngine {
         this.state.data.totals.realizedGridProfit += estimatedProfit;
         this.state.data.totals.filledSells++;
         await this._sendAlert(`[GRID SELL] ${symbol} amount=${amount} @ ${price} | est profit=${estimatedProfit.toFixed(4)} USDT`);
-        if (GRID_REFILL_ON_FILLED && levelIndex - 1 >= 0) {
+        if (GRID_REFILL_ON_FILLED && aiDecision.allowTrading && aiDecision.allowBuy && levelIndex - 1 >= 0) {
           await this.placeLimit(symbol, 'buy', levelIndex - 1, levels[levelIndex - 1], amount);
         }
       }
@@ -434,7 +603,15 @@ class SpotGridEngine {
     const canContinue = await this.enforceRangeExits(symbol, currentPrice);
     if (!canContinue) return;
 
-    await this.handleFilledTrades(symbol, levels);
+    const aiDecision = await this.aiValidator.validate(symbol, context);
+    if (AI_VALIDATION_ENABLED) {
+      console.log(
+        `[AI] ${symbol} allow=${aiDecision.allowTrading} buy=${aiDecision.allowBuy} sell=${aiDecision.allowSell} ` +
+        `confidence=${aiDecision.confidence} | ${aiDecision.reason}`
+      );
+    }
+
+    await this.handleFilledTrades(symbol, levels, aiDecision);
 
     const freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
     let managedOrders = this.getManagedOpenOrders(symbol, freshOpenOrders);
@@ -473,6 +650,7 @@ class SpotGridEngine {
     let baseFree = this.getBaseFree(balance, symbol);
 
     for (const level of below) {
+      if (!aiDecision.allowTrading || !aiDecision.allowBuy) break;
       if (activeBuyLevels.has(level.index)) continue;
       const amount = this.amountForBuy(symbol, level.price);
       const cost = amount * level.price;
@@ -482,6 +660,7 @@ class SpotGridEngine {
     }
 
     for (const level of above) {
+      if (!aiDecision.allowTrading || !aiDecision.allowSell) break;
       if (activeSellLevels.has(level.index)) continue;
       const amount = this.amountForBuy(symbol, currentPrice);
       if (baseFree < amount) break;
@@ -540,6 +719,7 @@ Order Size: ${this.getOrderSizeUsdt()} USDT/grid
 Range: ${GRID_LOWER_PRICE && GRID_UPPER_PRICE ? `${GRID_LOWER_PRICE}-${GRID_UPPER_PRICE}` : `auto +/-${GRID_RANGE_PCT}%`}
 Max Active Orders: buy=${GRID_MAX_ACTIVE_BUY_ORDERS}, sell=${GRID_MAX_ACTIVE_SELL_ORDERS}
 Recreate On Start: ${GRID_RECREATE_ON_START ? 'ON' : 'OFF'}
+AI Validation: ${AI_VALIDATION_ENABLED ? `ON (${GEMINI_MODEL})` : 'OFF'}
 `);
     await this.init();
     while (true) {
