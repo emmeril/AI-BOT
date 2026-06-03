@@ -469,9 +469,14 @@ class SpotGridEngine {
   async init() {
     await retry(() => this.exchange.loadMarkets());
     for (const symbol of SYMBOLS) {
-      this.ensureMarket(symbol);
-      if (GRID_RECREATE_ON_START) await this.cancelGridOrders(symbol, 'recreate-on-start');
-      await this.reconcileSymbol(symbol);
+      try {
+        this.ensureMarket(symbol);
+        if (GRID_RECREATE_ON_START) await this.cancelGridOrders(symbol, 'recreate-on-start');
+        await this.reconcileSymbol(symbol);
+      } catch (err) {
+        console.error(`[INIT] ${symbol}`, err);
+        this.recordError();
+      }
     }
   }
 
@@ -589,10 +594,28 @@ class SpotGridEngine {
   async placeLimit(symbol, side, levelIndex, price, amount) {
     const precisePrice = this.exchange.priceToPrecision(symbol, price);
     const preciseAmount = this.exchange.amountToPrecision(symbol, amount);
-    const order = await retry(() => this.exchange.createLimitOrder(symbol, side, preciseAmount, precisePrice));
-    this.state.rememberOrder(symbol, order, { levelIndex });
-    console.log(`[GRID] ${symbol} ${side.toUpperCase()} level=${levelIndex} amount=${preciseAmount} price=${precisePrice}`);
-    return order;
+    try {
+      const order = await retry(() => this.exchange.createLimitOrder(symbol, side, preciseAmount, precisePrice));
+      this.state.rememberOrder(symbol, order, { levelIndex });
+      console.log(`[GRID] ${symbol} ${side.toUpperCase()} level=${levelIndex} amount=${preciseAmount} price=${precisePrice}`);
+      return order;
+    } catch (err) {
+      if (this.isInsufficientFundsError(err)) {
+        console.warn(
+          `[SKIP] ${symbol} ${side.toUpperCase()} level=${levelIndex} amount=${preciseAmount} price=${precisePrice} | insufficient balance`
+        );
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  isInsufficientFundsError(err) {
+    const message = String(err?.message || err || '').toLowerCase();
+    return err instanceof ccxt.InsufficientFunds ||
+      err?.name === 'InsufficientFunds' ||
+      message.includes('insufficient balance') ||
+      message.includes('insufficient funds');
   }
 
   getBaseFree(balance, symbol) {
@@ -742,7 +765,8 @@ class SpotGridEngine {
       const amount = this.amountForBuy(symbol, level.price);
       const cost = amount * level.price;
       if (quoteFree < cost) break;
-      await this.placeLimit(symbol, 'buy', level.index, level.price, amount);
+      const order = await this.placeLimit(symbol, 'buy', level.index, level.price, amount);
+      if (!order) break;
       quoteFree -= cost;
     }
 
@@ -751,7 +775,8 @@ class SpotGridEngine {
       if (activeSellLevels.has(level.index)) continue;
       const amount = this.amountForBuy(symbol, currentPrice);
       if (baseFree < amount) break;
-      await this.placeLimit(symbol, 'sell', level.index, level.price, amount);
+      const order = await this.placeLimit(symbol, 'sell', level.index, level.price, amount);
+      if (!order) break;
       baseFree -= amount;
     }
 
