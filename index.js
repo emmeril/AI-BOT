@@ -651,6 +651,40 @@ class SpotGridEngine {
     return amount;
   }
 
+  estimateGridProfit(symbol, buy, sellTrade) {
+    if (!buy) return { profit: 0, externalFees: [] };
+
+    const base = this.getBaseAsset(symbol).toUpperCase();
+    const quote = this.getQuoteAsset(symbol).toUpperCase();
+    const sellPrice = Number(sellTrade.price);
+    const sellAmount = Number(sellTrade.amount);
+    const buyPrice = Number(buy.price);
+    const buyAmount = Number(buy.amount);
+    const buyFee = Number(buy.fee || 0);
+    const buyFeeCurrency = String(buy.feeCurrency || '').toUpperCase();
+    const sellFee = this.getTradeFeeCost(sellTrade);
+    const sellFeeCurrency = this.getTradeFeeCurrency(sellTrade);
+
+    let profit = (sellPrice * sellAmount) - (buyPrice * buyAmount);
+    const externalFees = [];
+
+    if (buyFeeCurrency === quote) {
+      profit -= buyFee;
+    } else if (buyFeeCurrency && buyFeeCurrency !== base) {
+      externalFees.push(`${buyFee} ${buyFeeCurrency}`);
+    }
+
+    if (sellFeeCurrency === quote) {
+      profit -= sellFee;
+    } else if (sellFeeCurrency === base) {
+      profit -= sellFee * sellPrice;
+    } else if (sellFeeCurrency) {
+      externalFees.push(`${sellFee} ${sellFeeCurrency}`);
+    }
+
+    return { profit, externalFees };
+  }
+
   amountForBuy(symbol, price) {
     const market = this.exchange.markets[symbol];
     const minCost = Number(market?.limits?.cost?.min || 0);
@@ -684,10 +718,11 @@ class SpotGridEngine {
       const amount = Number(trade.amount);
       const levelIndex = Number(orderMeta.levelIndex);
       const fee = this.getTradeFeeCost(trade);
+      const feeCurrency = this.getTradeFeeCurrency(trade);
 
       if (side === 'buy') {
         const sellableAmount = this.amountAfterBuyFee(symbol, trade);
-        symState.lastBuyByLevel[levelIndex] = { price, amount, sellableAmount, fee, at: trade.datetime };
+        symState.lastBuyByLevel[levelIndex] = { price, amount, sellableAmount, fee, feeCurrency, at: trade.datetime };
         this.state.data.totals.filledBuys++;
         await this._sendAlert(`[GRID BUY] ${symbol} amount=${amount} @ ${price} | sellable=${sellableAmount}`);
         if (GRID_REFILL_ON_FILLED && aiDecision.allowTrading && aiDecision.allowSell && levelIndex + 1 < levels.length) {
@@ -704,11 +739,15 @@ class SpotGridEngine {
 
       if (side === 'sell') {
         const buy = symState.lastBuyByLevel[levelIndex - 1] || symState.lastBuyByLevel[levelIndex];
-        const estimatedProfit = buy ? (price - buy.price) * amount - fee - Number(buy.fee || 0) : 0;
+        const profitEstimate = this.estimateGridProfit(symbol, buy, trade);
+        const estimatedProfit = profitEstimate.profit;
         symState.realizedGridProfit += estimatedProfit;
         this.state.data.totals.realizedGridProfit += estimatedProfit;
         this.state.data.totals.filledSells++;
-        await this._sendAlert(`[GRID SELL] ${symbol} amount=${amount} @ ${price} | est profit=${estimatedProfit.toFixed(4)} USDT`);
+        const externalFeeText = profitEstimate.externalFees.length
+          ? ` | external fees=${profitEstimate.externalFees.join(', ')}`
+          : '';
+        await this._sendAlert(`[GRID SELL] ${symbol} amount=${amount} @ ${price} | est profit=${estimatedProfit.toFixed(4)} USDT${externalFeeText}`);
         if (GRID_REFILL_ON_FILLED && aiDecision.allowTrading && aiDecision.allowBuy && levelIndex - 1 >= 0) {
           await this.placeLimit(symbol, 'buy', levelIndex - 1, levels[levelIndex - 1], amount);
         }
