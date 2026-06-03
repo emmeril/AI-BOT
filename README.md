@@ -1,54 +1,31 @@
-# Smart Binance AI Futures Bot
+# Binance Spot Grid Bot
 
-Bot trading Binance Futures berbasis Node.js yang menggabungkan analisis teknikal multi-timeframe, filter risiko, dan validasi sinyal menggunakan Google Gemini AI.
+Bot trading Binance Spot berbasis Node.js yang menjalankan strategi grid bergaya Binance: memasang limit buy di bawah harga berjalan, limit sell di atas harga berjalan, dan mengisi ulang order lawan ketika order grid terisi.
 
-> Peringatan: project ini berhubungan dengan futures trading yang berisiko tinggi. Gunakan testnet/demo terlebih dahulu. Jangan gunakan dana yang tidak siap hilang.
+> Peringatan: trading crypto tetap berisiko. Mulai dari nominal kecil, gunakan API key dengan permission terbatas, dan cek semua parameter sebelum menjalankan di akun live.
 
-## Fitur Utama
+## Catatan Penting
 
-- Scan multi-symbol untuk market Binance USDT Futures.
-- Analisis teknikal dengan EMA, RSI, ATR, volume, funding rate, dan market regime.
-- Validasi sinyal dengan Gemini AI.
-- Mode `LONG_ONLY` untuk membatasi entry hanya ke posisi long.
-- Risk guard: daily loss limit, consecutive loss limit, max notional, risk per trade, dan max open positions.
-- Kill switch lewat environment variable atau file `bot-paused.flag`.
-- Stop loss sistem berbasis unrealized PnL, serta take profit berbasis unrealized PnL profit.
-- Profit ledger lokal untuk ringkasan realized PnL.
-- Alert trade via Fonnte untuk info entry dan realized trade.
-- AI explain log untuk audit keputusan sinyal.
-- Walk-forward optimizer untuk mencari parameter yang lebih cocok dari data historis.
+Binance tidak menyediakan endpoint publik standar untuk membuat atau mengelola Spot Grid Bot bawaan Binance lewat API biasa. Project ini memakai order spot Binance via `ccxt` untuk menjalankan mekanisme grid yang serupa secara lokal.
 
-## Tech Stack
+## Fitur
 
-- Node.js CommonJS
-- `ccxt` untuk koneksi Binance Futures
-- `@google/generative-ai` untuk Gemini
-- `dotenv` untuk konfigurasi environment
-- `technicalindicators` untuk indikator teknikal
-
-## Struktur Project
-
-```text
-.
-|-- index.js                    # Bot trading utama
-|-- walk-forward-optimizer.js   # Optimizer parameter berbasis data historis
-|-- .env.example                # Contoh konfigurasi
-|-- package.json
-|-- pnpm-lock.yaml
-`-- pnpm-workspace.yaml
-```
-
-File runtime seperti `.env`, `.env.tuned`, `profit-ledger.json`, `risk-state.json`, `walk-forward-report.json`, dan `ai-explain-log.jsonl` sengaja di-ignore dari Git.
+- Binance Spot grid untuk satu atau beberapa symbol.
+- Grid arithmetic atau geometric.
+- Range manual (`GRID_LOWER_PRICE` dan `GRID_UPPER_PRICE`) atau range otomatis dari harga berjalan.
+- Batas jumlah active buy/sell order agar saldo tidak langsung terkunci semua.
+- Refill order setelah fill: buy terisi akan memasang sell di level atas, sell terisi akan memasang buy di level bawah.
+- State lokal di `grid-state-spot.json`.
+- Kill switch via env atau file `bot-paused.flag`.
+- Alert optional via Fonnte.
 
 ## Instalasi
-
-Clone repository, lalu install dependency:
 
 ```bash
 pnpm install
 ```
 
-Jika memakai npm:
+Atau:
 
 ```bash
 npm install
@@ -58,136 +35,83 @@ npm install
 
 Salin file contoh environment:
 
-```bash
-cp .env.example .env
-```
-
-Di Windows PowerShell:
-
 ```powershell
-Copy-Item .env.example .env
+Copy-Item env.example .env
 ```
 
-Lalu isi nilai berikut di `.env`:
+Isi API key Binance:
 
 ```env
-EXCHANGE_API_KEY=your_exchange_api_key
-EXCHANGE_SECRET=your_exchange_secret
-EXCHANGE_DEMO=true
-
-GEMINI_API_KEY=your_gemini_api_key
-GEMINI_MODEL=gemini-3.1-flash-lite
-
-FONNTE_ENABLED=true
-FONNTE_TOKEN=your_fonnte_token
-FONNTE_TARGET=62812xxxxxxx
+EXCHANGE_API_KEY=your_binance_api_key
+EXCHANGE_SECRET=your_binance_secret
 ```
 
-Untuk awal penggunaan, sangat disarankan tetap memakai:
+Contoh grid konservatif:
 
 ```env
-EXCHANGE_DEMO=true
-ORDER_SIZE_USDT=5
-MAX_OPEN_POSITIONS=1
-LONG_ONLY=true
+SYMBOLS=BTC/USDT
+INTERVAL_MINUTES=1
+GRID_MODE=ARITHMETIC
+GRID_COUNT=10
+GRID_LOWER_PRICE=0
+GRID_UPPER_PRICE=0
+GRID_RANGE_PCT=5
+GRID_ORDER_SIZE_USDT=20
+GRID_MAX_ACTIVE_BUY_ORDERS=5
+GRID_MAX_ACTIVE_SELL_ORDERS=5
+GRID_RECREATE_ON_START=false
 ```
+
+Jika `GRID_LOWER_PRICE` dan `GRID_UPPER_PRICE` bernilai `0`, bot membuat range otomatis saat grid pertama kali dibuat: harga saat itu plus/minus `GRID_RANGE_PCT`. Range tersebut disimpan di `grid-state-spot.json` agar tidak bergeser setiap siklus.
 
 ## Menjalankan Bot
-
-Jalankan bot utama:
 
 ```bash
 node index.js
 ```
 
-Bot akan menunggu candle berikutnya sesuai `INTERVAL_MINUTES`, lalu menjalankan siklus scan, validasi AI, risk check, dan eksekusi order jika ada setup yang lolos.
+Bot akan:
 
-Kalau ingin lebih hemat rate limit AI, atur `SCAN_ROTATION_BATCH_SIZE` supaya bot hanya memeriksa sebagian simbol per siklus secara bergiliran. Misalnya `2` akan membuat bot scan 2 simbol dulu, lalu lanjut ke batch berikutnya di siklus berikutnya.
+1. Load market Binance spot.
+2. Hitung level grid.
+3. Sinkron order grid yang tersimpan di state lokal.
+4. Pasang order buy di bawah harga dan sell di atas harga sesuai saldo.
+5. Setiap siklus, cek fill, refill order lawan, dan bersihkan order di luar range.
 
-Saat jumlah posisi terbuka sudah mencapai `MAX_OPEN_POSITIONS`, bot akan memfokuskan scan ke simbol yang sedang terbuka saja. Ini mencegah panggilan Gemini terbuang ke simbol baru yang memang tidak bisa dibuka lagi pada siklus tersebut.
-
-Bot juga punya cache berbasis candle untuk hasil AI. Itu membantu mencegah panggilan Gemini yang sama berulang pada candle yang sama. Kalau perlu, cache bisa dimatikan lewat `AI_SIGNAL_CACHE_ENABLED=false`.
-
-## Menjalankan Optimizer
-
-Optimizer dipakai untuk melakukan walk-forward test terhadap kombinasi parameter yang didefinisikan di `.env`.
-
-```bash
-pnpm optimize
-```
-
-Atau:
-
-```bash
-node walk-forward-optimizer.js
-```
-
-Output default:
-
-- `walk-forward-report.json`
-- `.env.tuned`
-
-Nilai di `.env.tuned` bisa dijadikan referensi untuk memperbarui `.env`.
-
-## Konfigurasi Penting
-
-### Trading
+## Parameter Grid
 
 ```env
-SYMBOLS=DOGE/USDT:USDT,1000SHIB/USDT:USDT,1000PEPE/USDT:USDT
-MAX_OPEN_POSITIONS=1
-LEVERAGE=10
-ORDER_SIZE_USDT=5
-TIMEFRAME=15m
-HTF_TIMEFRAME=30m
-INTERVAL_MINUTES=5
-SCAN_ROTATION_BATCH_SIZE=2
-AI_SIGNAL_CACHE_ENABLED=true
-AI_SIGNAL_CACHE_TTL_MS=900000
+GRID_MODE=ARITHMETIC
+GRID_COUNT=10
+GRID_LOWER_PRICE=0
+GRID_UPPER_PRICE=0
+GRID_RANGE_PCT=5
+GRID_ORDER_SIZE_USDT=20
+GRID_TOTAL_INVESTMENT_USDT=0
+GRID_MAX_ACTIVE_BUY_ORDERS=5
+GRID_MAX_ACTIVE_SELL_ORDERS=5
+GRID_MIN_PROFIT_PCT=0.1
 ```
 
-### Risk Management
+- `GRID_MODE`: `ARITHMETIC` untuk jarak harga tetap, `GEOMETRIC` untuk jarak persentase tetap.
+- `GRID_COUNT`: jumlah interval grid. Bot membuat `GRID_COUNT + 1` level harga.
+- `GRID_ORDER_SIZE_USDT`: nominal per order grid.
+- `GRID_TOTAL_INVESTMENT_USDT`: jika lebih dari `0`, modal dibagi rata ke jumlah grid.
+- `GRID_MIN_PROFIT_PCT`: jarak minimal sell refill dari harga buy agar tidak terlalu tipis.
+
+## Reset atau Buat Ulang Grid
+
+Untuk membatalkan order grid lama saat startup:
 
 ```env
-RISK_PER_TRADE_PCT=1
-MAX_DAILY_LOSS_PCT=3
-MAX_DAILY_LOSS_USDT=0
-MAX_CONSECUTIVE_LOSSES=3
-MAX_POSITION_NOTIONAL_USDT=1000
-MIN_RR=1.5
+GRID_RECREATE_ON_START=true
 ```
 
-### TP/SL Unrealized PnL
+Gunakan dengan hati-hati karena order grid yang masih terbuka akan dibatalkan.
 
-Secara default bot tidak lagi memasang order `TAKE_PROFIT_MARKET` di exchange. Bot juga memakai SL sistem berbasis unrealized PnL: jika unrealized PnL rugi mencapai batas persentase dari margin posisi, bot langsung menutup posisi dengan market reduce-only. Jika estimasi net unrealized PnL sudah melewati batas profit minimum setelah buffer fee, bot menutup posisi dengan market reduce-only lalu menunggu sebentar supaya fill dan realized PnL dari exchange tersinkron.
+## Kill Switch
 
-```env
-UNREALIZED_PROFIT_CLOSE_ENABLED=true
-UNREALIZED_PROFIT_CLOSE_MIN_USDT=0.02
-UNREALIZED_PROFIT_CLOSE_MIN_PCT=0
-UNREALIZED_PROFIT_CLOSE_FEE_RATE=0.0005
-UNREALIZED_PROFIT_CLOSE_FEE_SIDES=2
-UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT=0
-UNREALIZED_CLOSE_SETTLE_DELAY_MS=2000
-UNREALIZED_LOSS_CLOSE_ENABLED=true
-UNREALIZED_LOSS_CLOSE_PCT=30
-UNREALIZED_PROFIT_MONITOR_INTERVAL_MS=1000
-```
-
-`UNREALIZED_PROFIT_CLOSE_MIN_USDT` default `0.02` supaya bot tidak menutup posisi saat estimasi net profit masih terlalu tipis. Naikkan `UNREALIZED_PROFIT_CLOSE_MIN_USDT`, `UNREALIZED_PROFIT_CLOSE_MIN_PCT`, atau `UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT` jika realized PnL masih sering negatif karena spread, slippage, funding, atau fee akun lebih tinggi. Bot mengurangi `unrealizedPnl` dengan estimasi fee `UNREALIZED_PROFIT_CLOSE_FEE_RATE * notional * UNREALIZED_PROFIT_CLOSE_FEE_SIDES` plus `UNREALIZED_PROFIT_CLOSE_FEE_BUFFER_USDT`, sehingga posisi tidak ditutup hanya karena gross unrealized PnL kecil yang masih habis oleh fee/slippage. `UNREALIZED_CLOSE_SETTLE_DELAY_MS` memberi jeda sebelum sync realized PnL agar riwayat fill dari exchange tidak terbaca terlalu cepat. `UNREALIZED_LOSS_CLOSE_PCT=30` berarti posisi ditutup ketika unrealized PnL mencapai rugi 30% dari margin posisi (`notional / LEVERAGE`). Set `UNREALIZED_LOSS_CLOSE_ENABLED=false` jika ingin kembali memasang order `STOP_MARKET` price-based di exchange. Turunkan `UNREALIZED_PROFIT_MONITOR_INTERVAL_MS` jika ingin polling lebih cepat (minimum 250 ms). Set `UNREALIZED_PROFIT_CLOSE_ENABLED=false` untuk kembali memakai order TP exchange.
-
-### AI Filter
-
-```env
-AI_FILTER_ENABLED=true
-MIN_AI_CONFIDENCE=65
-ALLOWED_AI_STRENGTHS=MEDIUM,STRONG,EXTREME
-AI_RESPONSE_RETRIES=2
-```
-
-### Kill Switch
-
-Matikan entry baru lewat `.env`:
+Matikan siklus trading baru lewat `.env`:
 
 ```env
 STOP_TRADING=true
@@ -195,35 +119,17 @@ STOP_TRADING=true
 
 Atau buat file:
 
-```bash
-touch bot-paused.flag
-```
-
-Di Windows PowerShell:
-
 ```powershell
 New-Item bot-paused.flag
 ```
 
-Hapus file tersebut untuk mengizinkan entry baru lagi.
+Hapus file tersebut untuk mengizinkan bot berjalan lagi.
 
-## File Output Runtime
+## File Runtime
 
-- `profit-ledger.json`: catatan realized PnL dan fee.
-- `risk-state.json`: state risk harian, loss streak, dan cooldown symbol.
-- `ai-explain-log.jsonl`: log keputusan AI dan alasan sinyal diterima/ditolak.
-- `walk-forward-report.json`: hasil optimizer.
-- `.env.tuned`: rekomendasi parameter dari optimizer.
-
-## Catatan Keamanan
-
-- Jangan commit `.env` atau API key.
-- Aktifkan restriction API key di Binance.
-- Gunakan key khusus futures testnet/demo saat pengujian.
-- Mulai dari ukuran order kecil.
-- Cek kembali semua parameter order sebelum menjalankan di akun live.
-- Pastikan saldo dan leverage sesuai toleransi risiko.
+- `grid-state-spot.json`: state order grid dan estimasi profit.
+- `bot-paused.flag`: kill switch file jika diaktifkan.
 
 ## Disclaimer
 
-Project ini hanya untuk edukasi dan eksperimen. Tidak ada jaminan profit. Semua keputusan trading dan risiko finansial sepenuhnya menjadi tanggung jawab pengguna.
+Project ini untuk edukasi dan eksperimen. Tidak ada jaminan profit. Semua keputusan trading dan risiko finansial sepenuhnya menjadi tanggung jawab pengguna.
