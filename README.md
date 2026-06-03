@@ -45,7 +45,22 @@ Isi API key Binance:
 ```env
 EXCHANGE_API_KEY=your_binance_api_key
 EXCHANGE_SECRET=your_binance_secret
+EXCHANGE_MODE=live
 ```
+
+Mode exchange yang tersedia:
+
+```env
+EXCHANGE_MODE=live
+EXCHANGE_MODE=demo
+EXCHANGE_MODE=testnet
+```
+
+- `live`: Binance live API.
+- `demo`: Binance Demo Trading API (`https://demo-api.binance.com`).
+- `testnet`: Binance Spot Testnet lama (`https://testnet.binance.vision`).
+
+Untuk demo, buat API key dari Binance Demo Trading: https://demo.binance.com/en/my/settings/api-management. Untuk testnet, gunakan key Spot Testnet. Jangan memakai API key live untuk demo/testnet.
 
 Contoh grid konservatif:
 
@@ -108,7 +123,7 @@ AI validation bersifat optional. Saat aktif, Gemini hanya menjadi filter untuk o
 ```env
 GEMINI_API_KEY=your_gemini_api_key
 AI_VALIDATION_ENABLED=true
-GEMINI_MODEL=gemini-1.5-flash-lite
+GEMINI_MODEL=gemini-2.0-flash-lite
 AI_VALIDATION_TIMEFRAME=15m
 AI_VALIDATION_LOOKBACK=80
 AI_MIN_CONFIDENCE=60

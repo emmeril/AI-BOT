@@ -41,6 +41,8 @@ class Config {
 //  Constants
 // ------------------------------
 const SYMBOLS = Config.list('SYMBOLS', 'BTC/USDT');
+const EXCHANGE_MODE = Config.get('EXCHANGE_MODE', Config.boolean('EXCHANGE_DEMO', false) ? 'demo' : 'live').toLowerCase();
+const VALID_EXCHANGE_MODES = new Set(['live', 'demo', 'testnet']);
 const INTERVAL_MINUTES = Config.number('INTERVAL_MINUTES', 1);
 const INTERVAL_MS = INTERVAL_MINUTES * 60 * 1000;
 
@@ -66,7 +68,7 @@ const AI_VALIDATION_LOOKBACK = Config.number('AI_VALIDATION_LOOKBACK', 80);
 const AI_VALIDATION_CACHE_TTL_MS = Config.number('AI_VALIDATION_CACHE_TTL_MS', Math.max(INTERVAL_MS * 3, 60000));
 const AI_VALIDATION_RETRIES = Config.number('AI_VALIDATION_RETRIES', 2);
 const AI_MIN_CONFIDENCE = Config.number('AI_MIN_CONFIDENCE', 60);
-const GEMINI_MODEL = Config.get('GEMINI_MODEL', 'gemini-1.5-flash-lite');
+const GEMINI_MODEL = Config.get('GEMINI_MODEL', 'gemini-2.0-flash-lite');
 
 const STOP_LOSS_PRICE = Config.number('GRID_STOP_LOSS_PRICE', 0);
 const TAKE_PROFIT_PRICE = Config.number('GRID_TAKE_PROFIT_PRICE', 0);
@@ -124,12 +126,30 @@ class ExchangeManager {
 
   static getInstance() {
     if (!this.instance) {
+      if (!VALID_EXCHANGE_MODES.has(EXCHANGE_MODE)) {
+        throw new Error(`EXCHANGE_MODE invalid: ${EXCHANGE_MODE}. Use live, demo, or testnet.`);
+      }
       this.instance = new ccxt.binance({
         apiKey: process.env.EXCHANGE_API_KEY,
         secret: process.env.EXCHANGE_SECRET,
         enableRateLimit: true,
-        options: { defaultType: 'spot' },
+        options: {
+          defaultType: 'spot',
+          fetchMarkets: { types: ['spot'] },
+          fetchMargins: false,
+          adjustForTimeDifference: true,
+          recvWindow: 10000,
+          fetchCurrencies: false,
+        },
       });
+      if (EXCHANGE_MODE === 'testnet') {
+        this.instance.setSandboxMode(true);
+      } else if (EXCHANGE_MODE === 'demo') {
+        this.instance.options.enableDemoTrading = true;
+        this.instance.urls.api.public = this.instance.urls.demo.public;
+        this.instance.urls.api.private = this.instance.urls.demo.private;
+        this.instance.urls.api.v1 = this.instance.urls.demo.v1;
+      }
     }
     return this.instance;
   }
@@ -712,6 +732,7 @@ class SpotGridEngine {
   async start() {
     console.log(`
 [SPOT GRID BOT STARTED]
+Mode: ${EXCHANGE_MODE.toUpperCase()}
 Symbols: ${SYMBOLS.join(', ')}
 Grid Mode: ${GRID_MODE}
 Grid Count: ${GRID_COUNT}
