@@ -62,6 +62,8 @@ const GRID_REFILL_ON_FILLED = Config.boolean('GRID_REFILL_ON_FILLED', true);
 const GRID_MIN_PROFIT_PCT = Config.number('GRID_MIN_PROFIT_PCT', 0.1) / 100;
 const GRID_STATE_FILE = Config.get('GRID_STATE_FILE', 'grid-state-spot.json');
 const GRID_STATE_PATH = path.resolve(process.cwd(), GRID_STATE_FILE);
+const BOT_LOCK_FILE = Config.get('BOT_LOCK_FILE', `${GRID_STATE_FILE}.lock`);
+const BOT_LOCK_PATH = path.resolve(process.cwd(), BOT_LOCK_FILE);
 
 const AI_VALIDATION_ENABLED = Config.boolean('AI_VALIDATION_ENABLED', false);
 const AI_VALIDATION_TIMEFRAME = Config.get('AI_VALIDATION_TIMEFRAME', '15m');
@@ -116,6 +118,61 @@ function killSwitchActive() {
 function roundNumber(value, digits = 8) {
   const num = Number(value);
   return Number.isFinite(num) ? Number(num.toFixed(digits)) : null;
+}
+
+// ------------------------------
+//  Single Process Lock
+// ------------------------------
+class ProcessLock {
+  constructor(lockPath) {
+    this.lockPath = lockPath;
+    this.fd = null;
+  }
+
+  processIsAlive(pid) {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      return err.code === 'EPERM';
+    }
+  }
+
+  acquire() {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        this.fd = fs.openSync(this.lockPath, 'wx');
+        fs.writeFileSync(this.fd, String(process.pid));
+        return;
+      } catch (err) {
+        if (err.code !== 'EEXIST') throw err;
+        const ownerPid = Number(fs.readFileSync(this.lockPath, 'utf8').trim());
+        if (this.processIsAlive(ownerPid)) {
+          throw new Error(`Bot already running with PID ${ownerPid}. Lock: ${this.lockPath}`);
+        }
+        fs.unlinkSync(this.lockPath);
+      }
+    }
+    throw new Error(`Unable to acquire bot lock: ${this.lockPath}`);
+  }
+
+  release() {
+    if (this.fd === null) return;
+    try {
+      fs.closeSync(this.fd);
+      const ownerPid = Number(fs.readFileSync(this.lockPath, 'utf8').trim());
+      if (ownerPid === process.pid) {
+        fs.unlinkSync(this.lockPath);
+      } else {
+        console.warn(`[LOCK] Not releasing lock owned by PID ${ownerPid || 'unknown'}`);
+      }
+    } catch (err) {
+      if (err.code !== 'ENOENT') console.warn('[LOCK] Failed to release:', err.message);
+    } finally {
+      this.fd = null;
+    }
+  }
 }
 
 // ------------------------------
@@ -182,7 +239,9 @@ class GridState {
 
   save() {
     this.data.updatedAt = new Date().toISOString();
-    fs.writeFileSync(GRID_STATE_PATH, JSON.stringify(this.data, null, 2));
+    const tempPath = `${GRID_STATE_PATH}.${process.pid}.tmp`;
+    fs.writeFileSync(tempPath, JSON.stringify(this.data, null, 2));
+    fs.renameSync(tempPath, GRID_STATE_PATH);
   }
 
   getSymbol(symbol) {
@@ -466,6 +525,8 @@ class SpotGridEngine {
     this.aiValidator = new AIGridValidator(this.exchange);
     this.state = new GridState();
     this.isRunning = false;
+    this.symbolLocks = new Map();
+    this.pendingOrderLevels = new Set();
     this.circuitBreaker = { errors: 0, pausedUntil: 0 };
   }
 
@@ -579,7 +640,33 @@ class SpotGridEngine {
   getManagedOpenOrders(symbol, openOrders) {
     const symState = this.state.getSymbol(symbol);
     const managedIds = new Set(Object.keys(symState.orders));
-    return openOrders.filter(order => managedIds.has(String(order.id)));
+    const managed = [];
+    for (const order of openOrders) {
+      const orderId = String(order.id);
+      const levelIndex = this.getBotOrderLevel(order);
+      if (!managedIds.has(orderId) && levelIndex !== null) {
+        this.state.rememberOrder(symbol, order, { levelIndex });
+        managedIds.add(orderId);
+        console.warn(`[RECOVER] ${symbol} adopted order ${orderId} level=${levelIndex}`);
+      }
+      if (managedIds.has(orderId)) managed.push(order);
+    }
+    return managed;
+  }
+
+  getOrderClientId(order) {
+    return String(order.clientOrderId || order.info?.clientOrderId || order.info?.origClientOrderId || '');
+  }
+
+  getBotOrderLevel(order) {
+    const match = this.getOrderClientId(order).match(/^grid-[a-z0-9]+-[bs]-(\d+)-/i);
+    return match ? Number(match[1]) : null;
+  }
+
+  makeClientOrderId(symbol, side, levelIndex) {
+    const market = symbol.replace(/[^a-z0-9]/gi, '').slice(0, 10).toLowerCase();
+    const nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    return `grid-${market}-${side[0]}-${levelIndex}-${nonce}`.slice(0, 36);
   }
 
   async cancelGridOrders(symbol, reason) {
@@ -599,10 +686,26 @@ class SpotGridEngine {
   }
 
   async placeLimit(symbol, side, levelIndex, price, amount) {
+    const pendingKey = `${symbol}|${side}|${levelIndex}`;
+    if (this.pendingOrderLevels.has(pendingKey)) {
+      console.warn(`[SKIP] ${symbol} ${side.toUpperCase()} level=${levelIndex} | placement already in progress`);
+      return null;
+    }
+
+    this.pendingOrderLevels.add(pendingKey);
     const precisePrice = this.exchange.priceToPrecision(symbol, price);
     const preciseAmount = this.exchange.amountToPrecision(symbol, amount);
+    const clientOrderId = this.makeClientOrderId(symbol, side, levelIndex);
     try {
-      const order = await retry(() => this.exchange.createLimitOrder(symbol, side, preciseAmount, precisePrice));
+      // A network timeout after submission is ambiguous. Retrying here can create
+      // a second live order, so let the next reconciliation recover safely.
+      const order = await this.exchange.createLimitOrder(
+        symbol,
+        side,
+        preciseAmount,
+        precisePrice,
+        { newClientOrderId: clientOrderId }
+      );
       this.state.rememberOrder(symbol, order, { levelIndex });
       console.log(`[GRID] ${symbol} ${side.toUpperCase()} level=${levelIndex} amount=${preciseAmount} price=${precisePrice}`);
       return order;
@@ -614,6 +717,8 @@ class SpotGridEngine {
         return null;
       }
       throw err;
+    } finally {
+      this.pendingOrderLevels.delete(pendingKey);
     }
   }
 
@@ -731,6 +836,12 @@ class SpotGridEngine {
         const sellableAmount = this.amountAfterBuyFee(symbol, trade);
         symState.lastBuyByLevel[levelIndex] = { price, amount, sellableAmount, fee, feeCurrency, at: trade.datetime };
         this.state.data.totals.filledBuys++;
+        if (!openOrderIds.has(String(trade.order))) {
+          delete symState.orders[String(trade.order)];
+        }
+        // Persist the fill before external effects so a restart cannot place
+        // the same refill order or count the same trade twice.
+        this.state.markProcessedTrade(id);
         await this.sendAlert(`[GRID BUY] ${symbol} amount=${amount} @ ${price} | sellable=${sellableAmount}`);
         if (GRID_REFILL_ON_FILLED && aiDecision.allowTrading && aiDecision.allowSell && levelIndex + 1 < levels.length) {
           const sellPrice = levels[levelIndex + 1];
@@ -751,6 +862,10 @@ class SpotGridEngine {
         symState.realizedGridProfit += estimatedProfit;
         this.state.data.totals.realizedGridProfit += estimatedProfit;
         this.state.data.totals.filledSells++;
+        if (!openOrderIds.has(String(trade.order))) {
+          delete symState.orders[String(trade.order)];
+        }
+        this.state.markProcessedTrade(id);
         const externalFeeText = profitEstimate.externalFees.length
           ? ` | external fees=${profitEstimate.externalFees.join(', ')}`
           : '';
@@ -762,10 +877,12 @@ class SpotGridEngine {
         }
       }
 
-      if (!openOrderIds.has(String(trade.order))) {
-        this.state.forgetOrder(symbol, trade.order);
+      if (side !== 'buy' && side !== 'sell') {
+        if (!openOrderIds.has(String(trade.order))) {
+          delete symState.orders[String(trade.order)];
+        }
+        this.state.markProcessedTrade(id);
       }
-      this.state.markProcessedTrade(id);
     }
   }
 
@@ -783,7 +900,29 @@ class SpotGridEngine {
     return true;
   }
 
+  async withSymbolLock(symbol, fn) {
+    const previous = this.symbolLocks.get(symbol) || Promise.resolve();
+    let release;
+    const current = new Promise(resolve => {
+      release = resolve;
+    });
+    this.symbolLocks.set(symbol, current);
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.symbolLocks.get(symbol) === current) {
+        this.symbolLocks.delete(symbol);
+      }
+    }
+  }
+
   async reconcileSymbol(symbol) {
+    return this.withSymbolLock(symbol, () => this.reconcileSymbolUnlocked(symbol));
+  }
+
+  async reconcileSymbolUnlocked(symbol) {
     const context = await this.fetchContext(symbol);
     const { currentPrice, openOrders, balance, lower, upper, levels } = context;
     const canContinue = await this.enforceRangeExits(symbol, currentPrice);
@@ -818,6 +957,12 @@ class SpotGridEngine {
       const index = this.getLevelIndex(levels, Number(order.price));
       if (order.side === 'buy') activeBuyLevels.add(index);
       if (order.side === 'sell') activeSellLevels.add(index);
+    }
+    const recentlyPlacedCutoff = Date.now() - Math.max(INTERVAL_MS * 2, MINUTE_MS);
+    for (const order of Object.values(this.state.getSymbol(symbol).orders)) {
+      if (Date.parse(order.createdAt) < recentlyPlacedCutoff) continue;
+      if (order.side === 'buy') activeBuyLevels.add(Number(order.levelIndex));
+      if (order.side === 'sell') activeSellLevels.add(Number(order.levelIndex));
     }
 
     const below = this.getNearestLevels(levels, currentPrice, 'buy', GRID_MAX_ACTIVE_BUY_ORDERS);
@@ -917,6 +1062,21 @@ AI Validation: ${AI_VALIDATION_ENABLED ? `ON (${GEMINI_MODEL})` : 'OFF'}
 //  Bootstrap
 // ------------------------------
 (async () => {
-  const engine = new SpotGridEngine();
-  await engine.start();
+  const lock = new ProcessLock(BOT_LOCK_PATH);
+  lock.acquire();
+  const shutdown = signal => {
+    console.log(`[SHUTDOWN] ${signal}`);
+    lock.release();
+    process.exit(0);
+  };
+  process.once('SIGINT', () => shutdown('SIGINT'));
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('exit', () => lock.release());
+
+  try {
+    const engine = new SpotGridEngine();
+    await engine.start();
+  } finally {
+    lock.release();
+  }
 })().catch(console.error);
