@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 process.env.GRID_MODE = 'ARITHMETIC';
 process.env.GRID_COUNT = '10';
 
-const { SpotGridEngine } = require('../index');
+const { AIGridValidator, SpotGridEngine } = require('../index');
 
 test('trailing-up trigger is one arithmetic grid above upper bound', () => {
   const engine = Object.create(SpotGridEngine.prototype);
@@ -33,4 +33,18 @@ test('trailing-up shifts stored order and buy-lot indexes together', () => {
   assert.equal(symbolState.orders.buy.levelIndex, -1);
   assert.equal(symbolState.orders.sell.levelIndex, 7);
   assert.deepEqual(Object.keys(symbolState.lastBuyByLevel).sort(), ['-1', '3']);
+});
+
+test('AI prompt treats a completed trailing-up shift as expected', () => {
+  const validator = Object.create(AIGridValidator.prototype);
+  const prompt = validator.buildPrompt('BTC/USDT', {
+    currentPrice: 112,
+    lower: 92,
+    upper: 112,
+    levels: [92, 94, 96, 98, 100, 102, 104, 106, 108, 110, 112],
+    trailingUpJustShifted: true,
+  }, {});
+
+  assert.match(prompt, /Trailing Up Just Shifted: true/);
+  assert.match(prompt, /Do not block solely because price is near the new upper bound/);
 });

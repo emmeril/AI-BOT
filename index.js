@@ -402,7 +402,7 @@ class AIGridValidator {
   }
 
   buildPrompt(symbol, context, candleSummary) {
-    const { currentPrice, lower, upper, levels } = context;
+    const { currentPrice, lower, upper, levels, trailingUpJustShifted = false } = context;
     const distLowerPct = ((currentPrice - lower) / currentPrice) * 100;
     const distUpperPct = ((upper - currentPrice) / currentPrice) * 100;
     return `
@@ -420,6 +420,7 @@ Return only JSON with:
 Decision rules:
 - Grid works best in ranging or mildly volatile markets.
 - Block new orders when trend is strongly one-directional, price is breaking out of range, volatility is extreme, or market data is unclear.
+- When Trailing Up Just Shifted is true, the previous upside breakout is expected. Do not block solely because price is near the new upper bound; still block if momentum or volatility makes new grid orders unsafe.
 - allowBuy can be false if downside pressure is high.
 - allowSell can be false if upside breakout pressure is high.
 - Be conservative. Existing open orders are managed by the bot; you only validate new orders.
@@ -430,6 +431,8 @@ Grid Lower: ${lower}
 Grid Upper: ${upper}
 Grid Count: ${GRID_COUNT}
 Grid Mode: ${GRID_MODE}
+Trailing Up Enabled: ${GRID_TRAILING_UP_ENABLED}
+Trailing Up Just Shifted: ${trailingUpJustShifted}
 Distance to Lower: ${distLowerPct.toFixed(3)}%
 Distance to Upper: ${distUpperPct.toFixed(3)}%
 Nearest Levels: ${levels.map(level => roundNumber(level)).join(', ')}
@@ -1004,28 +1007,23 @@ class SpotGridEngine {
     const canContinue = await this.enforceRangeExits(symbol, currentPrice);
     if (!canContinue) return;
 
-    let aiDecision = await this.aiValidator.validate(symbol, context);
+    const trailedUp = await this.maybeTrailUpRange(symbol, currentPrice, lower, upper);
+    if (trailedUp) {
+      context = await this.fetchContext(symbol);
+      context.trailingUpJustShifted = true;
+      ({ currentPrice, balance, lower, upper, levels } = context);
+    }
+
+    const aiDecision = await this.aiValidator.validate(symbol, context, { ignoreMinInterval: Boolean(trailedUp) });
     if (AI_VALIDATION_ENABLED) {
       console.log(
-        `[AI] ${symbol} allow=${aiDecision.allowTrading} buy=${aiDecision.allowBuy} sell=${aiDecision.allowSell} ` +
+        `[AI] ${symbol}${trailedUp ? ' trailing-up' : ''} allow=${aiDecision.allowTrading} ` +
+        `buy=${aiDecision.allowBuy} sell=${aiDecision.allowSell} ` +
         `confidence=${aiDecision.confidence} | ${aiDecision.reason}`
       );
     }
 
     await this.handleFilledTrades(symbol, levels, aiDecision);
-
-    const trailedUp = await this.maybeTrailUpRange(symbol, currentPrice, lower, upper);
-    if (trailedUp) {
-      context = await this.fetchContext(symbol);
-      ({ currentPrice, balance, lower, upper, levels } = context);
-      aiDecision = await this.aiValidator.validate(symbol, context, { ignoreMinInterval: true });
-      if (AI_VALIDATION_ENABLED) {
-        console.log(
-          `[AI] ${symbol} trailing-up validation allow=${aiDecision.allowTrading} ` +
-          `buy=${aiDecision.allowBuy} sell=${aiDecision.allowSell} confidence=${aiDecision.confidence} | ${aiDecision.reason}`
-        );
-      }
-    }
 
     const freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
     let managedOrders = this.getManagedOpenOrders(symbol, freshOpenOrders);
@@ -1173,6 +1171,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  AIGridValidator,
   SpotGridEngine,
   bootstrap,
 };

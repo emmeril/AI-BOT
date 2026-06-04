@@ -145,6 +145,8 @@ AI_MIN_CONFIDENCE=60
 
 Jika Gemini menolak kondisi market, bot tidak memasang order baru pada siklus itu. Jika validasi AI gagal atau confidence di bawah `AI_MIN_CONFIDENCE`, bot juga tidak memasang order baru.
 
+Saat Trailing Up menggeser range, AI langsung menilai range baru. Breakout naik yang memicu pergeseran tidak otomatis diblokir, tetapi AI tetap dapat menghentikan order baru jika momentum satu arah atau volatilitas dinilai terlalu berisiko.
+
 Untuk mengurangi risiko rate limit Gemini:
 
 - `AI_VALIDATION_CACHE_TTL_MS`: berapa lama keputusan AI dipakai ulang.
