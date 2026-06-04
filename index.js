@@ -457,15 +457,16 @@ Candle Summary: ${JSON.stringify(candleSummary)}
     };
   }
 
-  async validate(symbol, context) {
+  async validate(symbol, context, options = {}) {
     if (!AI_VALIDATION_ENABLED) return AIGridValidator.allow();
 
+    const { ignoreMinInterval = false } = options;
     const cacheKey = this.cacheKey(symbol, context.currentPrice, context.levels);
     const cached = this.getCached(cacheKey);
     if (cached) return cached;
 
     const lastDecision = this.getLastDecision(symbol);
-    if (lastDecision && Date.now() - lastDecision.at < AI_VALIDATION_MIN_INTERVAL_MS) {
+    if (!ignoreMinInterval && lastDecision && Date.now() - lastDecision.at < AI_VALIDATION_MIN_INTERVAL_MS) {
       return lastDecision.value;
     }
 
@@ -1030,7 +1031,7 @@ class SpotGridEngine {
     const canContinue = await this.enforceRangeExits(symbol, currentPrice);
     if (!canContinue) return;
 
-    const aiDecision = await this.aiValidator.validate(symbol, context);
+    let aiDecision = await this.aiValidator.validate(symbol, context);
     if (AI_VALIDATION_ENABLED) {
       console.log(
         `[AI] ${symbol} allow=${aiDecision.allowTrading} buy=${aiDecision.allowBuy} sell=${aiDecision.allowSell} ` +
@@ -1044,6 +1045,13 @@ class SpotGridEngine {
     if (recentered) {
       context = await this.fetchContext(symbol);
       ({ currentPrice, balance, lower, upper, levels } = context);
+      aiDecision = await this.aiValidator.validate(symbol, context, { ignoreMinInterval: true });
+      if (AI_VALIDATION_ENABLED) {
+        console.log(
+          `[AI] ${symbol} re-center validation allow=${aiDecision.allowTrading} ` +
+          `buy=${aiDecision.allowBuy} sell=${aiDecision.allowSell} confidence=${aiDecision.confidence} | ${aiDecision.reason}`
+        );
+      }
     }
 
     const freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
