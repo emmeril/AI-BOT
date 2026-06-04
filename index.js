@@ -3,6 +3,7 @@ const ccxt = require('ccxt');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const crypto = require('crypto');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 // ------------------------------
@@ -192,6 +193,7 @@ class ProcessLock {
   constructor(lockPath) {
     this.lockPath = lockPath;
     this.fd = null;
+    this.ownerToken = null;
   }
 
   processIsAlive(pid) {
@@ -204,38 +206,75 @@ class ProcessLock {
     }
   }
 
-  acquire() {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        this.fd = fs.openSync(this.lockPath, 'wx');
-        fs.writeFileSync(this.fd, String(process.pid));
-        return;
-      } catch (err) {
-        if (err.code !== 'EEXIST') throw err;
-        const ownerPid = Number(fs.readFileSync(this.lockPath, 'utf8').trim());
-        if (this.processIsAlive(ownerPid)) {
-          throw new Error(`Bot already running with PID ${ownerPid}. Lock: ${this.lockPath}`);
-        }
-        fs.unlinkSync(this.lockPath);
-      }
+  readOwner() {
+    const raw = fs.readFileSync(this.lockPath, 'utf8').trim();
+    try {
+      const parsed = JSON.parse(raw);
+      return {
+        pid: Number(parsed.pid),
+        token: typeof parsed.token === 'string' ? parsed.token : null,
+      };
+    } catch {
+      return { pid: Number(raw), token: null };
     }
-    throw new Error(`Unable to acquire bot lock: ${this.lockPath}`);
+  }
+
+  ownsLock() {
+    if (!this.ownerToken) return false;
+    try {
+      const owner = this.readOwner();
+      return owner.pid === process.pid && owner.token === this.ownerToken;
+    } catch {
+      return false;
+    }
+  }
+
+  acquire() {
+    try {
+      this.fd = fs.openSync(this.lockPath, 'wx');
+      this.ownerToken = crypto.randomUUID();
+      fs.writeFileSync(this.fd, JSON.stringify({
+        pid: process.pid,
+        token: this.ownerToken,
+        acquiredAt: new Date().toISOString(),
+      }));
+      fs.fsyncSync(this.fd);
+      if (!this.ownsLock()) {
+        fs.closeSync(this.fd);
+        this.fd = null;
+        this.ownerToken = null;
+        throw new Error(`Lost bot lock during acquisition: ${this.lockPath}`);
+      }
+      return;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      const owner = this.readOwner();
+      if (this.processIsAlive(owner.pid)) {
+        throw new Error(`Bot already running with PID ${owner.pid}. Lock: ${this.lockPath}`);
+      }
+      // Never auto-delete stale locks: checking an owner and unlinking its
+      // file cannot be made atomic with plain filesystem APIs.
+      throw new Error(
+        `Stale bot lock found for PID ${owner.pid || 'unknown'}. ` +
+        `Verify no bot is running, then remove: ${this.lockPath}`
+      );
+    }
   }
 
   release() {
     if (this.fd === null) return;
     try {
       fs.closeSync(this.fd);
-      const ownerPid = Number(fs.readFileSync(this.lockPath, 'utf8').trim());
-      if (ownerPid === process.pid) {
+      if (this.ownsLock()) {
         fs.unlinkSync(this.lockPath);
       } else {
-        console.warn(`[LOCK] Not releasing lock owned by PID ${ownerPid || 'unknown'}`);
+        console.warn('[LOCK] Not releasing a lock with a different ownership token');
       }
     } catch (err) {
       if (err.code !== 'ENOENT') console.warn('[LOCK] Failed to release:', err.message);
     } finally {
       this.fd = null;
+      this.ownerToken = null;
     }
   }
 }
@@ -380,9 +419,12 @@ class GridState {
   }
 
   markProcessedTrade(symbol, id) {
-    this.data.processedTradeIds.push(`${symbol}|${id}`);
+    const scopedId = `${symbol}|${id}`;
+    if (this.processedTrade(symbol, id)) return false;
+    this.data.processedTradeIds.push(scopedId);
     this.data.processedTradeIds = this.data.processedTradeIds.slice(-2000);
     this.save();
+    return true;
   }
 }
 
@@ -1286,6 +1328,7 @@ module.exports = {
   AIGridValidator,
   Config,
   GridState,
+  ProcessLock,
   SpotGridEngine,
   bootstrap,
   validateRuntimeConfiguration,

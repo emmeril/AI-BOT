@@ -1,7 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { Config, GridState } = require('../index');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const { Config, GridState, ProcessLock } = require('../index');
 
 test('Config.boolean parses explicit true and false values', () => {
   const original = process.env.TEST_BOOLEAN;
@@ -79,4 +83,51 @@ test('processed trade IDs are scoped by symbol and remain legacy-compatible', ()
 
   state.data.processedTradeIds.push('99');
   assert.equal(state.processedTrade('BTC/USDT', '99'), true);
+});
+
+test('markProcessedTrade is idempotent', () => {
+  const state = Object.create(GridState.prototype);
+  state.data = GridState.createEmpty();
+  let saves = 0;
+  state.save = () => {
+    saves++;
+  };
+
+  assert.equal(state.markProcessedTrade('BTC/USDT', '42'), true);
+  assert.equal(state.markProcessedTrade('BTC/USDT', '42'), false);
+  assert.deepEqual(state.data.processedTradeIds, ['BTC/USDT|42']);
+  assert.equal(saves, 1);
+});
+
+test('ProcessLock release does not delete a replacement lock owned by the same PID', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'grid-lock-'));
+  const lockPath = path.join(directory, 'bot.lock');
+  const lock = new ProcessLock(lockPath);
+
+  try {
+    lock.acquire();
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: 'replacement' }));
+
+    lock.release();
+
+    assert.equal(fs.existsSync(lockPath), true);
+    assert.equal(JSON.parse(fs.readFileSync(lockPath, 'utf8')).token, 'replacement');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('ProcessLock fails closed instead of deleting a stale lock', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'grid-lock-'));
+  const lockPath = path.join(directory, 'bot.lock');
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: 100, token: 'stale' }));
+  const lock = new ProcessLock(lockPath);
+  lock.processIsAlive = () => false;
+
+  try {
+    assert.throws(() => lock.acquire(), /Stale bot lock found for PID 100/);
+    assert.equal(fs.existsSync(lockPath), true);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
