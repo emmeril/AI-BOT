@@ -52,11 +52,8 @@ const GRID_MODE = Config.get('GRID_MODE', 'ARITHMETIC').toUpperCase();
 const GRID_LOWER_PRICE = Config.number('GRID_LOWER_PRICE', 0);
 const GRID_UPPER_PRICE = Config.number('GRID_UPPER_PRICE', 0);
 const GRID_RANGE_PCT = Config.number('GRID_RANGE_PCT', 5);
-const GRID_DYNAMIC_RANGE = Config.boolean('GRID_DYNAMIC_RANGE', false);
-const GRID_RECENTER_TRIGGER_PCT = Math.min(Math.max(Config.number('GRID_RECENTER_TRIGGER_PCT', 10), 0), 49);
-const GRID_RECENTER_CONFIRM_CYCLES = Math.max(Math.floor(Config.number('GRID_RECENTER_CONFIRM_CYCLES', 3)), 1);
-const GRID_RECENTER_COOLDOWN_MS = Math.max(Config.number('GRID_RECENTER_COOLDOWN_MINUTES', 60), 0) * MINUTE_MS;
-const GRID_RECENTER_ALLOW_DOWN = Config.boolean('GRID_RECENTER_ALLOW_DOWN', false);
+const GRID_TRAILING_UP_ENABLED = Config.boolean('GRID_TRAILING_UP_ENABLED', Config.boolean('GRID_DYNAMIC_RANGE', false));
+const GRID_TRAILING_UP_COOLDOWN_MS = Math.max(Config.number('GRID_TRAILING_UP_COOLDOWN_MINUTES', 0), 0) * MINUTE_MS;
 const GRID_ORDER_SIZE_USDT = Config.number('GRID_ORDER_SIZE_USDT', Config.number('ORDER_SIZE_USDT', 20));
 const GRID_TOTAL_INVESTMENT_USDT = Config.number('GRID_TOTAL_INVESTMENT_USDT', 0);
 const GRID_MAX_ACTIVE_BUY_ORDERS = Config.number('GRID_MAX_ACTIVE_BUY_ORDERS', 5);
@@ -604,90 +601,66 @@ class SpotGridEngine {
     return { lower, upper };
   }
 
-  getDynamicRangeState(symbol) {
+  getTrailingUpState(symbol) {
     const symState = this.state.getSymbol(symbol);
-    if (!symState.dynamicRange) {
-      symState.dynamicRange = {
-        pendingDirection: null,
-        pendingCycles: 0,
-        lastRecenterAt: null,
+    if (!symState.trailingUp) {
+      symState.trailingUp = {
+        shifts: 0,
+        lastShiftAt: null,
       };
     }
-    return symState.dynamicRange;
+    return symState.trailingUp;
   }
 
-  hasOpenGridPosition(symbol) {
-    return Object.values(this.state.getSymbol(symbol).lastBuyByLevel)
-      .some(buy => Number(buy.sellableAmount ?? buy.amount) > 0);
+  getTrailingUpTrigger(lower, upper) {
+    if (GRID_MODE === 'GEOMETRIC') {
+      const ratio = Math.pow(upper / lower, 1 / GRID_COUNT);
+      return upper * ratio;
+    }
+    return upper + ((upper - lower) / GRID_COUNT);
   }
 
-  getRecenterDirection(currentPrice, lower, upper) {
-    const triggerDistance = (upper - lower) * (GRID_RECENTER_TRIGGER_PCT / 100);
-    if (currentPrice >= upper - triggerDistance) return 'up';
-    if (currentPrice <= lower + triggerDistance) return 'down';
-    return null;
+  shiftStoredLevelIndexes(symbol, offset) {
+    const symState = this.state.getSymbol(symbol);
+    for (const order of Object.values(symState.orders)) {
+      order.levelIndex = Number(order.levelIndex) + offset;
+    }
+
+    const shiftedBuys = {};
+    for (const [levelIndex, buy] of Object.entries(symState.lastBuyByLevel)) {
+      shiftedBuys[Number(levelIndex) + offset] = buy;
+    }
+    symState.lastBuyByLevel = shiftedBuys;
   }
 
-  async maybeRecenterRange(symbol, currentPrice, lower, upper) {
+  async maybeTrailUpRange(symbol, currentPrice, lower, upper) {
     const manualRange = GRID_LOWER_PRICE > 0 && GRID_UPPER_PRICE > 0;
-    if (!GRID_DYNAMIC_RANGE || manualRange) return null;
+    if (!GRID_TRAILING_UP_ENABLED || manualRange) return null;
 
-    const rangeState = this.getDynamicRangeState(symbol);
-    const direction = this.getRecenterDirection(currentPrice, lower, upper);
-    const lastRecenterAt = Date.parse(rangeState.lastRecenterAt || 0);
-    const cooldownRemaining = GRID_RECENTER_COOLDOWN_MS - (Date.now() - lastRecenterAt);
+    const trailingState = this.getTrailingUpState(symbol);
+    const lastShiftAt = Date.parse(trailingState.lastShiftAt || 0);
+    if (GRID_TRAILING_UP_COOLDOWN_MS > Date.now() - lastShiftAt) return null;
 
-    if (!direction || cooldownRemaining > 0) {
-      if (rangeState.pendingDirection || rangeState.pendingCycles) {
-        rangeState.pendingDirection = null;
-        rangeState.pendingCycles = 0;
-        this.state.save();
-      }
-      return null;
-    }
+    const levels = this.buildLevels(lower, upper);
+    const triggerPrice = this.getTrailingUpTrigger(lower, upper);
+    if (currentPrice < triggerPrice) return null;
 
-    if (rangeState.pendingDirection === direction) {
-      rangeState.pendingCycles++;
-    } else {
-      rangeState.pendingDirection = direction;
-      rangeState.pendingCycles = 1;
-    }
-    this.state.save();
-
-    if (rangeState.pendingCycles < GRID_RECENTER_CONFIRM_CYCLES) {
-      console.log(
-        `[RANGE] ${symbol} ${direction} trigger confirmation ` +
-        `${rangeState.pendingCycles}/${GRID_RECENTER_CONFIRM_CYCLES}`
-      );
-      return null;
-    }
-
-    if (direction === 'down' && !GRID_RECENTER_ALLOW_DOWN && this.hasOpenGridPosition(symbol)) {
-      rangeState.pendingDirection = null;
-      rangeState.pendingCycles = 0;
-      this.state.save();
-      console.warn(`[RANGE] ${symbol} down re-center blocked | open grid position exists`);
-      return null;
-    }
-
-    const newLower = currentPrice * (1 - GRID_RANGE_PCT / 100);
-    const newUpper = currentPrice * (1 + GRID_RANGE_PCT / 100);
-    await this.cancelGridOrders(symbol, `dynamic re-center ${direction}`);
-
+    const newLower = levels[1];
+    const newUpper = triggerPrice;
     const symState = this.state.getSymbol(symbol);
     symState.config.lower = newLower;
     symState.config.upper = newUpper;
-    rangeState.pendingDirection = null;
-    rangeState.pendingCycles = 0;
-    rangeState.lastRecenterAt = new Date().toISOString();
+    this.shiftStoredLevelIndexes(symbol, -1);
+    trailingState.shifts++;
+    trailingState.lastShiftAt = new Date().toISOString();
     this.state.save();
 
     console.log(
-      `[RANGE] ${symbol} re-centered ${direction}: ` +
+      `[TRAILING UP] ${symbol} shifted one grid: ` +
       `${roundNumber(lower)}-${roundNumber(upper)} -> ${roundNumber(newLower)}-${roundNumber(newUpper)}`
     );
     await this.sendAlert(
-      `[GRID RANGE] ${symbol} re-centered ${direction} to ${roundNumber(newLower)}-${roundNumber(newUpper)}`
+      `[GRID TRAILING UP] ${symbol} shifted to ${roundNumber(newLower)}-${roundNumber(newUpper)}`
     );
     return { lower: newLower, upper: newUpper };
   }
@@ -1041,14 +1014,14 @@ class SpotGridEngine {
 
     await this.handleFilledTrades(symbol, levels, aiDecision);
 
-    const recentered = await this.maybeRecenterRange(symbol, currentPrice, lower, upper);
-    if (recentered) {
+    const trailedUp = await this.maybeTrailUpRange(symbol, currentPrice, lower, upper);
+    if (trailedUp) {
       context = await this.fetchContext(symbol);
       ({ currentPrice, balance, lower, upper, levels } = context);
       aiDecision = await this.aiValidator.validate(symbol, context, { ignoreMinInterval: true });
       if (AI_VALIDATION_ENABLED) {
         console.log(
-          `[AI] ${symbol} re-center validation allow=${aiDecision.allowTrading} ` +
+          `[AI] ${symbol} trailing-up validation allow=${aiDecision.allowTrading} ` +
           `buy=${aiDecision.allowBuy} sell=${aiDecision.allowSell} confidence=${aiDecision.confidence} | ${aiDecision.reason}`
         );
       }
@@ -1162,7 +1135,7 @@ Grid Mode: ${GRID_MODE}
 Grid Count: ${GRID_COUNT}
 Order Size: ${this.getOrderSizeUsdt()} USDT/grid
 Range: ${GRID_LOWER_PRICE && GRID_UPPER_PRICE ? `${GRID_LOWER_PRICE}-${GRID_UPPER_PRICE}` : `auto +/-${GRID_RANGE_PCT}%`}
-Dynamic Range: ${GRID_DYNAMIC_RANGE ? `ON (trigger=${GRID_RECENTER_TRIGGER_PCT}%, confirm=${GRID_RECENTER_CONFIRM_CYCLES}, cooldown=${GRID_RECENTER_COOLDOWN_MS / MINUTE_MS}m, allowDownWithOpenPosition=${GRID_RECENTER_ALLOW_DOWN})` : 'OFF'}
+Trailing Up: ${GRID_TRAILING_UP_ENABLED ? `ON (one-grid trigger, cooldown=${GRID_TRAILING_UP_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
 Max Active Orders: buy=${GRID_MAX_ACTIVE_BUY_ORDERS}, sell=${GRID_MAX_ACTIVE_SELL_ORDERS}
 Recreate On Start: ${GRID_RECREATE_ON_START ? 'ON' : 'OFF'}
 AI Validation: ${AI_VALIDATION_ENABLED ? `ON (${GEMINI_MODEL})` : 'OFF'}
@@ -1175,10 +1148,7 @@ AI Validation: ${AI_VALIDATION_ENABLED ? `ON (${GEMINI_MODEL})` : 'OFF'}
   }
 }
 
-// ------------------------------
-//  Bootstrap
-// ------------------------------
-(async () => {
+async function bootstrap() {
   const lock = new ProcessLock(BOT_LOCK_PATH);
   lock.acquire();
   const shutdown = signal => {
@@ -1196,4 +1166,13 @@ AI Validation: ${AI_VALIDATION_ENABLED ? `ON (${GEMINI_MODEL})` : 'OFF'}
   } finally {
     lock.release();
   }
-})().catch(console.error);
+}
+
+if (require.main === module) {
+  bootstrap().catch(console.error);
+}
+
+module.exports = {
+  SpotGridEngine,
+  bootstrap,
+};
