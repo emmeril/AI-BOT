@@ -25,7 +25,7 @@ class Config {
     return value !== 'false';
   }
 
-  static true(key) {
+  static isTrue(key) {
     return process.env[key] === 'true';
   }
 
@@ -43,8 +43,9 @@ class Config {
 const SYMBOLS = Config.list('SYMBOLS', 'BTC/USDT');
 const EXCHANGE_MODE = Config.get('EXCHANGE_MODE', Config.boolean('EXCHANGE_DEMO', false) ? 'demo' : 'live').toLowerCase();
 const VALID_EXCHANGE_MODES = new Set(['live', 'demo', 'testnet']);
+const MINUTE_MS = 60 * 1000;
 const INTERVAL_MINUTES = Config.number('INTERVAL_MINUTES', 1);
-const INTERVAL_MS = INTERVAL_MINUTES * 60 * 1000;
+const INTERVAL_MS = INTERVAL_MINUTES * MINUTE_MS;
 
 const GRID_COUNT = Config.number('GRID_COUNT', 10);
 const GRID_MODE = Config.get('GRID_MODE', 'ARITHMETIC').toUpperCase();
@@ -65,9 +66,9 @@ const GRID_STATE_PATH = path.resolve(process.cwd(), GRID_STATE_FILE);
 const AI_VALIDATION_ENABLED = Config.boolean('AI_VALIDATION_ENABLED', false);
 const AI_VALIDATION_TIMEFRAME = Config.get('AI_VALIDATION_TIMEFRAME', '15m');
 const AI_VALIDATION_LOOKBACK = Config.number('AI_VALIDATION_LOOKBACK', 80);
-const AI_VALIDATION_CACHE_TTL_MS = Config.number('AI_VALIDATION_CACHE_TTL_MS', Math.max(INTERVAL_MS * 3, 60000));
-const AI_VALIDATION_MIN_INTERVAL_MS = Config.number('AI_VALIDATION_MIN_INTERVAL_MS', 60000);
-const AI_VALIDATION_BACKOFF_MS = Config.number('AI_VALIDATION_BACKOFF_MS', 10 * 60000);
+const AI_VALIDATION_CACHE_TTL_MS = Config.number('AI_VALIDATION_CACHE_TTL_MS', Math.max(INTERVAL_MS * 3, MINUTE_MS));
+const AI_VALIDATION_MIN_INTERVAL_MS = Config.number('AI_VALIDATION_MIN_INTERVAL_MS', MINUTE_MS);
+const AI_VALIDATION_BACKOFF_MS = Config.number('AI_VALIDATION_BACKOFF_MS', 10 * MINUTE_MS);
 const AI_VALIDATION_PRICE_BUCKET_PCT = Config.number('AI_VALIDATION_PRICE_BUCKET_PCT', 0.25);
 const AI_VALIDATION_RETRIES = Config.number('AI_VALIDATION_RETRIES', 2);
 const AI_MIN_CONFIDENCE = Config.number('AI_MIN_CONFIDENCE', 60);
@@ -76,7 +77,7 @@ const GEMINI_MODEL = Config.get('GEMINI_MODEL', 'gemini-2.0-flash-lite');
 const STOP_LOSS_PRICE = Config.number('GRID_STOP_LOSS_PRICE', 0);
 const TAKE_PROFIT_PRICE = Config.number('GRID_TAKE_PROFIT_PRICE', 0);
 const KILL_SWITCH_ENABLED = Config.boolean('KILL_SWITCH_ENABLED', false);
-const STOP_TRADING = Config.true('STOP_TRADING');
+const STOP_TRADING = Config.isTrue('STOP_TRADING');
 const KILL_SWITCH_FILE = Config.get('KILL_SWITCH_FILE', 'bot-paused.flag');
 const KILL_SWITCH_PATH = path.resolve(process.cwd(), KILL_SWITCH_FILE);
 
@@ -92,12 +93,12 @@ const FONNTE_COUNTRY_CODE = Config.get('FONNTE_COUNTRY_CODE', '62');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function retry(fn, retries = 3, delay = 1500) {
-  for (let i = 0; i < retries; i++) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       return await fn();
     } catch (err) {
-      if (i === retries - 1) throw err;
-      await sleep(delay * (i + 1));
+      if (attempt === retries) throw err;
+      await sleep(delay * attempt);
     }
   }
 }
@@ -115,10 +116,6 @@ function killSwitchActive() {
 function roundNumber(value, digits = 8) {
   const num = Number(value);
   return Number.isFinite(num) ? Number(num.toFixed(digits)) : null;
-}
-
-function normalizeSymbolKey(symbol) {
-  return symbol.replace(/[/:]/g, '_');
 }
 
 // ------------------------------
@@ -257,6 +254,13 @@ class AIGridValidator {
 
   static block(reason, confidence = 0) {
     return { allowTrading: false, allowBuy: false, allowSell: false, confidence, reason };
+  }
+
+  blockAndRemember(symbol, cacheKey, reason, confidence = 0) {
+    const decision = AIGridValidator.block(reason, confidence);
+    this.setCached(cacheKey, decision);
+    this.rememberDecision(symbol, decision);
+    return decision;
   }
 
   cacheKey(symbol, currentPrice, levels) {
@@ -418,10 +422,12 @@ Candle Summary: ${JSON.stringify(candleSummary)}
           const result = await this.model.generateContent(prompt);
           const decision = this.parseResponse(result.response.text());
           if (decision.confidence < AI_MIN_CONFIDENCE) {
-            const blocked = AIGridValidator.block(`Low AI confidence: ${decision.reason}`, decision.confidence);
-            this.setCached(cacheKey, blocked);
-            this.rememberDecision(symbol, blocked);
-            return blocked;
+            return this.blockAndRemember(
+              symbol,
+              cacheKey,
+              `Low AI confidence: ${decision.reason}`,
+              decision.confidence
+            );
           }
           this.setCached(cacheKey, decision);
           this.rememberDecision(symbol, decision);
@@ -439,15 +445,12 @@ Candle Summary: ${JSON.stringify(candleSummary)}
       }
     } catch (err) {
       const reason = this.isRateLimitError(err)
-        ? `AI validation rate-limited; paused Gemini calls for ${Math.round(AI_VALIDATION_BACKOFF_MS / 60000)}m`
+        ? `AI validation rate-limited; paused Gemini calls for ${Math.round(AI_VALIDATION_BACKOFF_MS / MINUTE_MS)}m`
         : `AI validation failed: ${err.message}`;
       if (this.isRateLimitError(err)) {
         AIGridValidator.rateLimitedUntil = Date.now() + AI_VALIDATION_BACKOFF_MS;
       }
-      const blocked = AIGridValidator.block(reason);
-      this.setCached(cacheKey, blocked);
-      this.rememberDecision(symbol, blocked);
-      return blocked;
+      return this.blockAndRemember(symbol, cacheKey, reason);
     }
 
     return AIGridValidator.block('AI validation unavailable');
@@ -493,7 +496,7 @@ class SpotGridEngine {
   recordError() {
     this.circuitBreaker.errors++;
     if (this.circuitBreaker.errors >= 5) {
-      this.circuitBreaker.pausedUntil = Date.now() + 15 * 60000;
+      this.circuitBreaker.pausedUntil = Date.now() + 15 * MINUTE_MS;
       this.circuitBreaker.errors = 0;
       console.warn('[CIRCUIT] Too many errors. Paused 15m.');
     }
@@ -545,16 +548,20 @@ class SpotGridEngine {
   }
 
   getLevelIndex(levels, price) {
-    let bestIndex = 0;
-    let bestDistance = Infinity;
-    levels.forEach((level, index) => {
-      const distance = Math.abs(level - price);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        bestIndex = index;
-      }
-    });
-    return bestIndex;
+    return levels.reduce((closestIndex, level, index) => {
+      const currentDistance = Math.abs(level - price);
+      const closestDistance = Math.abs(levels[closestIndex] - price);
+      return currentDistance < closestDistance ? index : closestIndex;
+    }, 0);
+  }
+
+  getNearestLevels(levels, currentPrice, side, limit) {
+    const isBuy = side === 'buy';
+    return levels
+      .map((price, index) => ({ price, index }))
+      .filter(level => isBuy ? level.price < currentPrice : level.price > currentPrice)
+      .sort((a, b) => isBuy ? b.price - a.price : a.price - b.price)
+      .slice(0, limit);
   }
 
   async fetchContext(symbol) {
@@ -724,7 +731,7 @@ class SpotGridEngine {
         const sellableAmount = this.amountAfterBuyFee(symbol, trade);
         symState.lastBuyByLevel[levelIndex] = { price, amount, sellableAmount, fee, feeCurrency, at: trade.datetime };
         this.state.data.totals.filledBuys++;
-        await this._sendAlert(`[GRID BUY] ${symbol} amount=${amount} @ ${price} | sellable=${sellableAmount}`);
+        await this.sendAlert(`[GRID BUY] ${symbol} amount=${amount} @ ${price} | sellable=${sellableAmount}`);
         if (GRID_REFILL_ON_FILLED && aiDecision.allowTrading && aiDecision.allowSell && levelIndex + 1 < levels.length) {
           const sellPrice = levels[levelIndex + 1];
           if ((sellPrice - price) / price >= GRID_MIN_PROFIT_PCT) {
@@ -747,7 +754,9 @@ class SpotGridEngine {
         const externalFeeText = profitEstimate.externalFees.length
           ? ` | external fees=${profitEstimate.externalFees.join(', ')}`
           : '';
-        await this._sendAlert(`[GRID SELL] ${symbol} amount=${amount} @ ${price} | est profit=${estimatedProfit.toFixed(4)} USDT${externalFeeText}`);
+        await this.sendAlert(
+          `[GRID SELL] ${symbol} amount=${amount} @ ${price} | est profit=${estimatedProfit.toFixed(4)} USDT${externalFeeText}`
+        );
         if (GRID_REFILL_ON_FILLED && aiDecision.allowTrading && aiDecision.allowBuy && levelIndex - 1 >= 0) {
           await this.placeLimit(symbol, 'buy', levelIndex - 1, levels[levelIndex - 1], amount);
         }
@@ -763,12 +772,12 @@ class SpotGridEngine {
   async enforceRangeExits(symbol, currentPrice) {
     if (STOP_LOSS_PRICE > 0 && currentPrice <= STOP_LOSS_PRICE) {
       await this.cancelGridOrders(symbol, `stop-loss ${STOP_LOSS_PRICE}`);
-      await this._sendAlert(`[GRID STOP] ${symbol} price=${currentPrice} <= ${STOP_LOSS_PRICE}`);
+      await this.sendAlert(`[GRID STOP] ${symbol} price=${currentPrice} <= ${STOP_LOSS_PRICE}`);
       return false;
     }
     if (TAKE_PROFIT_PRICE > 0 && currentPrice >= TAKE_PROFIT_PRICE) {
       await this.cancelGridOrders(symbol, `take-profit ${TAKE_PROFIT_PRICE}`);
-      await this._sendAlert(`[GRID TAKE PROFIT] ${symbol} price=${currentPrice} >= ${TAKE_PROFIT_PRICE}`);
+      await this.sendAlert(`[GRID TAKE PROFIT] ${symbol} price=${currentPrice} >= ${TAKE_PROFIT_PRICE}`);
       return false;
     }
     return true;
@@ -811,17 +820,8 @@ class SpotGridEngine {
       if (order.side === 'sell') activeSellLevels.add(index);
     }
 
-    const below = levels
-      .map((price, index) => ({ price, index }))
-      .filter(level => level.price < currentPrice)
-      .sort((a, b) => b.price - a.price)
-      .slice(0, GRID_MAX_ACTIVE_BUY_ORDERS);
-
-    const above = levels
-      .map((price, index) => ({ price, index }))
-      .filter(level => level.price > currentPrice)
-      .sort((a, b) => a.price - b.price)
-      .slice(0, GRID_MAX_ACTIVE_SELL_ORDERS);
+    const below = this.getNearestLevels(levels, currentPrice, 'buy', GRID_MAX_ACTIVE_BUY_ORDERS);
+    const above = this.getNearestLevels(levels, currentPrice, 'sell', GRID_MAX_ACTIVE_SELL_ORDERS);
 
     let quoteFree = this.getQuoteFree(balance, symbol);
     let baseFree = this.getBaseFree(balance, symbol);
@@ -870,10 +870,14 @@ class SpotGridEngine {
     }
   }
 
-  async _sendAlert(msg) {
+  async sendAlert(message) {
     if (!FONNTE_ENABLED || !FONNTE_TOKEN || !FONNTE_TARGET) return;
     try {
-      const form = new URLSearchParams({ target: FONNTE_TARGET, message: msg, countryCode: FONNTE_COUNTRY_CODE }).toString();
+      const form = new URLSearchParams({
+        target: FONNTE_TARGET,
+        message,
+        countryCode: FONNTE_COUNTRY_CODE,
+      }).toString();
       const req = https.request(FONNTE_API_URL, {
         method: 'POST',
         headers: {
