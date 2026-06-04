@@ -22,11 +22,14 @@ class Config {
   static boolean(key, fallback = true) {
     const value = process.env[key];
     if (value === undefined || value === '') return fallback;
-    return value !== 'false';
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+    throw new Error(`${key} must be a boolean value`);
   }
 
   static isTrue(key) {
-    return process.env[key] === 'true';
+    return Config.boolean(key, false);
   }
 
   static list(key, fallback) {
@@ -90,6 +93,7 @@ const FONNTE_TOKEN = Config.get('FONNTE_TOKEN', '');
 const FONNTE_TARGET = Config.get('FONNTE_TARGET', '');
 const FONNTE_API_URL = Config.get('FONNTE_API_URL', 'https://api.fonnte.com/send');
 const FONNTE_COUNTRY_CODE = Config.get('FONNTE_COUNTRY_CODE', '62');
+const FONNTE_TIMEOUT_MS = Config.number('FONNTE_TIMEOUT_MS', 10_000);
 
 // ------------------------------
 //  Utility Functions
@@ -108,8 +112,8 @@ async function retry(fn, retries = 3, delay = 1500) {
 }
 
 function killSwitchActive() {
-  if (!KILL_SWITCH_ENABLED) return false;
   if (STOP_TRADING) return true;
+  if (!KILL_SWITCH_ENABLED) return false;
   try {
     return fs.existsSync(KILL_SWITCH_PATH);
   } catch {
@@ -120,6 +124,65 @@ function killSwitchActive() {
 function roundNumber(value, digits = 8) {
   const num = Number(value);
   return Number.isFinite(num) ? Number(num.toFixed(digits)) : null;
+}
+
+function validateRuntimeConfiguration() {
+  const errors = [];
+  const requirePositive = (name, value) => {
+    if (!(value > 0)) errors.push(`${name} must be greater than 0`);
+  };
+  const requireNonNegative = (name, value) => {
+    if (!(value >= 0)) errors.push(`${name} must be 0 or greater`);
+  };
+  const requireInteger = (name, value, minimum = 0) => {
+    if (!Number.isInteger(value) || value < minimum) {
+      errors.push(`${name} must be an integer of at least ${minimum}`);
+    }
+  };
+
+  if (!SYMBOLS.length) errors.push('SYMBOLS must contain at least one symbol');
+  if (!VALID_EXCHANGE_MODES.has(EXCHANGE_MODE)) {
+    errors.push(`EXCHANGE_MODE must be one of: ${[...VALID_EXCHANGE_MODES].join(', ')}`);
+  }
+  if (!['ARITHMETIC', 'GEOMETRIC'].includes(GRID_MODE)) {
+    errors.push('GRID_MODE must be ARITHMETIC or GEOMETRIC');
+  }
+
+  requirePositive('INTERVAL_MINUTES', INTERVAL_MINUTES);
+  requireInteger('GRID_COUNT', GRID_COUNT, 2);
+  requireNonNegative('GRID_TOTAL_INVESTMENT_USDT', GRID_TOTAL_INVESTMENT_USDT);
+  requirePositive(
+    GRID_TOTAL_INVESTMENT_USDT > 0 ? 'GRID_TOTAL_INVESTMENT_USDT' : 'GRID_ORDER_SIZE_USDT',
+    GRID_TOTAL_INVESTMENT_USDT > 0 ? GRID_TOTAL_INVESTMENT_USDT : GRID_ORDER_SIZE_USDT
+  );
+  requireInteger('GRID_MAX_ACTIVE_BUY_ORDERS', GRID_MAX_ACTIVE_BUY_ORDERS);
+  requireInteger('GRID_MAX_ACTIVE_SELL_ORDERS', GRID_MAX_ACTIVE_SELL_ORDERS);
+  requireNonNegative('GRID_MIN_PROFIT_PCT', GRID_MIN_PROFIT_PCT);
+  requireInteger('AI_VALIDATION_RETRIES', AI_VALIDATION_RETRIES);
+  requirePositive('FONNTE_TIMEOUT_MS', FONNTE_TIMEOUT_MS);
+
+  const hasLower = GRID_LOWER_PRICE > 0;
+  const hasUpper = GRID_UPPER_PRICE > 0;
+  if (!hasLower && !hasUpper) requirePositive('GRID_RANGE_PCT', GRID_RANGE_PCT);
+  if (hasLower !== hasUpper) {
+    errors.push('GRID_LOWER_PRICE and GRID_UPPER_PRICE must both be set or both be 0');
+  } else if (hasLower && GRID_LOWER_PRICE >= GRID_UPPER_PRICE) {
+    errors.push('GRID_LOWER_PRICE must be lower than GRID_UPPER_PRICE');
+  }
+
+  if (!process.env.EXCHANGE_API_KEY || !process.env.EXCHANGE_SECRET) {
+    errors.push('EXCHANGE_API_KEY and EXCHANGE_SECRET are required');
+  }
+  if (AI_VALIDATION_ENABLED && !process.env.GEMINI_API_KEY) {
+    errors.push('GEMINI_API_KEY is required when AI_VALIDATION_ENABLED=true');
+  }
+  if (FONNTE_ENABLED && (!FONNTE_TOKEN || !FONNTE_TARGET)) {
+    errors.push('FONNTE_TOKEN and FONNTE_TARGET are required when FONNTE_ENABLED=true');
+  }
+
+  if (errors.length) {
+    throw new Error(`Invalid configuration:\n- ${errors.join('\n- ')}`);
+  }
 }
 
 // ------------------------------
@@ -222,14 +285,7 @@ class GridState {
     this.data = this.load();
   }
 
-  load() {
-    try {
-      if (fs.existsSync(GRID_STATE_PATH)) {
-        return JSON.parse(fs.readFileSync(GRID_STATE_PATH, 'utf8'));
-      }
-    } catch (err) {
-      console.warn('[STATE] Failed to read grid state, starting fresh:', err.message);
-    }
+  static createEmpty() {
     return {
       version: 1,
       updatedAt: new Date().toISOString(),
@@ -237,6 +293,36 @@ class GridState {
       processedTradeIds: [],
       totals: { filledBuys: 0, filledSells: 0, realizedGridProfit: 0 },
     };
+  }
+
+  static normalize(data) {
+    const normalized = data && typeof data === 'object' ? data : {};
+    normalized.version = Number(normalized.version) || 1;
+    normalized.updatedAt = normalized.updatedAt || new Date().toISOString();
+    normalized.symbols = normalized.symbols && typeof normalized.symbols === 'object'
+      ? normalized.symbols
+      : {};
+    normalized.processedTradeIds = Array.isArray(normalized.processedTradeIds)
+      ? normalized.processedTradeIds.map(String).slice(-2000)
+      : [];
+    normalized.totals = normalized.totals && typeof normalized.totals === 'object'
+      ? normalized.totals
+      : {};
+    normalized.totals.filledBuys = Number(normalized.totals.filledBuys) || 0;
+    normalized.totals.filledSells = Number(normalized.totals.filledSells) || 0;
+    normalized.totals.realizedGridProfit = Number(normalized.totals.realizedGridProfit) || 0;
+    return normalized;
+  }
+
+  load() {
+    try {
+      if (fs.existsSync(GRID_STATE_PATH)) {
+        return GridState.normalize(JSON.parse(fs.readFileSync(GRID_STATE_PATH, 'utf8')));
+      }
+    } catch (err) {
+      console.warn('[STATE] Failed to read grid state, starting fresh:', err.message);
+    }
+    return GridState.createEmpty();
   }
 
   save() {
@@ -247,7 +333,8 @@ class GridState {
   }
 
   getSymbol(symbol) {
-    if (!this.data.symbols[symbol]) {
+    const existing = this.data.symbols[symbol];
+    if (!existing || typeof existing !== 'object' || Array.isArray(existing)) {
       this.data.symbols[symbol] = {
         createdAt: new Date().toISOString(),
         config: {},
@@ -256,7 +343,14 @@ class GridState {
         realizedGridProfit: 0,
       };
     }
-    return this.data.symbols[symbol];
+    const sym = this.data.symbols[symbol];
+    sym.config = sym.config && typeof sym.config === 'object' ? sym.config : {};
+    sym.orders = sym.orders && typeof sym.orders === 'object' ? sym.orders : {};
+    sym.lastBuyByLevel = sym.lastBuyByLevel && typeof sym.lastBuyByLevel === 'object'
+      ? sym.lastBuyByLevel
+      : {};
+    sym.realizedGridProfit = Number(sym.realizedGridProfit) || 0;
+    return sym;
   }
 
   rememberOrder(symbol, order, meta) {
@@ -278,12 +372,15 @@ class GridState {
     this.save();
   }
 
-  processedTrade(id) {
-    return this.data.processedTradeIds.includes(String(id));
+  processedTrade(symbol, id) {
+    const scopedId = `${symbol}|${id}`;
+    const legacyId = String(id);
+    return this.data.processedTradeIds.includes(scopedId) ||
+      this.data.processedTradeIds.includes(legacyId);
   }
 
-  markProcessedTrade(id) {
-    this.data.processedTradeIds.push(String(id));
+  markProcessedTrade(symbol, id) {
+    this.data.processedTradeIds.push(`${symbol}|${id}`);
     this.data.processedTradeIds = this.data.processedTradeIds.slice(-2000);
     this.save();
   }
@@ -888,9 +985,9 @@ class SpotGridEngine {
     const openOrderIds = new Set(openOrders.map(order => String(order.id)));
     for (const trade of trades.sort((a, b) => a.timestamp - b.timestamp)) {
       const id = String(trade.id || `${trade.order}-${trade.timestamp}`);
-      if (this.state.processedTrade(id)) continue;
+      if (this.state.processedTrade(symbol, id)) continue;
       if (!symState.orders[String(trade.order)]) {
-        this.state.markProcessedTrade(id);
+        this.state.markProcessedTrade(symbol, id);
         continue;
       }
 
@@ -911,7 +1008,7 @@ class SpotGridEngine {
         }
         // Persist the fill before external effects so a restart cannot place
         // the same refill order or count the same trade twice.
-        this.state.markProcessedTrade(id);
+        this.state.markProcessedTrade(symbol, id);
         await this.sendAlert(`[GRID BUY] ${symbol} amount=${amount} @ ${price} | sellable=${sellableAmount}`);
         if (GRID_REFILL_ON_FILLED && aiDecision.allowTrading && aiDecision.allowSell && levelIndex + 1 < levels.length) {
           const sellPrice = levels[levelIndex + 1];
@@ -944,7 +1041,7 @@ class SpotGridEngine {
             delete symState.lastBuyByLevel[buyLevelIndex];
           }
         }
-        this.state.markProcessedTrade(id);
+        this.state.markProcessedTrade(symbol, id);
         const externalFeeText = profitEstimate.externalFees.length
           ? ` | external fees=${profitEstimate.externalFees.join(', ')}`
           : '';
@@ -960,7 +1057,7 @@ class SpotGridEngine {
         if (!openOrderIds.has(String(trade.order))) {
           delete symState.orders[String(trade.order)];
         }
-        this.state.markProcessedTrade(id);
+        this.state.markProcessedTrade(symbol, id);
       }
     }
   }
@@ -1110,15 +1207,29 @@ class SpotGridEngine {
         message,
         countryCode: FONNTE_COUNTRY_CODE,
       }).toString();
-      const req = https.request(FONNTE_API_URL, {
-        method: 'POST',
-        headers: {
-          Authorization: FONNTE_TOKEN,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
+      await new Promise((resolve, reject) => {
+        const req = https.request(FONNTE_API_URL, {
+          method: 'POST',
+          headers: {
+            Authorization: FONNTE_TOKEN,
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Content-Length': Buffer.byteLength(form),
+          },
+          timeout: FONNTE_TIMEOUT_MS,
+        }, response => {
+          response.resume();
+          response.once('end', () => {
+            if (response.statusCode >= 200 && response.statusCode < 300) {
+              resolve();
+              return;
+            }
+            reject(new Error(`Fonnte returned HTTP ${response.statusCode}`));
+          });
+        });
+        req.once('timeout', () => req.destroy(new Error(`Fonnte request timed out after ${FONNTE_TIMEOUT_MS}ms`)));
+        req.once('error', reject);
+        req.end(form);
       });
-      req.write(form);
-      req.end();
     } catch (err) {
       console.warn('[ALERT] Failed:', err.message);
     }
@@ -1147,6 +1258,7 @@ AI Validation: ${AI_VALIDATION_ENABLED ? `ON (${GEMINI_MODEL})` : 'OFF'}
 }
 
 async function bootstrap() {
+  validateRuntimeConfiguration();
   const lock = new ProcessLock(BOT_LOCK_PATH);
   lock.acquire();
   const shutdown = signal => {
@@ -1172,6 +1284,9 @@ if (require.main === module) {
 
 module.exports = {
   AIGridValidator,
+  Config,
+  GridState,
   SpotGridEngine,
   bootstrap,
+  validateRuntimeConfiguration,
 };
