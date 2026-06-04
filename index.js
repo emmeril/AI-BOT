@@ -52,6 +52,11 @@ const GRID_MODE = Config.get('GRID_MODE', 'ARITHMETIC').toUpperCase();
 const GRID_LOWER_PRICE = Config.number('GRID_LOWER_PRICE', 0);
 const GRID_UPPER_PRICE = Config.number('GRID_UPPER_PRICE', 0);
 const GRID_RANGE_PCT = Config.number('GRID_RANGE_PCT', 5);
+const GRID_DYNAMIC_RANGE = Config.boolean('GRID_DYNAMIC_RANGE', false);
+const GRID_RECENTER_TRIGGER_PCT = Math.min(Math.max(Config.number('GRID_RECENTER_TRIGGER_PCT', 10), 0), 49);
+const GRID_RECENTER_CONFIRM_CYCLES = Math.max(Math.floor(Config.number('GRID_RECENTER_CONFIRM_CYCLES', 3)), 1);
+const GRID_RECENTER_COOLDOWN_MS = Math.max(Config.number('GRID_RECENTER_COOLDOWN_MINUTES', 60), 0) * MINUTE_MS;
+const GRID_RECENTER_ALLOW_DOWN = Config.boolean('GRID_RECENTER_ALLOW_DOWN', false);
 const GRID_ORDER_SIZE_USDT = Config.number('GRID_ORDER_SIZE_USDT', Config.number('ORDER_SIZE_USDT', 20));
 const GRID_TOTAL_INVESTMENT_USDT = Config.number('GRID_TOTAL_INVESTMENT_USDT', 0);
 const GRID_MAX_ACTIVE_BUY_ORDERS = Config.number('GRID_MAX_ACTIVE_BUY_ORDERS', 5);
@@ -598,6 +603,94 @@ class SpotGridEngine {
     return { lower, upper };
   }
 
+  getDynamicRangeState(symbol) {
+    const symState = this.state.getSymbol(symbol);
+    if (!symState.dynamicRange) {
+      symState.dynamicRange = {
+        pendingDirection: null,
+        pendingCycles: 0,
+        lastRecenterAt: null,
+      };
+    }
+    return symState.dynamicRange;
+  }
+
+  hasOpenGridPosition(symbol) {
+    return Object.values(this.state.getSymbol(symbol).lastBuyByLevel)
+      .some(buy => Number(buy.sellableAmount ?? buy.amount) > 0);
+  }
+
+  getRecenterDirection(currentPrice, lower, upper) {
+    const triggerDistance = (upper - lower) * (GRID_RECENTER_TRIGGER_PCT / 100);
+    if (currentPrice >= upper - triggerDistance) return 'up';
+    if (currentPrice <= lower + triggerDistance) return 'down';
+    return null;
+  }
+
+  async maybeRecenterRange(symbol, currentPrice, lower, upper) {
+    const manualRange = GRID_LOWER_PRICE > 0 && GRID_UPPER_PRICE > 0;
+    if (!GRID_DYNAMIC_RANGE || manualRange) return null;
+
+    const rangeState = this.getDynamicRangeState(symbol);
+    const direction = this.getRecenterDirection(currentPrice, lower, upper);
+    const lastRecenterAt = Date.parse(rangeState.lastRecenterAt || 0);
+    const cooldownRemaining = GRID_RECENTER_COOLDOWN_MS - (Date.now() - lastRecenterAt);
+
+    if (!direction || cooldownRemaining > 0) {
+      if (rangeState.pendingDirection || rangeState.pendingCycles) {
+        rangeState.pendingDirection = null;
+        rangeState.pendingCycles = 0;
+        this.state.save();
+      }
+      return null;
+    }
+
+    if (rangeState.pendingDirection === direction) {
+      rangeState.pendingCycles++;
+    } else {
+      rangeState.pendingDirection = direction;
+      rangeState.pendingCycles = 1;
+    }
+    this.state.save();
+
+    if (rangeState.pendingCycles < GRID_RECENTER_CONFIRM_CYCLES) {
+      console.log(
+        `[RANGE] ${symbol} ${direction} trigger confirmation ` +
+        `${rangeState.pendingCycles}/${GRID_RECENTER_CONFIRM_CYCLES}`
+      );
+      return null;
+    }
+
+    if (direction === 'down' && !GRID_RECENTER_ALLOW_DOWN && this.hasOpenGridPosition(symbol)) {
+      rangeState.pendingDirection = null;
+      rangeState.pendingCycles = 0;
+      this.state.save();
+      console.warn(`[RANGE] ${symbol} down re-center blocked | open grid position exists`);
+      return null;
+    }
+
+    const newLower = currentPrice * (1 - GRID_RANGE_PCT / 100);
+    const newUpper = currentPrice * (1 + GRID_RANGE_PCT / 100);
+    await this.cancelGridOrders(symbol, `dynamic re-center ${direction}`);
+
+    const symState = this.state.getSymbol(symbol);
+    symState.config.lower = newLower;
+    symState.config.upper = newUpper;
+    rangeState.pendingDirection = null;
+    rangeState.pendingCycles = 0;
+    rangeState.lastRecenterAt = new Date().toISOString();
+    this.state.save();
+
+    console.log(
+      `[RANGE] ${symbol} re-centered ${direction}: ` +
+      `${roundNumber(lower)}-${roundNumber(upper)} -> ${roundNumber(newLower)}-${roundNumber(newUpper)}`
+    );
+    await this.sendAlert(
+      `[GRID RANGE] ${symbol} re-centered ${direction} to ${roundNumber(newLower)}-${roundNumber(newUpper)}`
+    );
+    return { lower: newLower, upper: newUpper };
+  }
+
   buildLevels(lower, upper) {
     if (GRID_COUNT < 2) throw new Error('GRID_COUNT minimal 2.');
     if (GRID_MODE === 'GEOMETRIC') {
@@ -856,7 +949,8 @@ class SpotGridEngine {
       }
 
       if (side === 'sell') {
-        const buy = symState.lastBuyByLevel[levelIndex - 1] || symState.lastBuyByLevel[levelIndex];
+        const buyLevelIndex = symState.lastBuyByLevel[levelIndex - 1] ? levelIndex - 1 : levelIndex;
+        const buy = symState.lastBuyByLevel[buyLevelIndex];
         const profitEstimate = this.estimateGridProfit(symbol, buy, trade);
         const estimatedProfit = profitEstimate.profit;
         symState.realizedGridProfit += estimatedProfit;
@@ -864,6 +958,14 @@ class SpotGridEngine {
         this.state.data.totals.filledSells++;
         if (!openOrderIds.has(String(trade.order))) {
           delete symState.orders[String(trade.order)];
+        }
+        if (buy) {
+          const remainingAmount = Number(buy.sellableAmount ?? buy.amount) - amount;
+          if (remainingAmount > 0) {
+            buy.sellableAmount = remainingAmount;
+          } else {
+            delete symState.lastBuyByLevel[buyLevelIndex];
+          }
         }
         this.state.markProcessedTrade(id);
         const externalFeeText = profitEstimate.externalFees.length
@@ -923,8 +1025,8 @@ class SpotGridEngine {
   }
 
   async reconcileSymbolUnlocked(symbol) {
-    const context = await this.fetchContext(symbol);
-    const { currentPrice, openOrders, balance, lower, upper, levels } = context;
+    let context = await this.fetchContext(symbol);
+    let { currentPrice, balance, lower, upper, levels } = context;
     const canContinue = await this.enforceRangeExits(symbol, currentPrice);
     if (!canContinue) return;
 
@@ -937,6 +1039,12 @@ class SpotGridEngine {
     }
 
     await this.handleFilledTrades(symbol, levels, aiDecision);
+
+    const recentered = await this.maybeRecenterRange(symbol, currentPrice, lower, upper);
+    if (recentered) {
+      context = await this.fetchContext(symbol);
+      ({ currentPrice, balance, lower, upper, levels } = context);
+    }
 
     const freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
     let managedOrders = this.getManagedOpenOrders(symbol, freshOpenOrders);
@@ -1046,6 +1154,7 @@ Grid Mode: ${GRID_MODE}
 Grid Count: ${GRID_COUNT}
 Order Size: ${this.getOrderSizeUsdt()} USDT/grid
 Range: ${GRID_LOWER_PRICE && GRID_UPPER_PRICE ? `${GRID_LOWER_PRICE}-${GRID_UPPER_PRICE}` : `auto +/-${GRID_RANGE_PCT}%`}
+Dynamic Range: ${GRID_DYNAMIC_RANGE ? `ON (trigger=${GRID_RECENTER_TRIGGER_PCT}%, confirm=${GRID_RECENTER_CONFIRM_CYCLES}, cooldown=${GRID_RECENTER_COOLDOWN_MS / MINUTE_MS}m, allowDownWithOpenPosition=${GRID_RECENTER_ALLOW_DOWN})` : 'OFF'}
 Max Active Orders: buy=${GRID_MAX_ACTIVE_BUY_ORDERS}, sell=${GRID_MAX_ACTIVE_SELL_ORDERS}
 Recreate On Start: ${GRID_RECREATE_ON_START ? 'ON' : 'OFF'}
 AI Validation: ${AI_VALIDATION_ENABLED ? `ON (${GEMINI_MODEL})` : 'OFF'}

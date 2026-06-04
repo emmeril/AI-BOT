@@ -81,6 +81,18 @@ AI_VALIDATION_ENABLED=false
 
 Jika `GRID_LOWER_PRICE` dan `GRID_UPPER_PRICE` bernilai `0`, bot membuat range otomatis saat grid pertama kali dibuat: harga saat itu plus/minus `GRID_RANGE_PCT`. Range tersebut disimpan di `grid-state-spot.json` agar tidak bergeser setiap siklus.
 
+Dynamic re-centering opsional dapat diaktifkan untuk menggeser auto-range setelah harga bertahan dekat batas:
+
+```env
+GRID_DYNAMIC_RANGE=true
+GRID_RECENTER_TRIGGER_PCT=10
+GRID_RECENTER_CONFIRM_CYCLES=3
+GRID_RECENTER_COOLDOWN_MINUTES=60
+GRID_RECENTER_ALLOW_DOWN=false
+```
+
+Dengan konfigurasi tersebut, harga harus berada dalam 10% area dekat batas selama 3 siklus berturut-turut. Setelah re-center, bot menunggu 60 menit sebelum dapat menggeser range lagi. Re-center turun diblokir selama masih ada posisi hasil buy grid yang belum terjual.
+
 ## Menjalankan Bot
 
 ```bash
