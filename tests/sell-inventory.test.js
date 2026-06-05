@@ -32,3 +32,25 @@ test('tracked sell amount falls back to buy amount for legacy state', () => {
 
   assert.equal(engine.amountForTrackedSell('BONK/USDT', 3), 42);
 });
+
+test('placeLimit skips invalid dust amounts and clears pending level', async () => {
+  const engine = Object.create(SpotGridEngine.prototype);
+  engine.pendingOrderLevels = new Set();
+  engine.makeClientOrderId = () => 'grid-bonk-s-5-test';
+  engine.exchange = {
+    priceToPrecision: () => '0.000005',
+    amountToPrecision: () => {
+      const err = new Error('binance amount of BONK/USDT must be greater than minimum amount precision of 1');
+      err.name = 'InvalidOrder';
+      throw err;
+    },
+    createLimitOrder: () => {
+      throw new Error('should not create order');
+    },
+  };
+
+  const order = await engine.placeLimit('BONK/USDT', 'sell', 5, 0.000005, 0.25);
+
+  assert.equal(order, null);
+  assert.equal(engine.pendingOrderLevels.size, 0);
+});

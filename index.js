@@ -902,10 +902,12 @@ class SpotGridEngine {
     }
 
     this.pendingOrderLevels.add(pendingKey);
-    const precisePrice = this.exchange.priceToPrecision(symbol, price);
-    const preciseAmount = this.exchange.amountToPrecision(symbol, amount);
     const clientOrderId = this.makeClientOrderId(symbol, side, levelIndex);
+    let precisePrice = null;
+    let preciseAmount = null;
     try {
+      precisePrice = this.exchange.priceToPrecision(symbol, price);
+      preciseAmount = this.exchange.amountToPrecision(symbol, amount);
       // A network timeout after submission is ambiguous. Retrying here can create
       // a second live order, so let the next reconciliation recover safely.
       const order = await this.exchange.createLimitOrder(
@@ -925,6 +927,12 @@ class SpotGridEngine {
         );
         return null;
       }
+      if (this.isInvalidOrderAmountError(err)) {
+        console.warn(
+          `[SKIP] ${symbol} ${side.toUpperCase()} level=${levelIndex} amount=${amount} | invalid order amount: ${err.message}`
+        );
+        return null;
+      }
       throw err;
     } finally {
       this.pendingOrderLevels.delete(pendingKey);
@@ -937,6 +945,17 @@ class SpotGridEngine {
       err?.name === 'InsufficientFunds' ||
       message.includes('insufficient balance') ||
       message.includes('insufficient funds');
+  }
+
+  isInvalidOrderAmountError(err) {
+    const message = String(err?.message || err || '').toLowerCase();
+    return err instanceof ccxt.InvalidOrder ||
+      err?.name === 'InvalidOrder' ||
+      (message.includes('amount') && (
+        message.includes('minimum amount') ||
+        message.includes('precision') ||
+        message.includes('must be greater')
+      ));
   }
 
   getBaseFree(balance, symbol) {
