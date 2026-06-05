@@ -1013,6 +1013,13 @@ class SpotGridEngine {
     return notional / price;
   }
 
+  amountForTrackedSell(symbol, sellLevelIndex) {
+    const symState = this.state.getSymbol(symbol);
+    const buy = symState.lastBuyByLevel[sellLevelIndex - 1];
+    if (!buy) return 0;
+    return Math.max(0, Number(buy.sellableAmount ?? buy.amount) || 0);
+  }
+
   isOrderInsideRange(order, lower, upper) {
     const price = Number(order.price);
     return price >= lower && price <= upper;
@@ -1211,8 +1218,10 @@ class SpotGridEngine {
     for (const level of above) {
       if (!aiDecision.allowTrading || !aiDecision.allowSell) break;
       if (activeSellLevels.has(level.index)) continue;
-      const amount = this.amountForBuy(symbol, currentPrice);
-      if (baseFree < amount) break;
+      const trackedAmount = this.amountForTrackedSell(symbol, level.index);
+      if (!(trackedAmount > 0)) continue;
+      const amount = Math.min(trackedAmount, baseFree);
+      if (!(amount > 0)) break;
       const order = await this.placeLimit(symbol, 'sell', level.index, level.price, amount);
       if (!order) break;
       baseFree -= amount;
