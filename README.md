@@ -81,14 +81,16 @@ AI_VALIDATION_ENABLED=false
 
 Jika `GRID_LOWER_PRICE` dan `GRID_UPPER_PRICE` bernilai `0`, bot membuat range otomatis saat grid pertama kali dibuat: harga saat itu plus/minus `GRID_RANGE_PCT`. Range tersebut disimpan di `grid-state-spot.json` agar tidak bergeser setiap siklus.
 
-Trailing Up opsional dapat diaktifkan untuk menggeser auto-range naik secara bertahap:
+Trailing Up dan Trailing Down opsional dapat diaktifkan untuk menggeser auto-range secara bertahap mengikuti breakout harga:
 
 ```env
 GRID_TRAILING_UP_ENABLED=true
 GRID_TRAILING_UP_COOLDOWN_MINUTES=0
+GRID_TRAILING_DOWN_ENABLED=true
+GRID_TRAILING_DOWN_COOLDOWN_MINUTES=0
 ```
 
-Saat harga mencapai satu interval grid di atas batas atas, range bergeser naik tepat satu grid. Order yang masih berada di dalam range baru tetap aktif; order pada level terbawah yang sudah keluar range dibatalkan oleh proses sinkronisasi. Bot tidak melakukan trailing down dan tidak membatalkan seluruh grid saat bergeser. Opsi cooldown dapat dinaikkan untuk membatasi frekuensi pergeseran.
+Saat harga mencapai satu interval grid di atas batas atas, range bergeser naik tepat satu grid. Saat harga mencapai satu interval grid di bawah batas bawah, range bergeser turun tepat satu grid. Order yang masih berada di dalam range baru tetap aktif; order yang keluar range dibatalkan oleh proses sinkronisasi. Bot tidak membatalkan seluruh grid saat bergeser. Opsi cooldown dapat dinaikkan untuk membatasi frekuensi pergeseran.
 
 ## Menjalankan Bot
 
@@ -145,7 +147,7 @@ AI_MIN_CONFIDENCE=60
 
 Jika Gemini menolak kondisi market, bot tidak memasang order baru pada siklus itu. Jika validasi AI gagal atau confidence di bawah `AI_MIN_CONFIDENCE`, bot juga tidak memasang order baru.
 
-Saat Trailing Up menggeser range, AI langsung menilai range baru. Breakout naik yang memicu pergeseran tidak otomatis diblokir, tetapi AI tetap dapat menghentikan order baru jika momentum satu arah atau volatilitas dinilai terlalu berisiko.
+Saat Trailing Up atau Trailing Down menggeser range, AI langsung menilai range baru. Breakout naik/turun yang memicu pergeseran tidak otomatis diblokir, tetapi AI tetap dapat menghentikan order baru jika momentum satu arah atau volatilitas dinilai terlalu berisiko.
 
 Untuk mengurangi risiko rate limit Gemini:
 
