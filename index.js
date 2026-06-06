@@ -58,6 +58,11 @@ const GRID_UPPER_PRICE = Config.number('GRID_UPPER_PRICE', 0);
 const GRID_RANGE_PCT = Config.number('GRID_RANGE_PCT', 5);
 const GRID_TRAILING_UP_ENABLED = Config.boolean('GRID_TRAILING_UP_ENABLED', Config.boolean('GRID_DYNAMIC_RANGE', false));
 const GRID_TRAILING_UP_COOLDOWN_MS = Math.max(Config.number('GRID_TRAILING_UP_COOLDOWN_MINUTES', 0), 0) * MINUTE_MS;
+const GRID_TRAILING_DOWN_ENABLED = Config.boolean('GRID_TRAILING_DOWN_ENABLED', false);
+const GRID_TRAILING_DOWN_COOLDOWN_MS = Math.max(
+  Config.number('GRID_TRAILING_DOWN_COOLDOWN_MINUTES', Config.number('GRID_TRAILING_UP_COOLDOWN_MINUTES', 0)),
+  0
+) * MINUTE_MS;
 const GRID_ORDER_SIZE_USDT = Config.number('GRID_ORDER_SIZE_USDT', Config.number('ORDER_SIZE_USDT', 20));
 const GRID_TOTAL_INVESTMENT_USDT = Config.number('GRID_TOTAL_INVESTMENT_USDT', 0);
 const GRID_MAX_ACTIVE_BUY_ORDERS = Config.number('GRID_MAX_ACTIVE_BUY_ORDERS', 5);
@@ -541,7 +546,14 @@ class AIGridValidator {
   }
 
   buildPrompt(symbol, context, candleSummary) {
-    const { currentPrice, lower, upper, levels, trailingUpJustShifted = false } = context;
+    const {
+      currentPrice,
+      lower,
+      upper,
+      levels,
+      trailingUpJustShifted = false,
+      trailingDownJustShifted = false,
+    } = context;
     const distLowerPct = ((currentPrice - lower) / currentPrice) * 100;
     const distUpperPct = ((upper - currentPrice) / currentPrice) * 100;
     return `
@@ -560,6 +572,7 @@ Decision rules:
 - Grid works best in ranging or mildly volatile markets.
 - Block new orders when trend is strongly one-directional, price is breaking out of range, volatility is extreme, or market data is unclear.
 - When Trailing Up Just Shifted is true, the previous upside breakout is expected. Do not block solely because price is near the new upper bound; still block if momentum or volatility makes new grid orders unsafe.
+- When Trailing Down Just Shifted is true, the previous downside breakdown is expected. Do not block solely because price is near the new lower bound; still block if momentum or volatility makes new grid orders unsafe.
 - allowBuy can be false if downside pressure is high.
 - allowSell can be false if upside breakout pressure is high.
 - Be conservative. Existing open orders are managed by the bot; you only validate new orders.
@@ -571,7 +584,9 @@ Grid Upper: ${upper}
 Grid Count: ${GRID_COUNT}
 Grid Mode: ${GRID_MODE}
 Trailing Up Enabled: ${GRID_TRAILING_UP_ENABLED}
+Trailing Down Enabled: ${GRID_TRAILING_DOWN_ENABLED}
 Trailing Up Just Shifted: ${trailingUpJustShifted}
+Trailing Down Just Shifted: ${trailingDownJustShifted}
 Distance to Lower: ${distLowerPct.toFixed(3)}%
 Distance to Upper: ${distUpperPct.toFixed(3)}%
 Nearest Levels: ${levels.map(level => roundNumber(level)).join(', ')}
@@ -754,12 +769,31 @@ class SpotGridEngine {
     return symState.trailingUp;
   }
 
+  getTrailingDownState(symbol) {
+    const symState = this.state.getSymbol(symbol);
+    if (!symState.trailingDown) {
+      symState.trailingDown = {
+        shifts: 0,
+        lastShiftAt: null,
+      };
+    }
+    return symState.trailingDown;
+  }
+
   getTrailingUpTrigger(lower, upper) {
     if (GRID_MODE === 'GEOMETRIC') {
       const ratio = Math.pow(upper / lower, 1 / GRID_COUNT);
       return upper * ratio;
     }
     return upper + ((upper - lower) / GRID_COUNT);
+  }
+
+  getTrailingDownTrigger(lower, upper) {
+    if (GRID_MODE === 'GEOMETRIC') {
+      const ratio = Math.pow(upper / lower, 1 / GRID_COUNT);
+      return lower / ratio;
+    }
+    return lower - ((upper - lower) / GRID_COUNT);
   }
 
   shiftStoredLevelIndexes(symbol, offset) {
@@ -803,6 +837,38 @@ class SpotGridEngine {
     );
     await this.sendAlert(
       `[GRID TRAILING UP] ${symbol} shifted to ${roundNumber(newLower)}-${roundNumber(newUpper)}`
+    );
+    return { lower: newLower, upper: newUpper };
+  }
+
+  async maybeTrailDownRange(symbol, currentPrice, lower, upper) {
+    const manualRange = GRID_LOWER_PRICE > 0 && GRID_UPPER_PRICE > 0;
+    if (!GRID_TRAILING_DOWN_ENABLED || manualRange) return null;
+
+    const trailingState = this.getTrailingDownState(symbol);
+    const lastShiftAt = Date.parse(trailingState.lastShiftAt || 0);
+    if (GRID_TRAILING_DOWN_COOLDOWN_MS > Date.now() - lastShiftAt) return null;
+
+    const levels = this.buildLevels(lower, upper);
+    const triggerPrice = this.getTrailingDownTrigger(lower, upper);
+    if (currentPrice > triggerPrice) return null;
+
+    const newLower = triggerPrice;
+    const newUpper = levels[levels.length - 2];
+    const symState = this.state.getSymbol(symbol);
+    symState.config.lower = newLower;
+    symState.config.upper = newUpper;
+    this.shiftStoredLevelIndexes(symbol, 1);
+    trailingState.shifts++;
+    trailingState.lastShiftAt = new Date().toISOString();
+    this.state.save();
+
+    console.log(
+      `[TRAILING DOWN] ${symbol} shifted one grid: ` +
+      `${roundNumber(lower)}-${roundNumber(upper)} -> ${roundNumber(newLower)}-${roundNumber(newUpper)}`
+    );
+    await this.sendAlert(
+      `[GRID TRAILING DOWN] ${symbol} shifted to ${roundNumber(newLower)}-${roundNumber(newUpper)}`
     );
     return { lower: newLower, upper: newUpper };
   }
@@ -1173,16 +1239,25 @@ class SpotGridEngine {
     if (!canContinue) return;
 
     const trailedUp = await this.maybeTrailUpRange(symbol, currentPrice, lower, upper);
+    let trailedDown = null;
     if (trailedUp) {
       context = await this.fetchContext(symbol);
       context.trailingUpJustShifted = true;
       ({ currentPrice, balance, lower, upper, levels } = context);
+    } else {
+      trailedDown = await this.maybeTrailDownRange(symbol, currentPrice, lower, upper);
+      if (trailedDown) {
+        context = await this.fetchContext(symbol);
+        context.trailingDownJustShifted = true;
+        ({ currentPrice, balance, lower, upper, levels } = context);
+      }
     }
 
-    const aiDecision = await this.aiValidator.validate(symbol, context, { ignoreMinInterval: Boolean(trailedUp) });
+    const trailed = Boolean(trailedUp || trailedDown);
+    const aiDecision = await this.aiValidator.validate(symbol, context, { ignoreMinInterval: trailed });
     if (AI_VALIDATION_ENABLED) {
       console.log(
-        `[AI] ${symbol}${trailedUp ? ' trailing-up' : ''} allow=${aiDecision.allowTrading} ` +
+        `[AI] ${symbol}${trailedUp ? ' trailing-up' : ''}${trailedDown ? ' trailing-down' : ''} allow=${aiDecision.allowTrading} ` +
         `buy=${aiDecision.allowBuy} sell=${aiDecision.allowSell} ` +
         `confidence=${aiDecision.confidence} | ${aiDecision.reason}`
       );
@@ -1315,6 +1390,7 @@ Grid Count: ${GRID_COUNT}
 Order Size: ${this.getOrderSizeUsdt()} USDT/grid
 Range: ${GRID_LOWER_PRICE && GRID_UPPER_PRICE ? `${GRID_LOWER_PRICE}-${GRID_UPPER_PRICE}` : `auto +/-${GRID_RANGE_PCT}%`}
 Trailing Up: ${GRID_TRAILING_UP_ENABLED ? `ON (one-grid trigger, cooldown=${GRID_TRAILING_UP_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
+Trailing Down: ${GRID_TRAILING_DOWN_ENABLED ? `ON (one-grid trigger, cooldown=${GRID_TRAILING_DOWN_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
 Max Active Orders: buy=${GRID_MAX_ACTIVE_BUY_ORDERS}, sell=${GRID_MAX_ACTIVE_SELL_ORDERS}
 Recreate On Start: ${GRID_RECREATE_ON_START ? 'ON' : 'OFF'}
 AI Validation: ${AI_VALIDATION_ENABLED ? `ON (${GEMINI_MODEL})` : 'OFF'}
