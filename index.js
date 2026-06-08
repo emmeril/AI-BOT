@@ -60,9 +60,13 @@ const GRID_MODE = Config.get('GRID_MODE', 'ARITHMETIC').toUpperCase();
 const GRID_LOWER_PRICE = Config.number('GRID_LOWER_PRICE', 0);
 const GRID_UPPER_PRICE = Config.number('GRID_UPPER_PRICE', 0);
 const GRID_RANGE_PCT = Config.number('GRID_RANGE_PCT', 5);
-const GRID_TRAILING_UP_ENABLED = Config.boolean('GRID_TRAILING_UP_ENABLED', Config.boolean('GRID_DYNAMIC_RANGE', false));
+const GRID_TRAILING_RANGE_ENABLED = Config.boolean('GRID_TRAILING_RANGE_ENABLED', false);
+const GRID_TRAILING_UP_ENABLED = Config.boolean(
+  'GRID_TRAILING_UP_ENABLED',
+  Config.boolean('GRID_DYNAMIC_RANGE', GRID_TRAILING_RANGE_ENABLED)
+);
 const GRID_TRAILING_UP_COOLDOWN_MS = Math.max(Config.number('GRID_TRAILING_UP_COOLDOWN_MINUTES', 0), 0) * MINUTE_MS;
-const GRID_TRAILING_DOWN_ENABLED = Config.boolean('GRID_TRAILING_DOWN_ENABLED', false);
+const GRID_TRAILING_DOWN_ENABLED = Config.boolean('GRID_TRAILING_DOWN_ENABLED', GRID_TRAILING_RANGE_ENABLED);
 const GRID_TRAILING_DOWN_COOLDOWN_MS = Math.max(
   Config.number('GRID_TRAILING_DOWN_COOLDOWN_MINUTES', Config.number('GRID_TRAILING_UP_COOLDOWN_MINUTES', 0)),
   0
@@ -828,6 +832,72 @@ class SpotGridEngine {
     symState.lastBuyByLevel = shiftedBuys;
   }
 
+  calculateTrailingShift(currentPrice, lower, upper, direction) {
+    if (GRID_MODE === 'GEOMETRIC') {
+      const ratio = Math.pow(upper / lower, 1 / GRID_COUNT);
+      if (!(ratio > 1)) return null;
+      if (direction === 'up') {
+        if (currentPrice < upper * ratio) return null;
+        const steps = Math.max(1, Math.floor(Math.log(currentPrice / upper) / Math.log(ratio)));
+        return {
+          steps,
+          lower: lower * Math.pow(ratio, steps),
+          upper: upper * Math.pow(ratio, steps),
+        };
+      }
+      if (currentPrice > lower / ratio) return null;
+      const steps = Math.max(1, Math.floor(Math.log(lower / currentPrice) / Math.log(ratio)));
+      return {
+        steps,
+        lower: lower / Math.pow(ratio, steps),
+        upper: upper / Math.pow(ratio, steps),
+      };
+    }
+
+    const stepSize = (upper - lower) / GRID_COUNT;
+    if (!(stepSize > 0)) return null;
+    if (direction === 'up') {
+      if (currentPrice < upper + stepSize) return null;
+      const steps = Math.max(1, Math.floor((currentPrice - upper) / stepSize));
+      return {
+        steps,
+        lower: lower + (stepSize * steps),
+        upper: upper + (stepSize * steps),
+      };
+    }
+    if (currentPrice > lower - stepSize) return null;
+    const steps = Math.max(1, Math.floor((lower - currentPrice) / stepSize));
+    return {
+      steps,
+      lower: lower - (stepSize * steps),
+      upper: upper - (stepSize * steps),
+    };
+  }
+
+  async applyTrailingRangeShift(symbol, lower, upper, shift, direction) {
+    const symState = this.state.getSymbol(symbol);
+    const trailingState = direction === 'up'
+      ? this.getTrailingUpState(symbol)
+      : this.getTrailingDownState(symbol);
+    symState.config.lower = shift.lower;
+    symState.config.upper = shift.upper;
+    this.shiftStoredLevelIndexes(symbol, direction === 'up' ? -shift.steps : shift.steps);
+    trailingState.shifts += shift.steps;
+    trailingState.lastShiftAt = new Date().toISOString();
+    this.state.save();
+
+    const label = direction === 'up' ? 'UP' : 'DOWN';
+    console.log(
+      `[TRAILING ${label}] ${symbol} shifted ${shift.steps} grid(s): ` +
+      `${roundNumber(lower)}-${roundNumber(upper)} -> ${roundNumber(shift.lower)}-${roundNumber(shift.upper)}`
+    );
+    await this.sendAlert(
+      `[GRID TRAILING ${label}] ${symbol} shifted ${shift.steps} grid(s) to ` +
+      `${roundNumber(shift.lower)}-${roundNumber(shift.upper)}`
+    );
+    return { lower: shift.lower, upper: shift.upper };
+  }
+
   async maybeTrailUpRange(symbol, currentPrice, lower, upper) {
     if (!GRID_TRAILING_UP_ENABLED || hasManualGridRange()) return null;
 
@@ -835,28 +905,9 @@ class SpotGridEngine {
     const lastShiftAt = Date.parse(trailingState.lastShiftAt || 0);
     if (GRID_TRAILING_UP_COOLDOWN_MS > Date.now() - lastShiftAt) return null;
 
-    const levels = this.buildLevels(lower, upper);
-    const triggerPrice = this.getTrailingUpTrigger(lower, upper);
-    if (currentPrice < triggerPrice) return null;
-
-    const newLower = levels[1];
-    const newUpper = triggerPrice;
-    const symState = this.state.getSymbol(symbol);
-    symState.config.lower = newLower;
-    symState.config.upper = newUpper;
-    this.shiftStoredLevelIndexes(symbol, -1);
-    trailingState.shifts++;
-    trailingState.lastShiftAt = new Date().toISOString();
-    this.state.save();
-
-    console.log(
-      `[TRAILING UP] ${symbol} shifted one grid: ` +
-      `${roundNumber(lower)}-${roundNumber(upper)} -> ${roundNumber(newLower)}-${roundNumber(newUpper)}`
-    );
-    await this.sendAlert(
-      `[GRID TRAILING UP] ${symbol} shifted to ${roundNumber(newLower)}-${roundNumber(newUpper)}`
-    );
-    return { lower: newLower, upper: newUpper };
+    const shift = this.calculateTrailingShift(currentPrice, lower, upper, 'up');
+    if (!shift) return null;
+    return this.applyTrailingRangeShift(symbol, lower, upper, shift, 'up');
   }
 
   async maybeTrailDownRange(symbol, currentPrice, lower, upper) {
@@ -866,28 +917,9 @@ class SpotGridEngine {
     const lastShiftAt = Date.parse(trailingState.lastShiftAt || 0);
     if (GRID_TRAILING_DOWN_COOLDOWN_MS > Date.now() - lastShiftAt) return null;
 
-    const levels = this.buildLevels(lower, upper);
-    const triggerPrice = this.getTrailingDownTrigger(lower, upper);
-    if (currentPrice > triggerPrice) return null;
-
-    const newLower = triggerPrice;
-    const newUpper = levels[levels.length - 2];
-    const symState = this.state.getSymbol(symbol);
-    symState.config.lower = newLower;
-    symState.config.upper = newUpper;
-    this.shiftStoredLevelIndexes(symbol, 1);
-    trailingState.shifts++;
-    trailingState.lastShiftAt = new Date().toISOString();
-    this.state.save();
-
-    console.log(
-      `[TRAILING DOWN] ${symbol} shifted one grid: ` +
-      `${roundNumber(lower)}-${roundNumber(upper)} -> ${roundNumber(newLower)}-${roundNumber(newUpper)}`
-    );
-    await this.sendAlert(
-      `[GRID TRAILING DOWN] ${symbol} shifted to ${roundNumber(newLower)}-${roundNumber(newUpper)}`
-    );
-    return { lower: newLower, upper: newUpper };
+    const shift = this.calculateTrailingShift(currentPrice, lower, upper, 'down');
+    if (!shift) return null;
+    return this.applyTrailingRangeShift(symbol, lower, upper, shift, 'down');
   }
 
   buildLevels(lower, upper) {
@@ -1428,8 +1460,9 @@ Grid Mode: ${GRID_MODE}
 Grid Count: ${GRID_COUNT}
 Order Size: ${this.getOrderSizeUsdt()} USDT/grid
 Range: ${GRID_LOWER_PRICE && GRID_UPPER_PRICE ? `${GRID_LOWER_PRICE}-${GRID_UPPER_PRICE}` : `auto +/-${GRID_RANGE_PCT}%`}
-Trailing Up: ${GRID_TRAILING_UP_ENABLED ? `ON (one-grid trigger, cooldown=${GRID_TRAILING_UP_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
-Trailing Down: ${GRID_TRAILING_DOWN_ENABLED ? `ON (one-grid trigger, cooldown=${GRID_TRAILING_DOWN_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
+Trailing Range: ${GRID_TRAILING_RANGE_ENABLED ? 'ON (auto up/down)' : 'OFF'}
+Trailing Up: ${GRID_TRAILING_UP_ENABLED ? `ON (range-follow trigger, cooldown=${GRID_TRAILING_UP_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
+Trailing Down: ${GRID_TRAILING_DOWN_ENABLED ? `ON (range-follow trigger, cooldown=${GRID_TRAILING_DOWN_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
 Max Active Orders: buy=${GRID_MAX_ACTIVE_BUY_ORDERS}, sell=${GRID_MAX_ACTIVE_SELL_ORDERS}
 Recreate On Start: ${GRID_RECREATE_ON_START ? 'ON' : 'OFF'}
 AI Validation: ${AI_VALIDATION_ENABLED ? `ON (${GEMINI_MODEL})` : 'OFF'}
