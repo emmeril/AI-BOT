@@ -6,6 +6,9 @@ const https = require('https');
 const crypto = require('crypto');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
+const TRUE_VALUES = new Set(['true', '1', 'yes', 'on']);
+const FALSE_VALUES = new Set(['false', '0', 'no', 'off']);
+
 // ------------------------------
 //  Configuration Manager
 // ------------------------------
@@ -24,8 +27,8 @@ class Config {
     const value = process.env[key];
     if (value === undefined || value === '') return fallback;
     const normalized = value.trim().toLowerCase();
-    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
-    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+    if (TRUE_VALUES.has(normalized)) return true;
+    if (FALSE_VALUES.has(normalized)) return false;
     throw new Error(`${key} must be a boolean value`);
   }
 
@@ -47,6 +50,7 @@ class Config {
 const SYMBOLS = Config.list('SYMBOLS', 'BTC/USDT');
 const EXCHANGE_MODE = Config.get('EXCHANGE_MODE', Config.boolean('EXCHANGE_DEMO', false) ? 'demo' : 'live').toLowerCase();
 const VALID_EXCHANGE_MODES = new Set(['live', 'demo', 'testnet']);
+const VALID_GRID_MODES = new Set(['ARITHMETIC', 'GEOMETRIC']);
 const MINUTE_MS = 60 * 1000;
 const INTERVAL_MINUTES = Config.number('INTERVAL_MINUTES', 1);
 const INTERVAL_MS = INTERVAL_MINUTES * MINUTE_MS;
@@ -101,6 +105,11 @@ const FONNTE_API_URL = Config.get('FONNTE_API_URL', 'https://api.fonnte.com/send
 const FONNTE_COUNTRY_CODE = Config.get('FONNTE_COUNTRY_CODE', '62');
 const FONNTE_TIMEOUT_MS = Config.number('FONNTE_TIMEOUT_MS', 10_000);
 
+const MAX_PROCESSED_TRADE_IDS = 2000;
+const TRADE_FETCH_LIMIT = 100;
+const CIRCUIT_BREAKER_MAX_ERRORS = 5;
+const CIRCUIT_BREAKER_PAUSE_MS = 15 * MINUTE_MS;
+
 // ------------------------------
 //  Utility Functions
 // ------------------------------
@@ -132,6 +141,22 @@ function roundNumber(value, digits = 8) {
   return Number.isFinite(num) ? Number(num.toFixed(digits)) : null;
 }
 
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function numberOrZero(value) {
+  return Number(value) || 0;
+}
+
+function hasManualGridRange() {
+  return GRID_LOWER_PRICE > 0 && GRID_UPPER_PRICE > 0;
+}
+
+function scopedTradeId(symbol, id) {
+  return `${symbol}|${id}`;
+}
+
 function validateRuntimeConfiguration() {
   const errors = [];
   const requirePositive = (name, value) => {
@@ -150,7 +175,7 @@ function validateRuntimeConfiguration() {
   if (!VALID_EXCHANGE_MODES.has(EXCHANGE_MODE)) {
     errors.push(`EXCHANGE_MODE must be one of: ${[...VALID_EXCHANGE_MODES].join(', ')}`);
   }
-  if (!['ARITHMETIC', 'GEOMETRIC'].includes(GRID_MODE)) {
+  if (!VALID_GRID_MODES.has(GRID_MODE)) {
     errors.push('GRID_MODE must be ARITHMETIC or GEOMETRIC');
   }
 
@@ -340,21 +365,17 @@ class GridState {
   }
 
   static normalize(data) {
-    const normalized = data && typeof data === 'object' ? data : {};
-    normalized.version = Number(normalized.version) || 1;
+    const normalized = isPlainObject(data) ? data : {};
+    normalized.version = numberOrZero(normalized.version) || 1;
     normalized.updatedAt = normalized.updatedAt || new Date().toISOString();
-    normalized.symbols = normalized.symbols && typeof normalized.symbols === 'object'
-      ? normalized.symbols
-      : {};
+    normalized.symbols = isPlainObject(normalized.symbols) ? normalized.symbols : {};
     normalized.processedTradeIds = Array.isArray(normalized.processedTradeIds)
-      ? normalized.processedTradeIds.map(String).slice(-2000)
+      ? normalized.processedTradeIds.map(String).slice(-MAX_PROCESSED_TRADE_IDS)
       : [];
-    normalized.totals = normalized.totals && typeof normalized.totals === 'object'
-      ? normalized.totals
-      : {};
-    normalized.totals.filledBuys = Number(normalized.totals.filledBuys) || 0;
-    normalized.totals.filledSells = Number(normalized.totals.filledSells) || 0;
-    normalized.totals.realizedGridProfit = Number(normalized.totals.realizedGridProfit) || 0;
+    normalized.totals = isPlainObject(normalized.totals) ? normalized.totals : {};
+    normalized.totals.filledBuys = numberOrZero(normalized.totals.filledBuys);
+    normalized.totals.filledSells = numberOrZero(normalized.totals.filledSells);
+    normalized.totals.realizedGridProfit = numberOrZero(normalized.totals.realizedGridProfit);
     return normalized;
   }
 
@@ -378,7 +399,7 @@ class GridState {
 
   getSymbol(symbol) {
     const existing = this.data.symbols[symbol];
-    if (!existing || typeof existing !== 'object' || Array.isArray(existing)) {
+    if (!isPlainObject(existing)) {
       this.data.symbols[symbol] = {
         createdAt: new Date().toISOString(),
         config: {},
@@ -388,12 +409,10 @@ class GridState {
       };
     }
     const sym = this.data.symbols[symbol];
-    sym.config = sym.config && typeof sym.config === 'object' ? sym.config : {};
-    sym.orders = sym.orders && typeof sym.orders === 'object' ? sym.orders : {};
-    sym.lastBuyByLevel = sym.lastBuyByLevel && typeof sym.lastBuyByLevel === 'object'
-      ? sym.lastBuyByLevel
-      : {};
-    sym.realizedGridProfit = Number(sym.realizedGridProfit) || 0;
+    sym.config = isPlainObject(sym.config) ? sym.config : {};
+    sym.orders = isPlainObject(sym.orders) ? sym.orders : {};
+    sym.lastBuyByLevel = isPlainObject(sym.lastBuyByLevel) ? sym.lastBuyByLevel : {};
+    sym.realizedGridProfit = numberOrZero(sym.realizedGridProfit);
     return sym;
   }
 
@@ -417,17 +436,17 @@ class GridState {
   }
 
   processedTrade(symbol, id) {
-    const scopedId = `${symbol}|${id}`;
+    const scopedId = scopedTradeId(symbol, id);
     const legacyId = String(id);
     return this.data.processedTradeIds.includes(scopedId) ||
       this.data.processedTradeIds.includes(legacyId);
   }
 
   markProcessedTrade(symbol, id) {
-    const scopedId = `${symbol}|${id}`;
+    const scopedId = scopedTradeId(symbol, id);
     if (this.processedTrade(symbol, id)) return false;
     this.data.processedTradeIds.push(scopedId);
-    this.data.processedTradeIds = this.data.processedTradeIds.slice(-2000);
+    this.data.processedTradeIds = this.data.processedTradeIds.slice(-MAX_PROCESSED_TRADE_IDS);
     this.save();
     return true;
   }
@@ -716,10 +735,10 @@ class SpotGridEngine {
 
   recordError() {
     this.circuitBreaker.errors++;
-    if (this.circuitBreaker.errors >= 5) {
-      this.circuitBreaker.pausedUntil = Date.now() + 15 * MINUTE_MS;
+    if (this.circuitBreaker.errors >= CIRCUIT_BREAKER_MAX_ERRORS) {
+      this.circuitBreaker.pausedUntil = Date.now() + CIRCUIT_BREAKER_PAUSE_MS;
       this.circuitBreaker.errors = 0;
-      console.warn('[CIRCUIT] Too many errors. Paused 15m.');
+      console.warn(`[CIRCUIT] Too many errors. Paused ${CIRCUIT_BREAKER_PAUSE_MS / MINUTE_MS}m.`);
     }
   }
 
@@ -736,7 +755,7 @@ class SpotGridEngine {
 
   buildRange(symbol, currentPrice) {
     const symState = this.state.getSymbol(symbol);
-    const manualRange = GRID_LOWER_PRICE > 0 && GRID_UPPER_PRICE > 0;
+    const manualRange = hasManualGridRange();
     const lower = manualRange
       ? GRID_LOWER_PRICE
       : Number(symState.config.lower || currentPrice * (1 - GRID_RANGE_PCT / 100));
@@ -810,8 +829,7 @@ class SpotGridEngine {
   }
 
   async maybeTrailUpRange(symbol, currentPrice, lower, upper) {
-    const manualRange = GRID_LOWER_PRICE > 0 && GRID_UPPER_PRICE > 0;
-    if (!GRID_TRAILING_UP_ENABLED || manualRange) return null;
+    if (!GRID_TRAILING_UP_ENABLED || hasManualGridRange()) return null;
 
     const trailingState = this.getTrailingUpState(symbol);
     const lastShiftAt = Date.parse(trailingState.lastShiftAt || 0);
@@ -842,8 +860,7 @@ class SpotGridEngine {
   }
 
   async maybeTrailDownRange(symbol, currentPrice, lower, upper) {
-    const manualRange = GRID_LOWER_PRICE > 0 && GRID_UPPER_PRICE > 0;
-    if (!GRID_TRAILING_DOWN_ENABLED || manualRange) return null;
+    if (!GRID_TRAILING_DOWN_ENABLED || hasManualGridRange()) return null;
 
     const trailingState = this.getTrailingDownState(symbol);
     const lastShiftAt = Date.parse(trailingState.lastShiftAt || 0);
@@ -1110,15 +1127,90 @@ class SpotGridEngine {
     return price >= lower && price <= upper;
   }
 
+  getTradeId(trade) {
+    return String(trade.id || `${trade.order}-${trade.timestamp}`);
+  }
+
+  forgetOrderIfClosed(symState, trade, openOrderIds) {
+    if (!openOrderIds.has(String(trade.order))) {
+      delete symState.orders[String(trade.order)];
+    }
+  }
+
+  async handleBuyFill(symbol, levels, aiDecision, symState, trade, orderMeta, openOrderIds) {
+    const price = Number(trade.price);
+    const amount = Number(trade.amount);
+    const levelIndex = Number(orderMeta.levelIndex);
+    const fee = this.getTradeFeeCost(trade);
+    const feeCurrency = this.getTradeFeeCurrency(trade);
+    const sellableAmount = this.amountAfterBuyFee(symbol, trade);
+
+    symState.lastBuyByLevel[levelIndex] = { price, amount, sellableAmount, fee, feeCurrency, at: trade.datetime };
+    this.state.data.totals.filledBuys++;
+    this.forgetOrderIfClosed(symState, trade, openOrderIds);
+    this.state.markProcessedTrade(symbol, this.getTradeId(trade));
+
+    await this.sendAlert(`[GRID BUY] ${symbol} amount=${amount} @ ${price} | sellable=${sellableAmount}`);
+
+    if (!GRID_REFILL_ON_FILLED || !aiDecision.allowTrading || !aiDecision.allowSell || levelIndex + 1 >= levels.length) {
+      return;
+    }
+
+    const sellPrice = levels[levelIndex + 1];
+    if ((sellPrice - price) / price < GRID_MIN_PROFIT_PCT) return;
+    if (sellableAmount > 0) {
+      await this.placeLimit(symbol, 'sell', levelIndex + 1, sellPrice, sellableAmount);
+      return;
+    }
+    console.warn(`[SKIP] ${symbol} SELL refill level=${levelIndex + 1} | sellable amount is zero after buy fee`);
+  }
+
+  async handleSellFill(symbol, levels, aiDecision, symState, trade, orderMeta, openOrderIds) {
+    const price = Number(trade.price);
+    const amount = Number(trade.amount);
+    const levelIndex = Number(orderMeta.levelIndex);
+    const buyLevelIndex = symState.lastBuyByLevel[levelIndex - 1] ? levelIndex - 1 : levelIndex;
+    const buy = symState.lastBuyByLevel[buyLevelIndex];
+    const profitEstimate = this.estimateGridProfit(symbol, buy, trade);
+    const estimatedProfit = profitEstimate.profit;
+
+    symState.realizedGridProfit += estimatedProfit;
+    this.state.data.totals.realizedGridProfit += estimatedProfit;
+    this.state.data.totals.filledSells++;
+    this.forgetOrderIfClosed(symState, trade, openOrderIds);
+
+    if (buy) {
+      const remainingAmount = Number(buy.sellableAmount ?? buy.amount) - amount;
+      if (remainingAmount > 0) {
+        buy.sellableAmount = remainingAmount;
+      } else {
+        delete symState.lastBuyByLevel[buyLevelIndex];
+      }
+    }
+
+    this.state.markProcessedTrade(symbol, this.getTradeId(trade));
+
+    const externalFeeText = profitEstimate.externalFees.length
+      ? ` | external fees=${profitEstimate.externalFees.join(', ')}`
+      : '';
+    await this.sendAlert(
+      `[GRID SELL] ${symbol} amount=${amount} @ ${price} | est profit=${estimatedProfit.toFixed(4)} USDT${externalFeeText}`
+    );
+
+    if (GRID_REFILL_ON_FILLED && aiDecision.allowTrading && aiDecision.allowBuy && levelIndex - 1 >= 0) {
+      await this.placeLimit(symbol, 'buy', levelIndex - 1, levels[levelIndex - 1], amount);
+    }
+  }
+
   async handleFilledTrades(symbol, levels, aiDecision) {
     const symState = this.state.getSymbol(symbol);
     const [trades, openOrders] = await Promise.all([
-      retry(() => this.exchange.fetchMyTrades(symbol, undefined, 100)),
+      retry(() => this.exchange.fetchMyTrades(symbol, undefined, TRADE_FETCH_LIMIT)),
       retry(() => this.exchange.fetchOpenOrders(symbol)),
     ]);
     const openOrderIds = new Set(openOrders.map(order => String(order.id)));
     for (const trade of trades.sort((a, b) => a.timestamp - b.timestamp)) {
-      const id = String(trade.id || `${trade.order}-${trade.timestamp}`);
+      const id = this.getTradeId(trade);
       if (this.state.processedTrade(symbol, id)) continue;
       if (!symState.orders[String(trade.order)]) {
         this.state.markProcessedTrade(symbol, id);
@@ -1127,72 +1219,19 @@ class SpotGridEngine {
 
       const orderMeta = symState.orders[String(trade.order)];
       const side = String(trade.side).toLowerCase();
-      const price = Number(trade.price);
-      const amount = Number(trade.amount);
-      const levelIndex = Number(orderMeta.levelIndex);
-      const fee = this.getTradeFeeCost(trade);
-      const feeCurrency = this.getTradeFeeCurrency(trade);
 
       if (side === 'buy') {
-        const sellableAmount = this.amountAfterBuyFee(symbol, trade);
-        symState.lastBuyByLevel[levelIndex] = { price, amount, sellableAmount, fee, feeCurrency, at: trade.datetime };
-        this.state.data.totals.filledBuys++;
-        if (!openOrderIds.has(String(trade.order))) {
-          delete symState.orders[String(trade.order)];
-        }
-        // Persist the fill before external effects so a restart cannot place
-        // the same refill order or count the same trade twice.
-        this.state.markProcessedTrade(symbol, id);
-        await this.sendAlert(`[GRID BUY] ${symbol} amount=${amount} @ ${price} | sellable=${sellableAmount}`);
-        if (GRID_REFILL_ON_FILLED && aiDecision.allowTrading && aiDecision.allowSell && levelIndex + 1 < levels.length) {
-          const sellPrice = levels[levelIndex + 1];
-          if ((sellPrice - price) / price >= GRID_MIN_PROFIT_PCT) {
-            if (sellableAmount > 0) {
-              await this.placeLimit(symbol, 'sell', levelIndex + 1, sellPrice, sellableAmount);
-            } else {
-              console.warn(`[SKIP] ${symbol} SELL refill level=${levelIndex + 1} | sellable amount is zero after buy fee`);
-            }
-          }
-        }
+        await this.handleBuyFill(symbol, levels, aiDecision, symState, trade, orderMeta, openOrderIds);
+        continue;
       }
 
       if (side === 'sell') {
-        const buyLevelIndex = symState.lastBuyByLevel[levelIndex - 1] ? levelIndex - 1 : levelIndex;
-        const buy = symState.lastBuyByLevel[buyLevelIndex];
-        const profitEstimate = this.estimateGridProfit(symbol, buy, trade);
-        const estimatedProfit = profitEstimate.profit;
-        symState.realizedGridProfit += estimatedProfit;
-        this.state.data.totals.realizedGridProfit += estimatedProfit;
-        this.state.data.totals.filledSells++;
-        if (!openOrderIds.has(String(trade.order))) {
-          delete symState.orders[String(trade.order)];
-        }
-        if (buy) {
-          const remainingAmount = Number(buy.sellableAmount ?? buy.amount) - amount;
-          if (remainingAmount > 0) {
-            buy.sellableAmount = remainingAmount;
-          } else {
-            delete symState.lastBuyByLevel[buyLevelIndex];
-          }
-        }
-        this.state.markProcessedTrade(symbol, id);
-        const externalFeeText = profitEstimate.externalFees.length
-          ? ` | external fees=${profitEstimate.externalFees.join(', ')}`
-          : '';
-        await this.sendAlert(
-          `[GRID SELL] ${symbol} amount=${amount} @ ${price} | est profit=${estimatedProfit.toFixed(4)} USDT${externalFeeText}`
-        );
-        if (GRID_REFILL_ON_FILLED && aiDecision.allowTrading && aiDecision.allowBuy && levelIndex - 1 >= 0) {
-          await this.placeLimit(symbol, 'buy', levelIndex - 1, levels[levelIndex - 1], amount);
-        }
+        await this.handleSellFill(symbol, levels, aiDecision, symState, trade, orderMeta, openOrderIds);
+        continue;
       }
 
-      if (side !== 'buy' && side !== 'sell') {
-        if (!openOrderIds.has(String(trade.order))) {
-          delete symState.orders[String(trade.order)];
-        }
-        this.state.markProcessedTrade(symbol, id);
-      }
+      this.forgetOrderIfClosed(symState, trade, openOrderIds);
+      this.state.markProcessedTrade(symbol, id);
     }
   }
 
@@ -1425,7 +1464,10 @@ async function bootstrap() {
 }
 
 if (require.main === module) {
-  bootstrap().catch(console.error);
+  bootstrap().catch(err => {
+    console.error(err);
+    process.exitCode = 1;
+  });
 }
 
 module.exports = {
