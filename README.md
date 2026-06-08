@@ -81,16 +81,15 @@ AI_VALIDATION_ENABLED=false
 
 Jika `GRID_LOWER_PRICE` dan `GRID_UPPER_PRICE` bernilai `0`, bot membuat range otomatis saat grid pertama kali dibuat: harga saat itu plus/minus `GRID_RANGE_PCT`. Range tersebut disimpan di `grid-state-spot.json` agar tidak bergeser setiap siklus.
 
-Trailing Up dan Trailing Down opsional dapat diaktifkan untuk menggeser auto-range secara bertahap mengikuti breakout harga:
+Trailing Range opsional dapat diaktifkan agar auto-range naik/turun otomatis mengikuti market. Jika harga bergerak jauh melewati batas, bot menggeser range sebanyak jumlah grid yang sudah ditembus dalam satu siklus, bukan hanya satu grid:
 
 ```env
-GRID_TRAILING_UP_ENABLED=true
+GRID_TRAILING_RANGE_ENABLED=true
 GRID_TRAILING_UP_COOLDOWN_MINUTES=0
-GRID_TRAILING_DOWN_ENABLED=true
 GRID_TRAILING_DOWN_COOLDOWN_MINUTES=0
 ```
 
-Saat harga mencapai satu interval grid di atas batas atas, range bergeser naik tepat satu grid. Saat harga mencapai satu interval grid di bawah batas bawah, range bergeser turun tepat satu grid. Order yang masih berada di dalam range baru tetap aktif; order yang keluar range dibatalkan oleh proses sinkronisasi. Bot tidak membatalkan seluruh grid saat bergeser. Opsi cooldown dapat dinaikkan untuk membatasi frekuensi pergeseran.
+`GRID_TRAILING_RANGE_ENABLED=true` mengaktifkan Trailing Up dan Trailing Down sekaligus. Jika ingin satu arah saja, set `GRID_TRAILING_UP_ENABLED` atau `GRID_TRAILING_DOWN_ENABLED` secara eksplisit. Saat harga mencapai minimal satu interval grid di atas batas atas, range bergeser naik sebesar jumlah interval grid yang ditembus. Saat harga mencapai minimal satu interval grid di bawah batas bawah, range bergeser turun sebesar jumlah interval grid yang ditembus. Order yang masih berada di dalam range baru tetap aktif; order yang keluar range dibatalkan oleh proses sinkronisasi. Bot tidak membatalkan seluruh grid saat bergeser. Opsi cooldown dapat dinaikkan untuk membatasi frekuensi pergeseran.
 
 ## Menjalankan Bot
 
