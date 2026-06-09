@@ -1103,6 +1103,24 @@ class SpotGridEngine {
     try {
       precisePrice = this.exchange.priceToPrecision(symbol, price);
       preciseAmount = this.exchange.amountToPrecision(symbol, amount);
+      
+      // Verify precision didn't push boundary prices outside valid range
+      // For sell orders (usually at upper levels), ensure price doesn't exceed upper too much
+      // For buy orders (usually at lower levels), ensure price doesn't go below lower too much
+      const preciseNum = Number(precisePrice);
+      if (side === 'sell' && preciseNum > price * 1.0001) {
+        console.warn(
+          `[SKIP] ${symbol} ${side.toUpperCase()} level=${levelIndex} price=${price} -> ${precisePrice} | precision adjustment too large`
+        );
+        return null;
+      }
+      if (side === 'buy' && preciseNum < price * 0.9999) {
+        console.warn(
+          `[SKIP] ${symbol} ${side.toUpperCase()} level=${levelIndex} price=${price} -> ${precisePrice} | precision adjustment too large`
+        );
+        return null;
+      }
+      
       // A network timeout after submission is ambiguous. Retrying here can create
       // a second live order, so let the next reconciliation recover safely.
       const order = await this.exchange.createLimitOrder(
@@ -1236,10 +1254,25 @@ class SpotGridEngine {
 
   isOrderInsideRange(order, lower, upper) {
     const price = Number(order.price);
-    // Add small tolerance for floating-point precision errors
-    // Epsilon is 0.01% of the price range or a very small absolute value
-    const epsilon = Math.max((upper - lower) * 0.0001, 1e-10);
-    return price >= lower - epsilon && price <= upper + epsilon;
+    // Use relative tolerance for floating-point precision handling
+    // For boundary prices, use larger tolerance to prevent edge-case cancellations
+    const rangeSize = upper - lower;
+    // 0.05% of range + relative tolerance on the price itself (0.001%)
+    const relativeEpsilon = Math.max(rangeSize * 0.0005, price * 0.00001);
+    return price >= lower - relativeEpsilon && price <= upper + relativeEpsilon;
+  }
+
+  isOrderCloseToPriceLevel(orderPrice, levels) {
+    const price = Number(orderPrice);
+    // Check if order price is within 0.01% of any grid level
+    // This ensures orders placed at grid prices aren't cancelled due to precision errors
+    for (const level of levels) {
+      const tolerance = Math.max(level * 0.0001, 1e-10);
+      if (Math.abs(price - level) <= tolerance) {
+        return true;
+      }
+    }
+    return false;
   }
 
   getTradeId(trade) {
@@ -1424,7 +1457,9 @@ class SpotGridEngine {
 
     if (GRID_CANCEL_OUT_OF_RANGE) {
       for (const order of managedOrders) {
-        if (!this.isOrderInsideRange(order, lower, upper)) {
+        // Check if order is in range, or very close to a valid grid level (grid orders shouldn't be cancelled)
+        const isValidGridOrder = this.isOrderCloseToPriceLevel(order.price, levels);
+        if (!this.isOrderInsideRange(order, lower, upper) && !isValidGridOrder) {
           await this.cancelOrder(symbol, order, `outside range ${roundNumber(lower)}-${roundNumber(upper)}`);
         }
       }
