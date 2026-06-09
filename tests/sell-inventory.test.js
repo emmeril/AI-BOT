@@ -54,3 +54,42 @@ test('placeLimit skips invalid dust amounts and clears pending level', async () 
   assert.equal(order, null);
   assert.equal(engine.pendingOrderLevels.size, 0);
 });
+
+test('placeLimit skips orders below exchange notional minimum before submitting', async () => {
+  const engine = Object.create(SpotGridEngine.prototype);
+  engine.pendingOrderLevels = new Set();
+  engine.makeClientOrderId = () => 'grid-bonk-s-5-test';
+  engine.exchange = {
+    markets: {
+      'BONK/USDT': {
+        limits: { cost: { min: 5 } },
+        info: { filters: [{ filterType: 'NOTIONAL', minNotional: '5' }] },
+      },
+    },
+    priceToPrecision: () => '0.000005',
+    amountToPrecision: () => '999000',
+    createLimitOrder: () => {
+      throw new Error('should not create order below notional minimum');
+    },
+  };
+
+  const order = await engine.placeLimit('BONK/USDT', 'sell', 5, 0.000005, 999000);
+
+  assert.equal(order, null);
+  assert.equal(engine.pendingOrderLevels.size, 0);
+});
+
+test('amountForBuy includes exchange notional buffer to keep fee-reduced sells valid', () => {
+  const engine = Object.create(SpotGridEngine.prototype);
+  engine.getOrderSizeUsdt = () => 1;
+  engine.exchange = {
+    markets: {
+      'BONK/USDT': {
+        limits: { cost: { min: 5 } },
+        info: { filters: [{ filterType: 'NOTIONAL', minNotional: '5' }] },
+      },
+    },
+  };
+
+  assert.equal(Math.round(engine.amountForBuy('BONK/USDT', 0.000005)), 1010000);
+});
