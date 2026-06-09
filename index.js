@@ -1006,10 +1006,18 @@ class SpotGridEngine {
     if (GRID_COUNT < 2) throw new Error('GRID_COUNT minimal 2.');
     if (GRID_MODE === 'GEOMETRIC') {
       const ratio = Math.pow(upper / lower, 1 / GRID_COUNT);
-      return Array.from({ length: GRID_COUNT + 1 }, (_, i) => lower * Math.pow(ratio, i));
+      const levels = Array.from({ length: GRID_COUNT + 1 }, (_, i) => lower * Math.pow(ratio, i));
+      // Clamp boundaries to exact values to prevent floating-point accumulation errors
+      levels[0] = lower;
+      levels[GRID_COUNT] = upper;
+      return levels;
     }
     const step = (upper - lower) / GRID_COUNT;
-    return Array.from({ length: GRID_COUNT + 1 }, (_, i) => lower + step * i);
+    const levels = Array.from({ length: GRID_COUNT + 1 }, (_, i) => lower + step * i);
+    // Clamp boundaries to exact values to prevent floating-point accumulation errors
+    levels[0] = lower;
+    levels[GRID_COUNT] = upper;
+    return levels;
   }
 
   getLevelIndex(levels, price) {
@@ -1104,19 +1112,15 @@ class SpotGridEngine {
       precisePrice = this.exchange.priceToPrecision(symbol, price);
       preciseAmount = this.exchange.amountToPrecision(symbol, amount);
       
-      // Verify precision didn't push boundary prices outside valid range
-      // For sell orders (usually at upper levels), ensure price doesn't exceed upper too much
-      // For buy orders (usually at lower levels), ensure price doesn't go below lower too much
+      // Verify precision didn't push prices way too far from intended level
+      // Allow up to 0.5% adjustment to handle floating-point accumulation in grid levels
+      // Exchange precision often helps correct floating-point errors at boundaries
       const preciseNum = Number(precisePrice);
-      if (side === 'sell' && preciseNum > price * 1.0001) {
+      const priceNum = Number(price);
+      const priceDiffPct = Math.abs(preciseNum - priceNum) / priceNum * 100;
+      if (priceDiffPct > 0.5) {
         console.warn(
-          `[SKIP] ${symbol} ${side.toUpperCase()} level=${levelIndex} price=${price} -> ${precisePrice} | precision adjustment too large`
-        );
-        return null;
-      }
-      if (side === 'buy' && preciseNum < price * 0.9999) {
-        console.warn(
-          `[SKIP] ${symbol} ${side.toUpperCase()} level=${levelIndex} price=${price} -> ${precisePrice} | precision adjustment too large`
+          `[SKIP] ${symbol} ${side.toUpperCase()} level=${levelIndex} price=${price} -> ${precisePrice} | precision adjustment too large (${priceDiffPct.toFixed(4)}%)`
         );
         return null;
       }
