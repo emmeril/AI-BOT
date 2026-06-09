@@ -92,7 +92,8 @@ const AI_VALIDATION_MIN_INTERVAL_MS = Config.number('AI_VALIDATION_MIN_INTERVAL_
 const AI_VALIDATION_BACKOFF_MS = Config.number('AI_VALIDATION_BACKOFF_MS', 10 * MINUTE_MS);
 const AI_VALIDATION_PRICE_BUCKET_PCT = Config.number('AI_VALIDATION_PRICE_BUCKET_PCT', 0.25);
 const AI_VALIDATION_RETRIES = Config.number('AI_VALIDATION_RETRIES', 2);
-const AI_MIN_CONFIDENCE = Config.number('AI_MIN_CONFIDENCE', 60);
+const AI_MIN_CONFIDENCE = Config.number('AI_MIN_CONFIDENCE', 70); // Conservative: reject low-confidence decisions
+const AI_STRONG_CONFIDENCE = Config.number('AI_STRONG_CONFIDENCE', 85); // High-confidence threshold for aggressive trading
 const GEMINI_MODEL = Config.get('GEMINI_MODEL', 'gemini-2.0-flash-lite');
 
 const STOP_LOSS_PRICE = Config.number('GRID_STOP_LOSS_PRICE', 0);
@@ -491,6 +492,31 @@ class AIGridValidator {
     return decision;
   }
 
+  applyConfidenceRules(decision) {
+    /**
+     * Apply strict confidence-based rules to override unsafe decisions
+     * - Confidence < 50: Auto-block everything (extreme uncertainty)
+     * - Confidence 50-69: Allow only if model was VERY explicit
+     * - Confidence 70-84: Allow normally
+     * - Confidence 85+: Allow aggressively
+     */
+    const conf = decision.confidence;
+    
+    if (conf < 50) {
+      // Extreme uncertainty - block all trading
+      decision.allowTrading = false;
+      decision.allowBuy = false;
+      decision.allowSell = false;
+      decision.reason = `Auto-blocked: confidence too low (${conf}%) - extreme uncertainty`;
+    } else if (conf < 70) {
+      // Weak confidence - only allow if explicitly enabled
+      if (!decision.allowTrading) decision.allowBuy = decision.allowSell = false;
+    }
+    // 70-100: Trust the decision as-is
+    
+    return decision;
+  }
+
   cacheKey(symbol, currentPrice, levels) {
     const bucket = Math.floor(Date.now() / AI_VALIDATION_CACHE_TTL_MS);
     const rangeKey = `${roundNumber(levels[0])}-${roundNumber(levels[levels.length - 1])}`;
@@ -579,42 +605,68 @@ class AIGridValidator {
     } = context;
     const distLowerPct = ((currentPrice - lower) / currentPrice) * 100;
     const distUpperPct = ((upper - currentPrice) / currentPrice) * 100;
+    
+    // Analyze market regime from candle summary
+    const { changePct = 0, rangePct = 0, recentVolume = 0, avgVolume = 0 } = candleSummary;
+    const volumeRatio = avgVolume > 0 ? recentVolume / avgVolume : 1;
+    const isExtreme = rangePct > 8;
+    const isLowVolume = volumeRatio < 0.5;
+    const isStrongTrend = Math.abs(changePct) > 5;
+    const trend = changePct > 0 ? 'UPTREND' : changePct < 0 ? 'DOWNTREND' : 'RANGING';
+    
     return `
-You validate whether a Binance spot grid bot may place new orders.
+You validate whether a Binance spot grid bot may place new orders in a ${trend} market.
 
-Return only JSON with:
+Return ONLY valid JSON (no markdown, no explanation):
 {
   "allowTrading": true/false,
   "allowBuy": true/false,
   "allowSell": true/false,
   "confidence": 0-100,
-  "reason": "short reason"
+  "reason": "specific reason (max 100 chars)"
 }
 
-Decision rules:
-- Grid works best in ranging or mildly volatile markets.
-- Block new orders when trend is strongly one-directional, price is breaking out of range, volatility is extreme, or market data is unclear.
-- When Trailing Up Just Shifted is true, the previous upside breakout is expected. Do not block solely because price is near the new upper bound; still block if momentum or volatility makes new grid orders unsafe.
-- When Trailing Down Just Shifted is true, the previous downside breakdown is expected. Do not block solely because price is near the new lower bound; still block if momentum or volatility makes new grid orders unsafe.
-- allowBuy can be false if downside pressure is high.
-- allowSell can be false if upside breakout pressure is high.
-- Be conservative. Existing open orders are managed by the bot; you only validate new orders.
+DECISION FRAMEWORK:
+1. VOLATILITY FILTER (rangePct = ${rangePct.toFixed(2)}%):
+   - Block if rangePct > 8% (extreme volatility = unsafe grid)
+   - Use caution if rangePct > 5% (elevated volatility)
+   
+2. VOLUME FILTER (volume ratio = ${volumeRatio.toFixed(2)}x):
+   - Block if recent volume < 50% of average (liquidity warning)
+   - Green flag if volume increasing
 
+3. TREND ANALYSIS (change = ${changePct.toFixed(2)}%):
+   - STRONG TREND: |changePct| > 5% = directional pressure
+     * In UPTREND: allowSell = false (protect upside)
+     * In DOWNTREND: allowBuy = false (protect capital)
+   - RANGING: |changePct| < 2% = grid optimal
+
+4. PRICE POSITION:
+   - Distance to Lower: ${distLowerPct.toFixed(1)}%
+   - Distance to Upper: ${distUpperPct.toFixed(1)}%
+   - If price near bound (< 5% away): evaluate trend before allowing that direction
+
+5. TRAILING SHIFTS:
+   - Trailing Up Just Shifted: ${trailingUpJustShifted} (breakout happened, still validate)
+   - Trailing Down Just Shifted: ${trailingDownJustShifted} (breakdown happened, still validate)
+   - DO NOT auto-block; assess new market regime after shift
+
+SCORING CONFIDENCE:
+- 85-100: Clear ranging, good volume, balanced position → STRONG
+- 70-84: Slight trend but manageable, acceptable volume → MEDIUM
+- 50-69: Mixed signals, some concern but acceptable → WEAK
+- < 50: Extreme conditions, unclear signals → BLOCK
+
+CONTEXT:
 Symbol: ${symbol}
 Current Price: ${currentPrice}
-Grid Lower: ${lower}
-Grid Upper: ${upper}
-Grid Count: ${GRID_COUNT}
-Grid Mode: ${GRID_MODE}
-Trailing Up Enabled: ${GRID_TRAILING_UP_ENABLED}
-Trailing Down Enabled: ${GRID_TRAILING_DOWN_ENABLED}
-Trailing Up Just Shifted: ${trailingUpJustShifted}
-Trailing Down Just Shifted: ${trailingDownJustShifted}
-Distance to Lower: ${distLowerPct.toFixed(3)}%
-Distance to Upper: ${distUpperPct.toFixed(3)}%
-Nearest Levels: ${levels.map(level => roundNumber(level)).join(', ')}
-Candle Timeframe: ${AI_VALIDATION_TIMEFRAME}
-Candle Summary: ${JSON.stringify(candleSummary)}
+Grid Range: ${roundNumber(lower)} → ${roundNumber(upper)}
+Grid Levels: ${levels.length} levels | Mode: ${GRID_MODE}
+Timeframe: ${AI_VALIDATION_TIMEFRAME}
+Trend: ${trend} | Volatility: ${isExtreme ? 'EXTREME' : rangePct > 5 ? 'HIGH' : 'NORMAL'}
+Volume: ${isLowVolume ? 'LOW (⚠)' : 'NORMAL'}
+
+Be conservative. Grid strategies suffer in trending/volatile markets. Protect capital first.
 `;
   }
 
@@ -625,12 +677,36 @@ Candle Summary: ${JSON.stringify(candleSummary)}
     if (start === -1 || end === -1) throw new Error('No JSON object in Gemini response');
     const parsed = JSON.parse(cleaned.slice(start, end + 1));
     const confidence = Number(parsed.confidence);
+    
+    // Validate response structure
+    const allowTrading = parsed.allowTrading === true;
+    const allowBuy = parsed.allowBuy === true;
+    const allowSell = parsed.allowSell === true;
+    const confVal = Number.isFinite(confidence) ? confidence : 0;
+    
+    // Enforce strict rules based on confidence
+    let finalAllow = allowTrading;
+    let finalBuy = allowBuy;
+    let finalSell = allowSell;
+    
+    // CONFIDENCE < 50: Block everything (extreme uncertainty)
+    if (confVal < 50) {
+      finalAllow = false;
+      finalBuy = false;
+      finalSell = false;
+    }
+    // CONFIDENCE 50-69: Allow partial (only if model explicitly says yes)
+    else if (confVal < 70) {
+      // Keep as-is, trust model but with caution
+    }
+    
     return {
-      allowTrading: parsed.allowTrading === true,
-      allowBuy: parsed.allowBuy === true,
-      allowSell: parsed.allowSell === true,
-      confidence: Number.isFinite(confidence) ? confidence : 0,
-      reason: String(parsed.reason || '').slice(0, 300),
+      allowTrading: finalAllow,
+      allowBuy: finalBuy,
+      allowSell: finalSell,
+      confidence: confVal,
+      reason: String(parsed.reason || 'no reason').slice(0, 200),
+      rawResponse: { allowTrading, allowBuy, allowSell }, // Store original for logging
     };
   }
 
@@ -663,6 +739,10 @@ Candle Summary: ${JSON.stringify(candleSummary)}
         try {
           const result = await this.model.generateContent(prompt);
           const decision = this.parseResponse(result.response.text());
+          
+          // Apply strict confidence-based rules
+          this.applyConfidenceRules(decision);
+          
           if (decision.confidence < AI_MIN_CONFIDENCE) {
             return this.blockAndRemember(
               symbol,
