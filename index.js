@@ -79,6 +79,7 @@ const GRID_RECREATE_ON_START = Config.boolean('GRID_RECREATE_ON_START', false);
 const GRID_CANCEL_OUT_OF_RANGE = Config.boolean('GRID_CANCEL_OUT_OF_RANGE', true);
 const GRID_REFILL_ON_FILLED = Config.boolean('GRID_REFILL_ON_FILLED', true);
 const GRID_MIN_PROFIT_PCT = Config.number('GRID_MIN_PROFIT_PCT', 0.4) / 100;
+const GRID_MIN_NOTIONAL_BUFFER_PCT = Config.number('GRID_MIN_NOTIONAL_BUFFER_PCT', 1) / 100;
 const GRID_STATE_FILE = Config.get('GRID_STATE_FILE', 'grid-state-spot.json');
 const GRID_STATE_PATH = path.resolve(process.cwd(), GRID_STATE_FILE);
 const BOT_LOCK_FILE = Config.get('BOT_LOCK_FILE', `${GRID_STATE_FILE}.lock`);
@@ -194,6 +195,7 @@ function validateRuntimeConfiguration() {
   requireInteger('GRID_MAX_ACTIVE_BUY_ORDERS', GRID_MAX_ACTIVE_BUY_ORDERS);
   requireInteger('GRID_MAX_ACTIVE_SELL_ORDERS', GRID_MAX_ACTIVE_SELL_ORDERS);
   requireNonNegative('GRID_MIN_PROFIT_PCT', GRID_MIN_PROFIT_PCT);
+  requireNonNegative('GRID_MIN_NOTIONAL_BUFFER_PCT', GRID_MIN_NOTIONAL_BUFFER_PCT);
   requireInteger('AI_VALIDATION_RETRIES', AI_VALIDATION_RETRIES);
   requirePositive('FONNTE_TIMEOUT_MS', FONNTE_TIMEOUT_MS);
 
@@ -650,6 +652,8 @@ DECISION FRAMEWORK:
    - Trailing Up Just Shifted: ${trailingUpJustShifted} (breakout happened, still validate)
    - Trailing Down Just Shifted: ${trailingDownJustShifted} (breakdown happened, still validate)
    - DO NOT auto-block; assess new market regime after shift
+   - If trailing up just shifted: Do not block solely because price is near the new upper bound
+   - If trailing down just shifted: Do not block solely because price is near the new lower bound
 
 SCORING CONFIDENCE:
 - 85-100: Clear ranging, good volume, balanced position → STRONG
@@ -1124,6 +1128,16 @@ class SpotGridEngine {
         );
         return null;
       }
+
+      const minCost = this.getMinOrderCost(symbol);
+      const orderCost = Number(preciseAmount) * preciseNum;
+      if (minCost > 0 && orderCost < minCost) {
+        console.warn(
+          `[SKIP] ${symbol} ${side.toUpperCase()} level=${levelIndex} amount=${preciseAmount} price=${precisePrice} ` +
+          `| notional ${roundNumber(orderCost, 8)} below exchange minimum ${roundNumber(minCost, 8)}`
+        );
+        return null;
+      }
       
       // A network timeout after submission is ambiguous. Retrying here can create
       // a second live order, so let the next reconciliation recover safely.
@@ -1168,11 +1182,30 @@ class SpotGridEngine {
     const message = String(err?.message || err || '').toLowerCase();
     return err instanceof ccxt.InvalidOrder ||
       err?.name === 'InvalidOrder' ||
+      message.includes('filter failure: notional') ||
+      message.includes('filter failure: min_notional') ||
+      message.includes('notional') ||
       (message.includes('amount') && (
         message.includes('minimum amount') ||
         message.includes('precision') ||
         message.includes('must be greater')
       ));
+  }
+
+  getMinOrderCost(symbol) {
+    const market = this.exchange.markets?.[symbol];
+    const candidates = [Number(market?.limits?.cost?.min || 0)];
+    const filters = Array.isArray(market?.info?.filters) ? market.info.filters : [];
+    for (const filter of filters) {
+      if (!['MIN_NOTIONAL', 'NOTIONAL'].includes(filter?.filterType)) continue;
+      candidates.push(Number(filter.minNotional || filter.notional || 0));
+    }
+    return Math.max(0, ...candidates.filter(value => Number.isFinite(value) && value > 0));
+  }
+
+  getMinOrderCostWithBuffer(symbol) {
+    const minCost = this.getMinOrderCost(symbol);
+    return minCost > 0 ? minCost * (1 + GRID_MIN_NOTIONAL_BUFFER_PCT) : 0;
   }
 
   getBaseFree(balance, symbol) {
@@ -1243,8 +1276,7 @@ class SpotGridEngine {
   }
 
   amountForBuy(symbol, price) {
-    const market = this.exchange.markets[symbol];
-    const minCost = Number(market?.limits?.cost?.min || 0);
+    const minCost = this.getMinOrderCostWithBuffer(symbol);
     const notional = Math.max(this.getOrderSizeUsdt(), minCost);
     return notional / price;
   }
