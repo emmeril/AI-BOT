@@ -1236,7 +1236,10 @@ class SpotGridEngine {
 
   isOrderInsideRange(order, lower, upper) {
     const price = Number(order.price);
-    return price >= lower && price <= upper;
+    // Add small tolerance for floating-point precision errors
+    // Epsilon is 0.01% of the price range or a very small absolute value
+    const epsilon = Math.max((upper - lower) * 0.0001, 1e-10);
+    return price >= lower - epsilon && price <= upper + epsilon;
   }
 
   getTradeId(trade) {
