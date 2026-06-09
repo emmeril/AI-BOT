@@ -1268,10 +1268,12 @@ class SpotGridEngine {
 
   isOrderCloseToPriceLevel(orderPrice, levels) {
     const price = Number(orderPrice);
-    // Check if order price is within 0.01% of any grid level
-    // This ensures orders placed at grid prices aren't cancelled due to precision errors
+    // Check if order price is close to any grid level
+    // Use very generous tolerance (1%) to handle floating-point representation differences
+    // and exchange price rounding for boundary orders
     for (const level of levels) {
-      const tolerance = Math.max(level * 0.0001, 1e-10);
+      // 1% tolerance ensures even small precision errors don't cause cancellations
+      const tolerance = Math.max(level * 0.01, 1e-8);
       if (Math.abs(price - level) <= tolerance) {
         return true;
       }
@@ -1460,10 +1462,23 @@ class SpotGridEngine {
     let managedOrders = this.getManagedOpenOrders(symbol, freshOpenOrders);
 
     if (GRID_CANCEL_OUT_OF_RANGE) {
+      const recentThresholdMs = Math.max(INTERVAL_MS * 3, MINUTE_MS * 2);
       for (const order of managedOrders) {
-        // Check if order is in range, or very close to a valid grid level (grid orders shouldn't be cancelled)
+        // Don't cancel recently placed orders - they might not have settled on exchange yet
+        const orderTimestamp = Date.parse(order.timestamp || order.datetime || 0);
+        const orderAgeMs = Date.now() - orderTimestamp;
+        if (orderAgeMs < recentThresholdMs) {
+          continue;
+        }
+        
+        // ALWAYS preserve grid orders (orders at grid levels)
         const isValidGridOrder = this.isOrderCloseToPriceLevel(order.price, levels);
-        if (!this.isOrderInsideRange(order, lower, upper) && !isValidGridOrder) {
+        if (isValidGridOrder) {
+          continue;
+        }
+        
+        // Only cancel orders that are truly outside range AND not at grid levels
+        if (!this.isOrderInsideRange(order, lower, upper)) {
           await this.cancelOrder(symbol, order, `outside range ${roundNumber(lower)}-${roundNumber(upper)}`);
         }
       }
