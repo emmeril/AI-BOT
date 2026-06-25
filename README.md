@@ -1,192 +1,190 @@
 # Binance Spot Grid Bot
 
-Bot trading Binance Spot berbasis Node.js yang menjalankan strategi grid bergaya Binance: memasang limit buy di bawah harga berjalan, limit sell di atas harga berjalan, dan mengisi ulang order lawan ketika order grid terisi.
-
-> Peringatan: trading crypto tetap berisiko. Mulai dari nominal kecil, gunakan API key dengan permission terbatas, dan cek semua parameter sebelum menjalankan di akun live.
-
-## Catatan Penting
-
-Binance tidak menyediakan endpoint publik standar untuk membuat atau mengelola Spot Grid Bot bawaan Binance lewat API biasa. Project ini memakai order spot Binance via `ccxt` untuk menjalankan mekanisme grid yang serupa secara lokal.
+Bot grid spot Binance berbasis Node.js. Bot membaca konfigurasi dari `.env`, menyimpan state lokal, memakai lock file agar tidak berjalan ganda, dan dapat berjalan di Binance Spot testnet maupun live.
 
 ## Fitur
 
-- Binance Spot grid untuk satu atau beberapa symbol.
-- Grid arithmetic atau geometric.
-- Range manual (`GRID_LOWER_PRICE` dan `GRID_UPPER_PRICE`) atau range otomatis dari harga berjalan.
-- Batas jumlah active buy/sell order agar saldo tidak langsung terkunci semua.
-- Refill order setelah fill: buy terisi akan memasang sell di level atas, sell terisi akan memasang buy di level bawah.
-- Validasi optional dengan Gemini AI sebelum memasang/refill order baru.
-- State lokal di `grid-state-spot.json`.
-- Kill switch via env atau file `bot-paused.flag`.
-- Alert optional via Fonnte.
+- Binance Spot grid bot untuk satu atau banyak pair, contoh `BTC/USDT,ETH/USDT`.
+- Mode exchange `live`, `testnet`, atau `demo` (`demo` dipetakan ke `testnet`).
+- Grid `ARITHMETIC` atau `GEOMETRIC`.
+- Range manual, auto range, stale range auto reset, trailing up, dan trailing down.
+- Batas modal per order atau total investasi grid.
+- Refill order setelah fill, cancel order out-of-range, post-only maker order, dan recovery metadata order dari `clientOrderId`.
+- Stop trading manual, kill switch file, stop-loss, dan take-profit.
+- Validasi AI opsional via Gemini.
+- Learning memory opsional dari hasil profit aktual.
+- Notifikasi WhatsApp opsional via Fonnte.
+
+## Kebutuhan
+
+- Node.js 18+.
+- Akun Binance Spot.
+- API key dan secret Binance Spot. Untuk `testnet`, gunakan credential dari Binance Spot Testnet.
 
 ## Instalasi
-
-```bash
-pnpm install
-```
-
-Atau:
 
 ```bash
 npm install
 ```
 
-## Konfigurasi
+## Setup Cepat
 
-Salin file contoh environment:
+1. Salin `env.example` menjadi `.env`.
+2. Isi `EXCHANGE_API_KEY` dan `EXCHANGE_SECRET`.
+3. Mulai dari `EXCHANGE_MODE=testnet` untuk uji coba.
+4. Sesuaikan `SYMBOLS`, `GRID_COUNT`, `GRID_ORDER_SIZE_USDT`, dan pengaturan range.
+5. Jalankan test sebelum start bot.
 
-```powershell
-Copy-Item env.example .env
-```
-
-Isi API key Binance:
-
-```env
-EXCHANGE_API_KEY=your_binance_api_key
-EXCHANGE_SECRET=your_binance_secret
-EXCHANGE_MODE=live
-```
-
-Mode exchange yang tersedia:
+Contoh minimal:
 
 ```env
-EXCHANGE_MODE=live
-EXCHANGE_MODE=demo
+EXCHANGE_API_KEY=your_binance_api_key_here
+EXCHANGE_SECRET=your_binance_secret_here
 EXCHANGE_MODE=testnet
-```
-
-- `live`: Binance live API.
-- `demo`: Binance Demo Trading API (`https://demo-api.binance.com`).
-- `testnet`: Binance Spot Testnet lama (`https://testnet.binance.vision`).
-
-Untuk demo, buat API key dari Binance Demo Trading: https://demo.binance.com/en/my/settings/api-management. Untuk testnet, gunakan key Spot Testnet. Jangan memakai API key live untuk demo/testnet.
-
-Contoh grid konservatif:
-
-```env
 SYMBOLS=BTC/USDT
-INTERVAL_MINUTES=1
-GRID_MODE=ARITHMETIC
-GRID_COUNT=10
-GRID_LOWER_PRICE=0
-GRID_UPPER_PRICE=0
-GRID_RANGE_PCT=5
 GRID_ORDER_SIZE_USDT=20
-GRID_MAX_ACTIVE_BUY_ORDERS=5
-GRID_MAX_ACTIVE_SELL_ORDERS=5
-GRID_RECREATE_ON_START=false
-AI_VALIDATION_ENABLED=false
 ```
 
-Jika `GRID_LOWER_PRICE` dan `GRID_UPPER_PRICE` bernilai `0`, bot membuat range otomatis saat grid pertama kali dibuat: harga saat itu plus/minus `GRID_RANGE_PCT`. Range tersebut disimpan di `grid-state-spot.json` agar tidak bergeser setiap siklus.
+## Menjalankan
 
-Trailing Range opsional dapat diaktifkan agar auto-range naik/turun otomatis mengikuti market. Jika harga bergerak jauh melewati batas, bot menggeser range sebanyak jumlah grid yang sudah ditembus dalam satu siklus, bukan hanya satu grid:
-
-```env
-GRID_TRAILING_RANGE_ENABLED=true
-GRID_TRAILING_UP_COOLDOWN_MINUTES=0
-GRID_TRAILING_DOWN_COOLDOWN_MINUTES=0
+```bash
+npm start
 ```
 
-`GRID_TRAILING_RANGE_ENABLED=true` mengaktifkan Trailing Up dan Trailing Down sekaligus. Jika ingin satu arah saja, set `GRID_TRAILING_UP_ENABLED` atau `GRID_TRAILING_DOWN_ENABLED` secara eksplisit. Saat harga mencapai minimal satu interval grid di atas batas atas, range bergeser naik sebesar jumlah interval grid yang ditembus. Saat harga mencapai minimal satu interval grid di bawah batas bawah, range bergeser turun sebesar jumlah interval grid yang ditembus. Order yang masih berada di dalam range baru tetap aktif; order yang keluar range dibatalkan oleh proses sinkronisasi. Bot tidak membatalkan seluruh grid saat bergeser. Opsi cooldown dapat dinaikkan untuk membatasi frekuensi pergeseran.
-
-## Menjalankan Bot
+Atau langsung:
 
 ```bash
 node index.js
 ```
 
-Bot akan:
+Saat berjalan, bot akan:
 
-1. Load market Binance spot.
-2. Hitung level grid.
-3. Sinkron order grid yang tersimpan di state lokal.
-4. Pasang order buy di bawah harga dan sell di atas harga sesuai saldo.
-5. Setiap siklus, cek fill, refill order lawan, dan bersihkan order di luar range.
+1. Validasi konfigurasi.
+2. Membersihkan temp file state yang tertinggal dari proses sebelumnya.
+3. Mengambil lock process.
+4. Sinkronisasi order dan fill per symbol setiap `INTERVAL_MINUTES`.
 
-## Parameter Grid
+## Test
 
-```env
-GRID_MODE=ARITHMETIC
-GRID_COUNT=10
-GRID_LOWER_PRICE=0
-GRID_UPPER_PRICE=0
-GRID_RANGE_PCT=5
-GRID_ORDER_SIZE_USDT=20
-GRID_TOTAL_INVESTMENT_USDT=0
-GRID_MAX_ACTIVE_BUY_ORDERS=5
-GRID_MAX_ACTIVE_SELL_ORDERS=5
-GRID_MIN_PROFIT_PCT=0.4
+```bash
+npm test
 ```
 
-- `GRID_MODE`: `ARITHMETIC` untuk jarak harga tetap, `GEOMETRIC` untuk jarak persentase tetap.
-- `GRID_COUNT`: jumlah interval grid. Bot membuat `GRID_COUNT + 1` level harga.
-- `GRID_ORDER_SIZE_USDT`: nominal per order grid.
-- `GRID_TOTAL_INVESTMENT_USDT`: jika lebih dari `0`, modal dibagi rata ke jumlah grid.
-- `GRID_MIN_PROFIT_PCT`: jarak minimal sell refill dari harga buy agar tidak terlalu tipis.
+## Konfigurasi Utama
 
-## Gemini AI Validation
+- `EXCHANGE_MODE`: `live`, `testnet`, atau `demo`. Nilai `demo` diperlakukan sebagai `testnet`.
+- `EXCHANGE_DEMO`: fallback legacy jika `EXCHANGE_MODE` tidak diisi.
+- `SYMBOLS`: pair dipisah koma, contoh `BTC/USDT,ETH/USDT`.
+- `INTERVAL_MINUTES`: jarak antar siklus sinkronisasi.
+- `GRID_MODE`: `ARITHMETIC` atau `GEOMETRIC`.
+- `GRID_COUNT`: jumlah level grid, minimal 2.
 
-AI validation bersifat optional. Saat aktif, Gemini hanya menjadi filter untuk order baru dan refill order. Bot tetap mengelola order lama yang sudah terbuka.
+Nilai boolean menerima `true`, `false`, `1`, `0`, `yes`, `no`, `on`, atau `off`.
+
+## Range Grid
+
+- `GRID_LOWER_PRICE` dan `GRID_UPPER_PRICE`: isi keduanya untuk range manual. Jika salah satu saja diisi, konfigurasi dianggap invalid.
+- `GRID_RANGE_PCT`: range otomatis `+/-` dari harga saat range dibuat.
+- `GRID_RESET_RANGE_ON_START`: paksa hitung ulang auto range saat start.
+- `GRID_STALE_RANGE_DEVIATION_PCT`: ambang deteksi range lama yang terlalu jauh dari harga.
+- `GRID_STALE_RANGE_AUTO_RESET`: otomatis reset stale range.
+
+Trailing range hanya aktif untuk auto range. Jika range manual dipakai, trailing up/down tidak menggeser range.
+
+- `GRID_TRAILING_RANGE_ENABLED`: default global untuk trailing up/down.
+- `GRID_TRAILING_UP_ENABLED`: aktifkan range mengikuti kenaikan harga.
+- `GRID_TRAILING_UP_COOLDOWN_MINUTES`: jeda minimal antar trailing up.
+- `GRID_TRAILING_DOWN_ENABLED`: aktifkan range mengikuti penurunan harga.
+- `GRID_TRAILING_DOWN_COOLDOWN_MINUTES`: jeda minimal antar trailing down. Jika tidak diisi, fallback ke cooldown trailing up.
+
+## Modal dan Order
+
+- `GRID_ORDER_SIZE_USDT`: ukuran target order per grid.
+- `ORDER_SIZE_USDT`: fallback legacy jika `GRID_ORDER_SIZE_USDT` tidak diisi.
+- `GRID_TOTAL_INVESTMENT_USDT`: jika lebih dari 0, menjadi batas total modal dan mengambil prioritas. Ukuran efektif per grid menjadi `GRID_TOTAL_INVESTMENT_USDT / GRID_COUNT`.
+- `GRID_MAX_ACTIVE_BUY_ORDERS`: batas order buy aktif per symbol.
+- `GRID_MAX_ACTIVE_SELL_ORDERS`: batas order sell aktif per symbol.
+- `GRID_RECREATE_ON_START`: cancel dan buat ulang grid saat bot start.
+- `GRID_CANCEL_OUT_OF_RANGE`: cancel order yang sudah keluar range.
+- `GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MINUTES`: umur minimal order sebelum boleh dibatalkan karena out-of-range.
+- `GRID_REFILL_ON_FILLED`: buat order pengganti setelah fill.
+- `GRID_POST_ONLY`: gunakan maker/post-only order jika exchange mendukung.
+- `GRID_PRICE_PRECISION_MAX_DEVIATION_PCT`: toleransi perubahan harga setelah pembulatan precision exchange.
+
+## Safety
+
+- `STOP_TRADING=true`: bot tidak menempatkan order baru.
+- `KILL_SWITCH_ENABLED=true`: bot pause jika file `KILL_SWITCH_FILE` ada.
+- `KILL_SWITCH_FILE`: nama file pause lokal, default `bot-paused.flag`.
+- `GRID_STOP_LOSS_PRICE`: cancel grid dan stop order baru jika harga <= nilai ini.
+- `GRID_TAKE_PROFIT_PRICE`: cancel grid dan stop order baru jika harga >= nilai ini.
+
+## AI Validation
+
+Aktifkan dengan:
 
 ```env
-GEMINI_API_KEY=your_gemini_api_key
 AI_VALIDATION_ENABLED=true
-GEMINI_MODEL=gemini-2.0-flash-lite
-AI_VALIDATION_TIMEFRAME=15m
-AI_VALIDATION_LOOKBACK=40
-AI_VALIDATION_CACHE_TTL_MS=900000
-AI_VALIDATION_MIN_INTERVAL_MS=300000
-AI_VALIDATION_BACKOFF_MS=900000
-AI_VALIDATION_PRICE_BUCKET_PCT=0.25
-AI_VALIDATION_RETRIES=1
-AI_MIN_CONFIDENCE=60
+GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
-Jika Gemini menolak kondisi market, bot tidak memasang order baru pada siklus itu. Jika validasi AI gagal atau confidence di bawah `AI_MIN_CONFIDENCE`, bot juga tidak memasang order baru.
+Konfigurasi terkait:
 
-Saat Trailing Up atau Trailing Down menggeser range, AI langsung menilai range baru. Breakout naik/turun yang memicu pergeseran tidak otomatis diblokir, tetapi AI tetap dapat menghentikan order baru jika momentum satu arah atau volatilitas dinilai terlalu berisiko.
+- `GEMINI_MODEL`: model Gemini yang dipakai.
+- `AI_VALIDATION_TIMEFRAME`: timeframe OHLCV untuk konteks AI.
+- `AI_VALIDATION_LOOKBACK`: jumlah candle yang diambil.
+- `AI_VALIDATION_CACHE_TTL_MS`: durasi cache keputusan AI.
+- `AI_VALIDATION_MIN_INTERVAL_MS`: jarak minimal antar request AI per symbol.
+- `AI_VALIDATION_BACKOFF_MS`: jeda saat rate limited/error berulang.
+- `AI_VALIDATION_PRICE_BUCKET_PCT`: bucket harga untuk cache.
+- `AI_VALIDATION_RETRIES`: jumlah retry request AI.
+- `AI_VALIDATION_TIMEOUT_MS`: timeout request AI.
+- `AI_MIN_CONFIDENCE`: confidence minimal agar keputusan AI dipakai.
 
-Untuk mengurangi risiko rate limit Gemini:
+Jika AI tidak aktif, bot tetap berjalan dengan validasi lokal.
 
-- `AI_VALIDATION_CACHE_TTL_MS`: berapa lama keputusan AI dipakai ulang.
-- `AI_VALIDATION_MIN_INTERVAL_MS`: jeda minimum panggilan Gemini per symbol.
-- `AI_VALIDATION_BACKOFF_MS`: jeda otomatis setelah respons rate limit/quota.
-- `AI_VALIDATION_PRICE_BUCKET_PCT`: perubahan harga kecil tetap memakai cache yang sama.
-- `AI_VALIDATION_RETRIES`: gunakan nilai kecil karena retry juga menghabiskan quota.
+## Learning Memory
 
-## Reset atau Buat Ulang Grid
-
-Untuk membatalkan order grid lama saat startup:
+Aktifkan dengan:
 
 ```env
-GRID_RECREATE_ON_START=true
+LEARNING_MEMORY_ENABLED=true
 ```
 
-Gunakan dengan hati-hati karena order grid yang masih terbuka akan dibatalkan.
+- `LEARNING_MEMORY_FILE`: file penyimpanan memory lokal.
+- `LEARNING_MEMORY_LOOKBACK`: jumlah outcome terakhir yang dievaluasi.
+- `LEARNING_MEMORY_MIN_SAMPLES`: minimal sample sebelum memory memengaruhi keputusan.
 
-## Kill Switch
+Learning memory memakai data profit aktual dari fill order dan tidak memakai env threshold profit khusus.
 
-Matikan siklus trading baru lewat `.env`:
+## Alert Fonnte
+
+Aktifkan dengan:
 
 ```env
-STOP_TRADING=true
+FONNTE_ENABLED=true
+FONNTE_TOKEN=your_fonnte_token
+FONNTE_TARGET=628xxxxxxxxxx
 ```
 
-Atau buat file:
+- `FONNTE_API_URL`: endpoint Fonnte.
+- `FONNTE_COUNTRY_CODE`: kode negara target.
+- `FONNTE_TIMEOUT_MS`: timeout request alert.
 
-```powershell
-New-Item bot-paused.flag
-```
+## File Lokal
 
-Hapus file tersebut untuk mengizinkan bot berjalan lagi.
+Default file yang dibuat bot:
 
-## File Runtime
+- `grid-state-spot.json`
+- `grid-state-spot.json.lock`
+- `learning-memory.json`
+- `bot-paused.flag`
 
-- `grid-state-spot.json`: state order grid dan estimasi profit.
-- `bot-paused.flag`: kill switch file jika diaktifkan.
+File runtime tersebut sudah diabaikan lewat `.gitignore`.
 
-## Disclaimer
+## Catatan Operasional
 
-Project ini untuk edukasi dan eksperimen. Tidak ada jaminan profit. Semua keputusan trading dan risiko finansial sepenuhnya menjadi tanggung jawab pengguna.
+- Selalu uji di `testnet` sebelum memakai `live`.
+- Pastikan saldo, minimum notional exchange, dan ukuran order sesuai pair yang dipakai.
+- Jangan menjalankan dua proses bot dengan state file yang sama. Lock file akan menolak proses kedua.
+- Backup state sebelum mengubah range atau mengganti symbol secara besar-besaran.
