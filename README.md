@@ -11,7 +11,7 @@ Bot grid spot Binance berbasis Node.js. Bot membaca konfigurasi dari `.env`, men
 - Batas modal per order atau total investasi grid.
 - Refill order setelah fill, cancel order out-of-range, post-only maker order, dan recovery metadata order dari `clientOrderId`.
 - Stop trading manual, kill switch file, stop-loss, dan take-profit.
-- Validasi AI opsional via Gemini.
+- Smart Range Advisor opsional via Gemini untuk menyarankan range grid.
 - Learning memory opsional dari hasil profit aktual.
 - Notifikasi WhatsApp opsional via Fonnte.
 
@@ -119,29 +119,31 @@ Trailing range hanya aktif untuk auto range. Jika range manual dipakai, trailing
 - `GRID_STOP_LOSS_PRICE`: cancel grid dan stop order baru jika harga <= nilai ini.
 - `GRID_TAKE_PROFIT_PRICE`: cancel grid dan stop order baru jika harga >= nilai ini.
 
-## AI Validation
+## Smart Range Advisor Gemini
 
 Aktifkan dengan:
 
 ```env
-AI_VALIDATION_ENABLED=true
+GEMINI_RANGE_ADVISOR_ENABLED=true
 GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
 Konfigurasi terkait:
 
 - `GEMINI_MODEL`: model Gemini yang dipakai.
-- `AI_VALIDATION_TIMEFRAME`: timeframe OHLCV untuk konteks AI.
-- `AI_VALIDATION_LOOKBACK`: jumlah candle yang diambil.
-- `AI_VALIDATION_CACHE_TTL_MS`: durasi cache keputusan AI.
-- `AI_VALIDATION_MIN_INTERVAL_MS`: jarak minimal antar request AI per symbol.
-- `AI_VALIDATION_BACKOFF_MS`: jeda saat rate limited/error berulang.
-- `AI_VALIDATION_PRICE_BUCKET_PCT`: bucket harga untuk cache.
-- `AI_VALIDATION_RETRIES`: jumlah retry request AI.
-- `AI_VALIDATION_TIMEOUT_MS`: timeout request AI.
-- `AI_MIN_CONFIDENCE`: confidence minimal agar keputusan AI dipakai.
+- `GEMINI_API_BASE_URL`: endpoint Gemini API.
+- `GEMINI_RANGE_ADVISOR_MIN_INTERVAL_MINUTES`: jarak minimal antar request Gemini per symbol.
+- `GEMINI_RANGE_ADVISOR_TIMEFRAME`: timeframe OHLCV untuk konteks analisis.
+- `GEMINI_RANGE_ADVISOR_CANDLE_LIMIT`: jumlah candle yang diambil.
+- `GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH`: izinkan Gemini memakai Google Search untuk konteks market terbaru.
+- `GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT`: batas deviasi lower/upper rekomendasi dari harga saat ini. Rekomendasi akan di-clamp agar tidak terlalu jauh.
+- `GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT`: lebar minimal range rekomendasi sebagai persen dari harga saat ini.
+- `GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE`: confidence minimal `0` sampai `1` agar rekomendasi dipakai.
+- `GEMINI_RANGE_ADVISOR_TIMEOUT_MS`: timeout request Gemini.
+- `GEMINI_RANGE_ADVISOR_APPLY_ON`: `AUTO_RANGE_ONLY` agar tidak mengubah range manual, atau `ALWAYS` agar boleh menimpa range manual juga.
+- `GEMINI_RANGE_ADVISOR_STATE_FILE`: file cache rekomendasi lokal.
 
-Jika AI tidak aktif, bot tetap berjalan dengan validasi lokal.
+Jika advisor tidak aktif atau confidence rekomendasi di bawah threshold, bot tetap memakai range manual atau auto range lokal.
 
 ## Learning Memory
 
@@ -177,6 +179,7 @@ Default file yang dibuat bot:
 
 - `grid-state-spot.json`
 - `grid-state-spot.json.lock`
+- `gemini-range-advisor-state.json`
 - `learning-memory.json`
 - `bot-paused.flag`
 

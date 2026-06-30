@@ -13,6 +13,7 @@ profit-ledger-*.json
 risk-state.json
 risk-state-*.json
 grid-state-*.json
+gemini-range-advisor-state.json
 bot-paused.flag
 .DS_Store
 npm-debug.log*
