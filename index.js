@@ -142,7 +142,6 @@ const FONNTE_API_URL = Config.get('FONNTE_API_URL', 'https://api.fonnte.com/send
 const FONNTE_COUNTRY_CODE = Config.get('FONNTE_COUNTRY_CODE', '62');
 const FONNTE_TIMEOUT_MS = Config.number('FONNTE_TIMEOUT_MS', 10_000);
 
-
 const MAX_PROCESSED_TRADE_IDS = 2000;
 const TRADE_FETCH_LIMIT = 100;
 const CIRCUIT_BREAKER_MAX_ERRORS = 5;
@@ -417,9 +416,7 @@ class ProcessLock {
 
   removeStaleLock(owner) {
     if (!owner || owner.malformed || this.processIsAlive(owner.pid)) return false;
-    console.warn(
-      `[LOCK] Found stale lock for PID ${owner.pid}; waiting ${BOT_LOCK_STALE_GRACE_MS}ms before cleanup`
-    );
+    console.warn(`[LOCK] Found stale lock for PID ${owner.pid}; waiting ${BOT_LOCK_STALE_GRACE_MS}ms before failing closed`);
     sleepSync(BOT_LOCK_STALE_GRACE_MS);
 
     let latest;
@@ -432,15 +429,7 @@ class ProcessLock {
 
     const sameOwner = latest.pid === owner.pid && latest.token === owner.token;
     if (!sameOwner || this.processIsAlive(latest.pid)) return false;
-
-    try {
-      fs.unlinkSync(this.lockPath);
-      console.warn(`[LOCK] Removed stale lock ${this.lockPath} for dead PID ${owner.pid}`);
-      return true;
-    } catch (err) {
-      if (err.code !== 'ENOENT') throw err;
-      return true;
-    }
+    throw new Error(`Stale bot lock found for PID ${owner.pid}. Remove ${this.lockPath} manually after confirming no bot is running.`);
   }
 
   ownsLock() {
@@ -613,6 +602,15 @@ class GridState {
     this.processedTradeIdSet = new Set(this.data.processedTradeIds);
   }
 
+  ensureProcessedTradeIndex() {
+    if (
+      !this.processedTradeIdSet ||
+      this.processedTradeIdSet.size !== this.data.processedTradeIds.length
+    ) {
+      this.rebuildProcessedTradeIndex();
+    }
+  }
+
   save() {
     this.data.updatedAt = new Date().toISOString();
     return AtomicFileWriter.write(GRID_STATE_PATH, () => JSON.stringify(this.data, null, 2));
@@ -663,13 +661,15 @@ class GridState {
   }
 
   processedTrade(symbol, id) {
+    this.ensureProcessedTradeIndex();
     const scopedId = scopedTradeId(symbol, id);
     const legacyId = String(id);
     return this.processedTradeIdSet.has(scopedId) ||
       this.processedTradeIdSet.has(legacyId);
   }
 
-  async markProcessedTrade(symbol, id) {
+  markProcessedTrade(symbol, id) {
+    this.ensureProcessedTradeIndex();
     const scopedId = scopedTradeId(symbol, id);
     if (this.processedTrade(symbol, id)) return false;
     this.data.processedTradeIds.push(scopedId);
@@ -678,7 +678,7 @@ class GridState {
     if (this.data.processedTradeIds.length >= MAX_PROCESSED_TRADE_IDS) {
       this.rebuildProcessedTradeIndex();
     }
-    await this.save();
+    this.save();
     return true;
   }
 }
@@ -836,17 +836,30 @@ class GeminiRangeAdvisor {
     return this.sanitizeSuggestion(symbol, currentPrice, raw);
   }
 
-  buildPrompt(symbol, currentPrice, indicators) {
+  buildPrompt(symbol, priceOrContext, indicators = {}) {
+    const context = isPlainObject(priceOrContext)
+      ? priceOrContext
+      : { currentPrice: priceOrContext };
+    const currentPrice = Number(context.currentPrice);
+    const trailingUpJustShifted = Boolean(context.trailingUpJustShifted);
+    const trailingDownJustShifted = Boolean(context.trailingDownJustShifted);
+
     return `You are a quantitative trading assistant advising a SPOT GRID TRADING bot (buy low / sell high within a fixed price range).
 Grid bots perform best when the price range tightly matches realistic near-term price action (ranging/sideways market), and perform badly if the price breaks far outside the range or if the market is strongly trending.
 
 Symbol: ${symbol}
 Current price: ${currentPrice}
+Current grid range: ${context.lower ?? 'unknown'}-${context.upper ?? 'unknown'}
 Timeframe analyzed: ${indicators.timeframe} (${indicators.candleCount} candles)
 RSI(14): ${indicators.rsi14}
 ATR(14): ${indicators.atr14}
 Bollinger Bands(20,2): lower=${indicators.bollinger20?.lower}, middle=${indicators.bollinger20?.middle}, upper=${indicators.bollinger20?.upper}
 Recent range volatility: ${indicators.volatilityPct}%
+Trailing Up Just Shifted: ${trailingUpJustShifted}
+Trailing Down Just Shifted: ${trailingDownJustShifted}
+
+${trailingUpJustShifted ? 'Do not block solely because price is near the new upper bound immediately after a completed trailing-up shift.' : ''}
+${trailingDownJustShifted ? 'Do not block solely because price is near the new lower bound immediately after a completed trailing-down shift.' : ''}
 
 ${GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH
   ? 'Use Google Search to check for any very recent (last 24-48h) crypto market news or sentiment relevant to this symbol or the broader crypto market that could affect short-term volatility or trend direction.'
@@ -964,6 +977,8 @@ Respond with ONLY a single valid JSON object, no markdown fences, no commentary,
     return suggestion;
   }
 }
+
+const AIGridValidator = GeminiRangeAdvisor;
 
 class SpotGridEngine {
   constructor() {
@@ -1349,7 +1364,16 @@ class SpotGridEngine {
 
   shiftStoredLevelIndexes(symbol, offset) {
     const symState = this.state.getSymbol(symbol);
+    this.shiftStoredOrderIndexes(symState, offset);
 
+    const shiftedBuys = {};
+    for (const [levelIndex, buy] of Object.entries(symState.lastBuyByLevel)) {
+      shiftedBuys[Number(levelIndex) + offset] = buy;
+    }
+    symState.lastBuyByLevel = shiftedBuys;
+  }
+
+  shiftStoredOrderIndexes(symState, offset) {
     const shiftedOrders = {};
     for (const [orderId, order] of Object.entries(symState.orders)) {
       shiftedOrders[orderId] = {
@@ -1358,12 +1382,6 @@ class SpotGridEngine {
       };
     }
     symState.orders = shiftedOrders;
-
-    const shiftedBuys = {};
-    for (const [levelIndex, buy] of Object.entries(symState.lastBuyByLevel)) {
-      shiftedBuys[Number(levelIndex) + offset] = buy;
-    }
-    symState.lastBuyByLevel = shiftedBuys;
   }
 
   mergeBuyRecords(existing, incoming, { aggregatedAcrossLevels = false } = {}) {
@@ -1442,11 +1460,12 @@ class SpotGridEngine {
       : this.getTrailingDownState(symbol);
     const offset = direction === 'up' ? -shift.steps : shift.steps;
 
-    if (Object.keys(symState.orders).length > 0) {
+    const storedOrderCount = Object.keys(symState.orders).length;
+    if (storedOrderCount > 0) {
       console.warn(
-        `[TRAILING] ${symbol} had ${Object.keys(symState.orders).length} managed order(s) after cancellation; clearing stale local metadata`
+        `[TRAILING] ${symbol} had ${storedOrderCount} managed order(s) after cancellation; shifting local metadata`
       );
-      symState.orders = {};
+      this.shiftStoredOrderIndexes(symState, offset);
     }
 
     symState.config.lower = shift.lower;
@@ -2152,12 +2171,11 @@ class SpotGridEngine {
         }
       }
 
-      const orderMeta_final = orderMeta;
       const side = String(trade.side).toLowerCase();
       if (side === 'buy') {
-        await this.handleBuyFill(symbol, levels, symState, trade, orderMeta_final, openOrderIds);
+        await this.handleBuyFill(symbol, levels, symState, trade, orderMeta, openOrderIds);
       } else if (side === 'sell') {
-        await this.handleSellFill(symbol, levels, symState, trade, orderMeta_final, openOrderIds);
+        await this.handleSellFill(symbol, levels, symState, trade, orderMeta, openOrderIds);
       } else {
         await this.forgetOrderIfClosed(symState, trade, openOrderIds);
         await this.state.markProcessedTrade(symbol, id);
@@ -2261,12 +2279,13 @@ class SpotGridEngine {
 
     const activeBuyLevels = new Set();
     const activeSellLevels = new Set();
+    const symState = this.state.getSymbol(symbol);
     for (const order of managedOrders) {
       const idx = this.getLevelIndex(levels, Number(order.price));
       if (order.side === 'buy') activeBuyLevels.add(idx);
       if (order.side === 'sell') activeSellLevels.add(idx);
     }
-    for (const order of Object.values(this.state.getSymbol(symbol).orders)) {
+    for (const order of Object.values(symState.orders)) {
       if (order.side === 'buy') activeBuyLevels.add(Number(order.levelIndex));
       if (order.side === 'sell') activeSellLevels.add(Number(order.levelIndex));
     }
@@ -2279,7 +2298,7 @@ class SpotGridEngine {
     let remainingInvestmentUsdt = this.getRemainingInvestmentUsdt(symbol);
 
     for (const level of below) {
-      if (this.countActiveOrders(this.state.getSymbol(symbol), 'buy') >= GRID_MAX_ACTIVE_BUY_ORDERS) {
+      if (this.countActiveOrders(symState, 'buy') >= GRID_MAX_ACTIVE_BUY_ORDERS) {
         console.warn(`[SKIP] ${symbol} BUY level=${level.index} | active buy order limit (${GRID_MAX_ACTIVE_BUY_ORDERS}) reached`);
         break;
       }
@@ -2318,12 +2337,12 @@ class SpotGridEngine {
     }
 
     for (const level of above) {
-      if (this.countActiveOrders(this.state.getSymbol(symbol), 'sell') >= GRID_MAX_ACTIVE_SELL_ORDERS) {
+      if (this.countActiveOrders(symState, 'sell') >= GRID_MAX_ACTIVE_SELL_ORDERS) {
         console.warn(`[SKIP] ${symbol} SELL level=${level.index} | active sell order limit (${GRID_MAX_ACTIVE_SELL_ORDERS}) reached`);
         break;
       }
       if (activeSellLevels.has(level.index)) continue;
-      let trackedAmount = this.amountForTrackedSell(symbol, level.index);
+      const trackedAmount = this.amountForTrackedSell(symbol, level.index);
       if (!(trackedAmount > 0)) continue;
       let amount = Math.min(trackedAmount, baseFree);
       if (!(amount > 0)) {
@@ -2345,7 +2364,7 @@ class SpotGridEngine {
 
     console.log(
       `[SYNC] ${symbol} price=${roundNumber(currentPrice)} range=${roundNumber(lower)}-${roundNumber(upper)} ` +
-      `orders=${managedOrders.length} totalProfit=${roundNumber(this.state.getSymbol(symbol).realizedGridProfit, 4)} ${this.getQuoteAsset(symbol)}`
+      `orders=${managedOrders.length} totalProfit=${roundNumber(symState.realizedGridProfit, 4)} ${this.getQuoteAsset(symbol)}`
     );
   }
 
@@ -2560,6 +2579,7 @@ module.exports = {
   ProcessLock,
   SpotGridEngine,
   GeminiRangeAdvisor,
+  AIGridValidator,
   TechnicalIndicators,
   bootstrap,
   validateRuntimeConfiguration,

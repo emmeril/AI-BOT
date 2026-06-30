@@ -115,7 +115,7 @@ Trailing range hanya berlaku untuk auto range. Manual range tidak digeser oleh t
 
 - `GRID_STATE_FILE`: file state grid lokal.
 - `BOT_LOCK_FILE`: file lock process. Jangan pakai file lock yang sama untuk dua proses bot.
-- `BOT_LOCK_STALE_GRACE_MS`: waktu tunggu sebelum membersihkan stale lock.
+- `BOT_LOCK_STALE_GRACE_MS`: waktu tunggu sebelum bot menolak stale lock. Hapus file lock manual hanya setelah memastikan tidak ada proses bot yang masih berjalan.
 
 Default file runtime:
 
