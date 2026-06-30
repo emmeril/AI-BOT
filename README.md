@@ -1,18 +1,17 @@
 # Binance Spot Grid Bot
 
-Bot grid spot Binance berbasis Node.js. Bot membaca konfigurasi dari `.env`, menyimpan state lokal, memakai lock file agar tidak berjalan ganda, dan dapat berjalan di Binance Spot testnet maupun live.
+Bot grid spot Binance berbasis Node.js. Bot membaca konfigurasi dari `.env`, menyimpan state lokal, memakai lock file agar tidak berjalan ganda, dan dapat berjalan di Binance Spot `testnet` maupun `live`.
 
 ## Fitur
 
-- Binance Spot grid bot untuk satu atau banyak pair, contoh `BTC/USDT,ETH/USDT`.
-- Mode exchange `live`, `testnet`, atau `demo` (`demo` dipetakan ke `testnet`).
+- Trading grid spot untuk satu atau banyak pair, contoh `BTC/USDT,ETH/USDT`.
+- Mode exchange `live`, `testnet`, atau `demo` (`demo` diperlakukan sebagai `testnet`).
 - Grid `ARITHMETIC` atau `GEOMETRIC`.
 - Range manual, auto range, stale range auto reset, trailing up, dan trailing down.
-- Batas modal per order atau total investasi grid.
-- Refill order setelah fill, cancel order out-of-range, post-only maker order, dan recovery metadata order dari `clientOrderId`.
+- Batas modal per order atau total modal grid.
+- Refill order setelah fill, cancel order out-of-range, post-only maker order, dan recovery order dari `clientOrderId`.
 - Stop trading manual, kill switch file, stop-loss, dan take-profit.
 - Smart Range Advisor opsional via Gemini untuk menyarankan range grid.
-- Learning memory opsional dari hasil profit aktual.
 - Notifikasi WhatsApp opsional via Fonnte.
 
 ## Kebutuhan
@@ -31,8 +30,8 @@ npm install
 
 1. Salin `env.example` menjadi `.env`.
 2. Isi `EXCHANGE_API_KEY` dan `EXCHANGE_SECRET`.
-3. Mulai dari `EXCHANGE_MODE=testnet` untuk uji coba.
-4. Sesuaikan `SYMBOLS`, `GRID_COUNT`, `GRID_ORDER_SIZE_USDT`, dan pengaturan range.
+3. Mulai dari `EXCHANGE_MODE=testnet`.
+4. Sesuaikan `SYMBOLS`, `GRID_COUNT`, `GRID_ORDER_SIZE_USDT`, dan range.
 5. Jalankan test sebelum start bot.
 
 Contoh minimal:
@@ -57,12 +56,7 @@ Atau langsung:
 node index.js
 ```
 
-Saat berjalan, bot akan:
-
-1. Validasi konfigurasi.
-2. Membersihkan temp file state yang tertinggal dari proses sebelumnya.
-3. Mengambil lock process.
-4. Sinkronisasi order dan fill per symbol setiap `INTERVAL_MINUTES`.
+Saat berjalan, bot akan validasi konfigurasi, membersihkan temp file state, mengambil process lock, lalu sinkronisasi order dan fill setiap `INTERVAL_MINUTES`.
 
 ## Test
 
@@ -70,54 +64,75 @@ Saat berjalan, bot akan:
 npm test
 ```
 
-## Konfigurasi Utama
+## Format Nilai
 
+Boolean menerima `true`, `false`, `1`, `0`, `yes`, `no`, `on`, atau `off`.
+
+Angka persen ditulis sebagai angka biasa. Contoh `GRID_RANGE_PCT=5` berarti 5%.
+
+## Exchange
+
+- `EXCHANGE_API_KEY`: API key Binance.
+- `EXCHANGE_SECRET`: secret key Binance.
 - `EXCHANGE_MODE`: `live`, `testnet`, atau `demo`. Nilai `demo` diperlakukan sebagai `testnet`.
-- `EXCHANGE_DEMO`: fallback legacy jika `EXCHANGE_MODE` tidak diisi.
-- `SYMBOLS`: pair dipisah koma, contoh `BTC/USDT,ETH/USDT`.
+- `EXCHANGE_DEMO`: fallback legacy jika `EXCHANGE_MODE` kosong.
+- `SYMBOLS`: daftar pair dipisah koma, contoh `BTC/USDT,ETH/USDT`.
 - `INTERVAL_MINUTES`: jarak antar siklus sinkronisasi.
+
+## Grid
+
 - `GRID_MODE`: `ARITHMETIC` atau `GEOMETRIC`.
-- `GRID_COUNT`: jumlah level grid, minimal 2.
+- `GRID_COUNT`: jumlah grid, minimal 2.
+- `GRID_LOWER_PRICE` dan `GRID_UPPER_PRICE`: isi keduanya untuk range manual. Jika salah satu saja diisi, konfigurasi invalid.
+- `GRID_RANGE_PCT`: range otomatis di sekitar harga saat range dibuat.
+- `GRID_RESET_RANGE_ON_START`: hitung ulang auto range saat bot start.
+- `GRID_STALE_RANGE_DEVIATION_PCT`: ambang deteksi stored range yang terlalu jauh dari harga saat ini.
+- `GRID_STALE_RANGE_AUTO_RESET`: otomatis reset stored range yang stale.
 
-Nilai boolean menerima `true`, `false`, `1`, `0`, `yes`, `no`, `on`, atau `off`.
+Trailing range hanya berlaku untuk auto range. Manual range tidak digeser oleh trailing.
 
-## Range Grid
-
-- `GRID_LOWER_PRICE` dan `GRID_UPPER_PRICE`: isi keduanya untuk range manual. Jika salah satu saja diisi, konfigurasi dianggap invalid.
-- `GRID_RANGE_PCT`: range otomatis `+/-` dari harga saat range dibuat.
-- `GRID_RESET_RANGE_ON_START`: paksa hitung ulang auto range saat start.
-- `GRID_STALE_RANGE_DEVIATION_PCT`: ambang deteksi range lama yang terlalu jauh dari harga.
-- `GRID_STALE_RANGE_AUTO_RESET`: otomatis reset stale range.
-
-Trailing range hanya aktif untuk auto range. Jika range manual dipakai, trailing up/down tidak menggeser range.
-
-- `GRID_TRAILING_RANGE_ENABLED`: default global untuk trailing up/down.
+- `GRID_TRAILING_RANGE_ENABLED`: default global untuk trailing up dan down.
 - `GRID_TRAILING_UP_ENABLED`: aktifkan range mengikuti kenaikan harga.
-- `GRID_TRAILING_UP_COOLDOWN_MINUTES`: jeda minimal antar trailing up.
+- `GRID_TRAILING_UP_COOLDOWN_MINUTES`: cooldown trailing up.
 - `GRID_TRAILING_DOWN_ENABLED`: aktifkan range mengikuti penurunan harga.
-- `GRID_TRAILING_DOWN_COOLDOWN_MINUTES`: jeda minimal antar trailing down. Jika tidak diisi, fallback ke cooldown trailing up.
+- `GRID_TRAILING_DOWN_COOLDOWN_MINUTES`: cooldown trailing down. Jika kosong, fallback ke cooldown trailing up.
 
-## Modal dan Order
+## Modal Dan Order
 
-- `GRID_ORDER_SIZE_USDT`: ukuran target order per grid.
-- `ORDER_SIZE_USDT`: fallback legacy jika `GRID_ORDER_SIZE_USDT` tidak diisi.
-- `GRID_TOTAL_INVESTMENT_USDT`: jika lebih dari 0, menjadi batas total modal dan mengambil prioritas. Ukuran efektif per grid menjadi `GRID_TOTAL_INVESTMENT_USDT / GRID_COUNT`.
+- `GRID_ORDER_SIZE_USDT`: target ukuran order per grid level.
+- `ORDER_SIZE_USDT`: fallback legacy jika `GRID_ORDER_SIZE_USDT` kosong.
+- `GRID_TOTAL_INVESTMENT_USDT`: jika lebih dari 0, menjadi batas total modal grid dan mengambil prioritas. Ukuran efektif per grid menjadi `GRID_TOTAL_INVESTMENT_USDT / GRID_COUNT`.
 - `GRID_MAX_ACTIVE_BUY_ORDERS`: batas order buy aktif per symbol.
 - `GRID_MAX_ACTIVE_SELL_ORDERS`: batas order sell aktif per symbol.
 - `GRID_RECREATE_ON_START`: cancel dan buat ulang grid saat bot start.
-- `GRID_CANCEL_OUT_OF_RANGE`: cancel order yang sudah keluar range.
-- `GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MINUTES`: umur minimal order sebelum boleh dibatalkan karena out-of-range.
+- `GRID_CANCEL_OUT_OF_RANGE`: cancel managed order yang keluar range.
+- `GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MINUTES`: umur minimal order sebelum boleh dicancel karena out-of-range.
 - `GRID_REFILL_ON_FILLED`: buat order pengganti setelah fill.
 - `GRID_POST_ONLY`: gunakan maker/post-only order jika exchange mendukung.
-- `GRID_PRICE_PRECISION_MAX_DEVIATION_PCT`: toleransi perubahan harga setelah pembulatan precision exchange.
+- `GRID_PRICE_PRECISION_MAX_DEVIATION_PCT`: toleransi perubahan harga setelah dibulatkan mengikuti precision exchange.
+
+## State Dan Lock
+
+- `GRID_STATE_FILE`: file state grid lokal.
+- `BOT_LOCK_FILE`: file lock process. Jangan pakai file lock yang sama untuk dua proses bot.
+- `BOT_LOCK_STALE_GRACE_MS`: waktu tunggu sebelum membersihkan stale lock.
+
+Default file runtime:
+
+- `grid-state-spot.json`
+- `grid-state-spot.json.lock`
+- `gemini-range-advisor-state.json`
+- `bot-paused.flag`
+
+File runtime tersebut diabaikan lewat `.gitignore`.
 
 ## Safety
 
 - `STOP_TRADING=true`: bot tidak menempatkan order baru.
 - `KILL_SWITCH_ENABLED=true`: bot pause jika file `KILL_SWITCH_FILE` ada.
-- `KILL_SWITCH_FILE`: nama file pause lokal, default `bot-paused.flag`.
-- `GRID_STOP_LOSS_PRICE`: cancel grid dan stop order baru jika harga <= nilai ini.
-- `GRID_TAKE_PROFIT_PRICE`: cancel grid dan stop order baru jika harga >= nilai ini.
+- `KILL_SWITCH_FILE`: nama file pause lokal.
+- `GRID_STOP_LOSS_PRICE`: cancel grid dan stop order baru jika harga <= nilai ini. `0` berarti nonaktif.
+- `GRID_TAKE_PROFIT_PRICE`: cancel grid dan stop order baru jika harga >= nilai ini. `0` berarti nonaktif.
 
 ## Smart Range Advisor Gemini
 
@@ -128,36 +143,23 @@ GEMINI_RANGE_ADVISOR_ENABLED=true
 GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
-Konfigurasi terkait:
+Advisor mengambil candle OHLCV, menghitung indikator teknikal lokal, lalu meminta Gemini menyarankan `lower` dan `upper` range. Rekomendasi hanya dipakai jika confidence memenuhi threshold dan range masih lolos safety clamp.
 
+- `GEMINI_API_KEY`: API key Gemini. Wajib jika advisor aktif.
 - `GEMINI_MODEL`: model Gemini yang dipakai.
-- `GEMINI_API_BASE_URL`: endpoint Gemini API.
+- `GEMINI_API_BASE_URL`: base URL Gemini API.
 - `GEMINI_RANGE_ADVISOR_MIN_INTERVAL_MINUTES`: jarak minimal antar request Gemini per symbol.
 - `GEMINI_RANGE_ADVISOR_TIMEFRAME`: timeframe OHLCV untuk konteks analisis.
 - `GEMINI_RANGE_ADVISOR_CANDLE_LIMIT`: jumlah candle yang diambil.
 - `GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH`: izinkan Gemini memakai Google Search untuk konteks market terbaru.
-- `GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT`: batas deviasi lower/upper rekomendasi dari harga saat ini. Rekomendasi akan di-clamp agar tidak terlalu jauh.
-- `GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT`: lebar minimal range rekomendasi sebagai persen dari harga saat ini.
+- `GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT`: batas deviasi rekomendasi dari harga saat ini. Lower dan upper akan di-clamp agar tidak terlalu jauh.
+- `GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT`: lebar minimal rekomendasi sebagai persen dari harga saat ini.
 - `GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE`: confidence minimal `0` sampai `1` agar rekomendasi dipakai.
 - `GEMINI_RANGE_ADVISOR_TIMEOUT_MS`: timeout request Gemini.
-- `GEMINI_RANGE_ADVISOR_APPLY_ON`: `AUTO_RANGE_ONLY` agar tidak mengubah range manual, atau `ALWAYS` agar boleh menimpa range manual juga.
+- `GEMINI_RANGE_ADVISOR_APPLY_ON`: `AUTO_RANGE_ONLY` agar tidak mengubah range manual, atau `ALWAYS` agar boleh menimpa range manual.
 - `GEMINI_RANGE_ADVISOR_STATE_FILE`: file cache rekomendasi lokal.
 
-Jika advisor tidak aktif atau confidence rekomendasi di bawah threshold, bot tetap memakai range manual atau auto range lokal.
-
-## Learning Memory
-
-Aktifkan dengan:
-
-```env
-LEARNING_MEMORY_ENABLED=true
-```
-
-- `LEARNING_MEMORY_FILE`: file penyimpanan memory lokal.
-- `LEARNING_MEMORY_LOOKBACK`: jumlah outcome terakhir yang dievaluasi.
-- `LEARNING_MEMORY_MIN_SAMPLES`: minimal sample sebelum memory memengaruhi keputusan.
-
-Learning memory memakai data profit aktual dari fill order dan tidak memakai env threshold profit khusus.
+Jika advisor nonaktif, gagal, atau confidence di bawah threshold, bot tetap memakai range manual atau auto range lokal.
 
 ## Alert Fonnte
 
@@ -173,21 +175,9 @@ FONNTE_TARGET=628xxxxxxxxxx
 - `FONNTE_COUNTRY_CODE`: kode negara target.
 - `FONNTE_TIMEOUT_MS`: timeout request alert.
 
-## File Lokal
-
-Default file yang dibuat bot:
-
-- `grid-state-spot.json`
-- `grid-state-spot.json.lock`
-- `gemini-range-advisor-state.json`
-- `learning-memory.json`
-- `bot-paused.flag`
-
-File runtime tersebut sudah diabaikan lewat `.gitignore`.
-
 ## Catatan Operasional
 
 - Selalu uji di `testnet` sebelum memakai `live`.
-- Pastikan saldo, minimum notional exchange, dan ukuran order sesuai pair yang dipakai.
-- Jangan menjalankan dua proses bot dengan state file yang sama. Lock file akan menolak proses kedua.
+- Pastikan saldo, minimum notional exchange, dan ukuran order cocok untuk pair yang dipakai.
+- Jangan menjalankan dua proses bot dengan state file dan lock file yang sama.
 - Backup state sebelum mengubah range atau mengganti symbol secara besar-besaran.
