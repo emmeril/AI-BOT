@@ -4,7 +4,6 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const crypto = require('crypto');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const TRUE_VALUES = new Set(['true', '1', 'yes', 'on']);
 const FALSE_VALUES = new Set(['false', '0', 'no', 'off']);
@@ -94,17 +93,40 @@ const BOT_LOCK_STALE_GRACE_MS = Math.max(Config.number('BOT_LOCK_STALE_GRACE_MS'
 const GRID_POST_ONLY = Config.boolean('GRID_POST_ONLY', true);
 const GRID_PRICE_PRECISION_MAX_DEVIATION_PCT = Config.number('GRID_PRICE_PRECISION_MAX_DEVIATION_PCT', 0.05);
 
-const AI_VALIDATION_ENABLED = Config.boolean('AI_VALIDATION_ENABLED', false);
-const AI_VALIDATION_TIMEFRAME = Config.get('AI_VALIDATION_TIMEFRAME', '15m');
-const AI_VALIDATION_LOOKBACK = Config.number('AI_VALIDATION_LOOKBACK', 80);
-const AI_VALIDATION_CACHE_TTL_MS = Config.number('AI_VALIDATION_CACHE_TTL_MS', Math.max(INTERVAL_MS * 3, MINUTE_MS));
-const AI_VALIDATION_MIN_INTERVAL_MS = Config.number('AI_VALIDATION_MIN_INTERVAL_MS', MINUTE_MS);
-const AI_VALIDATION_BACKOFF_MS = Config.number('AI_VALIDATION_BACKOFF_MS', 10 * MINUTE_MS);
-const AI_VALIDATION_PRICE_BUCKET_PCT = Config.number('AI_VALIDATION_PRICE_BUCKET_PCT', 0.25);
-const AI_VALIDATION_RETRIES = Config.number('AI_VALIDATION_RETRIES', 2);
-const AI_VALIDATION_TIMEOUT_MS = Math.max(Config.number('AI_VALIDATION_TIMEOUT_MS', 30_000), 1000);
-const AI_MIN_CONFIDENCE = Config.number('AI_MIN_CONFIDENCE', 70);
-const GEMINI_MODEL = Config.get('GEMINI_MODEL', 'gemini-2.0-flash-lite');
+// ------------------------------
+//  Smart Grid Range Advisor (Gemini AI)
+// ------------------------------
+const GEMINI_RANGE_ADVISOR_ENABLED = Config.boolean('GEMINI_RANGE_ADVISOR_ENABLED', false);
+const GEMINI_API_KEY = Config.get('GEMINI_API_KEY', '');
+const GEMINI_MODEL = Config.get('GEMINI_MODEL', 'gemini-2.5-flash');
+const GEMINI_API_BASE_URL = Config.get(
+  'GEMINI_API_BASE_URL',
+  'https://generativelanguage.googleapis.com'
+);
+// Minimum gap between actual Gemini calls per symbol, even though the advisor is
+// evaluated every cycle. Protects API quota/cost when INTERVAL_MINUTES is small.
+const GEMINI_RANGE_ADVISOR_MIN_INTERVAL_MS = Math.max(
+  Config.number('GEMINI_RANGE_ADVISOR_MIN_INTERVAL_MINUTES', 15),
+  0
+) * MINUTE_MS;
+const GEMINI_RANGE_ADVISOR_TIMEFRAME = Config.get('GEMINI_RANGE_ADVISOR_TIMEFRAME', '1h');
+const GEMINI_RANGE_ADVISOR_CANDLE_LIMIT = Config.number('GEMINI_RANGE_ADVISOR_CANDLE_LIMIT', 100);
+const GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH = Config.boolean('GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH', true);
+// How far the AI-recommended range is allowed to differ from the current
+// auto/manual range before being applied; a safety clamp against bad output.
+const GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT = Config.number('GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT', 40);
+// Minimum width (as a % of current price) the AI-recommended range must span.
+// Passed into the prompt as an instruction so Gemini doesn't suggest an overly
+// narrow range that would cause grid levels to bunch up too tightly.
+const GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT = Config.number('GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT', 2);
+const GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE = Config.number('GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE', 0.55);
+const GEMINI_RANGE_ADVISOR_TIMEOUT_MS = Config.number('GEMINI_RANGE_ADVISOR_TIMEOUT_MS', 20_000);
+const GEMINI_RANGE_ADVISOR_APPLY_ON = Config.get('GEMINI_RANGE_ADVISOR_APPLY_ON', 'AUTO_RANGE_ONLY').toUpperCase();
+const GEMINI_RANGE_ADVISOR_STATE_FILE = Config.get(
+  'GEMINI_RANGE_ADVISOR_STATE_FILE',
+  'gemini-range-advisor-state.json'
+);
+const GEMINI_RANGE_ADVISOR_STATE_PATH = path.resolve(process.cwd(), GEMINI_RANGE_ADVISOR_STATE_FILE);
 
 const STOP_LOSS_PRICE = Config.number('GRID_STOP_LOSS_PRICE', 0);
 const TAKE_PROFIT_PRICE = Config.number('GRID_TAKE_PROFIT_PRICE', 0);
@@ -120,13 +142,6 @@ const FONNTE_API_URL = Config.get('FONNTE_API_URL', 'https://api.fonnte.com/send
 const FONNTE_COUNTRY_CODE = Config.get('FONNTE_COUNTRY_CODE', '62');
 const FONNTE_TIMEOUT_MS = Config.number('FONNTE_TIMEOUT_MS', 10_000);
 
-// ---- Learning Memory Configuration ----
-const LEARNING_MEMORY_ENABLED = Config.boolean('LEARNING_MEMORY_ENABLED', false);
-const LEARNING_MEMORY_FILE = Config.get('LEARNING_MEMORY_FILE', 'learning-memory.json');
-const LEARNING_MEMORY_PATH = path.resolve(process.cwd(), LEARNING_MEMORY_FILE);
-const LEARNING_MEMORY_LOOKBACK = Config.number('LEARNING_MEMORY_LOOKBACK', 20);
-const LEARNING_MEMORY_MIN_SAMPLES = Config.number('LEARNING_MEMORY_MIN_SAMPLES', 5);
-// ---------------------------------------------------
 
 const MAX_PROCESSED_TRADE_IDS = 2000;
 const TRADE_FETCH_LIMIT = 100;
@@ -297,21 +312,8 @@ function validateRuntimeConfiguration() {
   );
   requireInteger('GRID_MAX_ACTIVE_BUY_ORDERS', GRID_MAX_ACTIVE_BUY_ORDERS);
   requireInteger('GRID_MAX_ACTIVE_SELL_ORDERS', GRID_MAX_ACTIVE_SELL_ORDERS);
-  requireInteger('AI_VALIDATION_RETRIES', AI_VALIDATION_RETRIES);
   requireNonNegative('BOT_LOCK_STALE_GRACE_MS', BOT_LOCK_STALE_GRACE_MS);
-  requirePositive('AI_VALIDATION_TIMEOUT_MS', AI_VALIDATION_TIMEOUT_MS);
   requirePositive('FONNTE_TIMEOUT_MS', FONNTE_TIMEOUT_MS);
-
-  if (LEARNING_MEMORY_ENABLED) {
-    requireInteger('LEARNING_MEMORY_MIN_SAMPLES', LEARNING_MEMORY_MIN_SAMPLES, 1);
-    requireInteger('LEARNING_MEMORY_LOOKBACK', LEARNING_MEMORY_LOOKBACK, 1);
-    if (LEARNING_MEMORY_MIN_SAMPLES > LEARNING_MEMORY_LOOKBACK) {
-      errors.push(
-        `LEARNING_MEMORY_MIN_SAMPLES (${LEARNING_MEMORY_MIN_SAMPLES}) must be <= ` +
-        `LEARNING_MEMORY_LOOKBACK (${LEARNING_MEMORY_LOOKBACK})`
-      );
-    }
-  }
 
   const hasLower = GRID_LOWER_PRICE > 0;
   const hasUpper = GRID_UPPER_PRICE > 0;
@@ -325,11 +327,19 @@ function validateRuntimeConfiguration() {
   if (!process.env.EXCHANGE_API_KEY || !process.env.EXCHANGE_SECRET) {
     errors.push('EXCHANGE_API_KEY and EXCHANGE_SECRET are required');
   }
-  if (AI_VALIDATION_ENABLED && !process.env.GEMINI_API_KEY) {
-    errors.push('GEMINI_API_KEY is required when AI_VALIDATION_ENABLED=true');
-  }
   if (FONNTE_ENABLED && (!FONNTE_TOKEN || !FONNTE_TARGET)) {
     errors.push('FONNTE_TOKEN and FONNTE_TARGET are required when FONNTE_ENABLED=true');
+  }
+  if (GEMINI_RANGE_ADVISOR_ENABLED) {
+    if (!GEMINI_API_KEY) errors.push('GEMINI_API_KEY is required when GEMINI_RANGE_ADVISOR_ENABLED=true');
+    requirePositive('GEMINI_RANGE_ADVISOR_CANDLE_LIMIT', GEMINI_RANGE_ADVISOR_CANDLE_LIMIT);
+    requirePositive('GEMINI_RANGE_ADVISOR_TIMEOUT_MS', GEMINI_RANGE_ADVISOR_TIMEOUT_MS);
+    if (!(GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE >= 0 && GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE <= 1)) {
+      errors.push('GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE must be between 0 and 1');
+    }
+    if (!['AUTO_RANGE_ONLY', 'ALWAYS'].includes(GEMINI_RANGE_ADVISOR_APPLY_ON)) {
+      errors.push('GEMINI_RANGE_ADVISOR_APPLY_ON must be AUTO_RANGE_ONLY or ALWAYS');
+    }
   }
 
   if (
@@ -496,11 +506,22 @@ class ProcessLock {
 
   release() {
     if (this.fd === null) return;
+    // Capture and clear the token BEFORE closing fd so ownsLock() can't be
+    // called after the file descriptor is invalid.  We verify ownership using
+    // the in-memory token directly rather than re-reading the lock file after
+    // closeSync(), which would introduce a TOCTOU race.
+    const tokenSnapshot = this.ownerToken;
     try {
+      // Check ownership while fd is still open (file content is stable).
+      const isOwner = tokenSnapshot !== null && this.ownsLock();
       fs.closeSync(this.fd);
-      if (this.ownsLock()) {
-        fs.unlinkSync(this.lockPath);
-        console.log(`[LOCK] Released lock ${this.lockPath}`);
+      if (isOwner) {
+        try {
+          fs.unlinkSync(this.lockPath);
+          console.log(`[LOCK] Released lock ${this.lockPath}`);
+        } catch (err) {
+          if (err.code !== 'ENOENT') console.warn('[LOCK] Failed to unlink lock file:', err.message);
+        }
       } else {
         console.warn('[LOCK] Not releasing a lock with a different ownership token');
       }
@@ -663,457 +684,290 @@ class GridState {
 }
 
 // ------------------------------
-//  Learning Memory 
-// ------------------------------
-class LearningMemory {
-  constructor() {
-    this.filePath = LEARNING_MEMORY_PATH;
-    this.enabled = LEARNING_MEMORY_ENABLED;
-    this.windowSize = LEARNING_MEMORY_LOOKBACK;
-    this.minSamples = LEARNING_MEMORY_MIN_SAMPLES;
-    this.data = {}; // symbol -> { profits: [], totalProfit: 0, count: 0 }
-    if (this.enabled) this.load();
-  }
-
-  isEnabled() { return this.enabled === true; }
-
-  load() {
-    try {
-      if (fs.existsSync(this.filePath)) {
-        const raw = fs.readFileSync(this.filePath, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (isPlainObject(parsed)) {
-          for (const [symbol, record] of Object.entries(parsed)) {
-            if (Array.isArray(record.profits)) {
-              this.data[symbol] = {
-                profits: record.profits.map(Number).filter(v => Number.isFinite(v)),
-                totalProfit: Number(record.totalProfit) || 0,
-                count: Number(record.count) || 0,
-              };
-            }
-          }
-          console.log(`[MEMORY] Loaded memory for ${Object.keys(this.data).length} symbols.`);
-        }
-      }
-    } catch (err) {
-      console.warn('[MEMORY] Failed to load memory file, starting fresh:', err.message);
-      this.data = {};
-    }
-  }
-
-  save() {
-    if (!this.isEnabled()) return;
-    const toWrite = {};
-    for (const [symbol, record] of Object.entries(this.data)) {
-      toWrite[symbol] = {
-        profits: record.profits.slice(-this.windowSize),
-        totalProfit: record.totalProfit,
-        count: record.count,
-      };
-    }
-    AtomicFileWriter.write(this.filePath, () => `${JSON.stringify(toWrite, null, 2)}\n`);
-  }
-
-  // Call this whenever a sell order is filled with its realised profit
-  async recordProfit(symbol, profit) {
-    if (!this.isEnabled()) return;
-    if (!this.data[symbol]) {
-      this.data[symbol] = { profits: [], totalProfit: 0, count: 0 };
-    }
-    const record = this.data[symbol];
-    record.profits.push(profit);
-    if (record.profits.length > this.windowSize * 2) {
-      // Keep only the last 2*windowSize to avoid unbounded growth
-      record.profits = record.profits.slice(-this.windowSize * 2);
-    }
-    record.totalProfit += profit;
-    record.count += 1;
-    await this.save();
-  }
-
-  // Returns a confidence multiplier factor for the given symbol
-  getAdjustment(symbol) {
-    if (!this.isEnabled()) return 1.0;
-    const record = this.data[symbol];
-    if (!record || record.profits.length < this.minSamples) return 1.0;
-
-    const recent = record.profits.slice(-this.windowSize);
-    const n = recent.length;
-    if (n < this.minSamples) return 1.0;
-
-    // Win rate
-    const wins = recent.filter(p => p > 0).length;
-    const winRate = wins / n;
-
-    // Average profit (relative to order size)
-    const avgProfit = recent.reduce((a, b) => a + b, 0) / n;
-    const orderSize = this.getOrderSizeUsdt();
-    const relProfit = orderSize > 0 ? avgProfit / orderSize : 0;
-
-    // Build factor
-    let factor = 1.0;
-    if (winRate > 0.6) {
-      factor += 0.2 * (winRate - 0.6) / 0.4; // max +0.2 when winRate=1.0
-    } else if (winRate < 0.4) {
-      factor -= 0.2 * (0.4 - winRate) / 0.4; // max -0.2 when winRate=0.0
-    }
-    // Small bonus/penalty for average profit magnitude
-    if (relProfit > 0.01) {
-      factor += 0.1 * Math.min(relProfit / 0.1, 0.5); // max +0.1
-    } else if (relProfit < -0.01) {
-      factor -= 0.1 * Math.min(-relProfit / 0.1, 0.5); // max -0.1
-    }
-
-    // Clamp between 0.5 and 1.5
-    factor = Math.min(1.5, Math.max(0.5, factor));
-    return factor;
-  }
-
-  getOrderSizeUsdt() {
-    if (GRID_TOTAL_INVESTMENT_USDT > 0) {
-      return GRID_TOTAL_INVESTMENT_USDT / Math.max(GRID_COUNT, 1);
-    }
-    return GRID_ORDER_SIZE_USDT;
-  }
-}
-
-// ------------------------------
-//  Gemini Grid Validation
-// ------------------------------
-class AIGridValidator {
-  static cache = new Map();
-  static MAX_CACHE_SIZE = 100;
-  static lastDecisionBySymbol = new Map();
-  static rateLimitedUntil = 0;
-
-  constructor(exchange) {
-    this.exchange = exchange;
-    this.model = null;
-    if (AI_VALIDATION_ENABLED) {
-      if (!process.env.GEMINI_API_KEY) {
-        throw new Error('AI_VALIDATION_ENABLED=true needs GEMINI_API_KEY.');
-      }
-      const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-      this.model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-    }
-    if (LEARNING_MEMORY_ENABLED) {
-      this.learningMemory = new LearningMemory();
-    } else {
-      this.learningMemory = null;
-    }
-  }
-
-  static allow(reason = 'AI validation disabled') {
-    return { allowTrading: true, allowBuy: true, allowSell: true, confidence: 100, reason };
-  }
-
-  static block(reason, confidence = 0) {
-    return { allowTrading: false, allowBuy: false, allowSell: false, confidence, reason };
-  }
-
-  blockAndRemember(symbol, cacheKey, reason, confidence = 0) {
-    const decision = AIGridValidator.block(reason, confidence);
-    this.setCached(cacheKey, decision);
-    this.rememberDecision(symbol, decision);
-    return decision;
-  }
-
-  applyConfidenceRules(decision) {
-    const conf = decision.confidence;
-    if (conf < 50) {
-      decision.allowTrading = false;
-      decision.allowBuy = false;
-      decision.allowSell = false;
-      decision.reason = `Auto-blocked: confidence too low (${conf.toFixed(1)}%) - extreme uncertainty`;
-    } else if (conf < 70) {
-      decision.allowBuy = decision.allowTrading && decision.allowBuy;
-      decision.allowSell = decision.allowTrading && decision.allowSell;
-    }
-    return decision;
-  }
-
-  cacheKey(symbol, currentPrice, levels) {
-    const bucket = Math.floor(Date.now() / AI_VALIDATION_CACHE_TTL_MS);
-    const rangeKey = `${roundNumber(levels[0])}-${roundNumber(levels[levels.length - 1])}`;
-    const priceBucket = this.priceBucket(currentPrice, levels);
-    return `${symbol}|${AI_VALIDATION_TIMEFRAME}|${bucket}|${priceBucket}|${rangeKey}`;
-  }
-
-  priceBucket(currentPrice, levels) {
-    const lower = Number(levels[0]);
-    const upper = Number(levels[levels.length - 1]);
-    let gridStepPct = AI_VALIDATION_PRICE_BUCKET_PCT;
-    if (lower > 0 && levels.length > 1) {
-      gridStepPct = Math.abs((Number(levels[1]) - lower) / lower) * 100;
-    }
-    const bucketPct = Math.max(AI_VALIDATION_PRICE_BUCKET_PCT, gridStepPct / 2, 0.01);
-    const bucketSize = currentPrice * (bucketPct / 100);
-    const bucketedPrice = bucketSize > 0 ? Math.round(currentPrice / bucketSize) * bucketSize : currentPrice;
-    const position = upper > lower ? Math.round(((currentPrice - lower) / (upper - lower)) * GRID_COUNT) : 0;
-    return `${roundNumber(bucketedPrice)}|pos=${position}`;
-  }
-
-  getCached(key) {
-    const entry = AIGridValidator.cache.get(key);
-    if (entry && entry.expiresAt > Date.now()) {
-      AIGridValidator.cache.delete(key);
-      AIGridValidator.cache.set(key, entry);
-      return entry.value;
-    }
-    if (entry) AIGridValidator.cache.delete(key);
-    return null;
-  }
-
-  setCached(key, value) {
-    const now = Date.now();
-    for (const [cachedKey, entry] of AIGridValidator.cache.entries()) {
-      if (!entry || entry.expiresAt <= now) AIGridValidator.cache.delete(cachedKey);
-    }
-    if (AIGridValidator.cache.has(key)) AIGridValidator.cache.delete(key);
-    if (AIGridValidator.cache.size >= AIGridValidator.MAX_CACHE_SIZE) {
-      const leastRecentlyUsed = AIGridValidator.cache.keys().next().value;
-      AIGridValidator.cache.delete(leastRecentlyUsed);
-    }
-    AIGridValidator.cache.set(key, { value, expiresAt: now + AI_VALIDATION_CACHE_TTL_MS });
-  }
-
-  getLastDecisionEntry(symbol, allowStale = false) {
-    const entry = AIGridValidator.lastDecisionBySymbol.get(symbol);
-    if (!entry) return null;
-    const age = Date.now() - entry.at;
-    if (allowStale || age < AI_VALIDATION_CACHE_TTL_MS) return entry;
-    return null;
-  }
-
-  getLastDecision(symbol, allowStale = false) {
-    return this.getLastDecisionEntry(symbol, allowStale)?.value || null;
-  }
-
-  rememberDecision(symbol, decision) {
-    AIGridValidator.lastDecisionBySymbol.set(symbol, { value: decision, at: Date.now() });
-  }
-
-  isRateLimitError(err) {
-    const message = String(err?.message || err || '').toLowerCase();
-    return err?.status === 429 ||
-      err?.code === 429 ||
-      message.includes('429') ||
-      message.includes('rate limit') ||
-      message.includes('quota') ||
-      message.includes('resource_exhausted');
-  }
-
-  summarizeCandles(ohlcv) {
-    if (!ohlcv.length) return {};
-    const closes = ohlcv.map(c => Number(c[4]));
-    const highs = ohlcv.map(c => Number(c[2]));
-    const lows = ohlcv.map(c => Number(c[3]));
-    const volumes = ohlcv.map(c => Number(c[5]));
-    const first = closes[0];
-    const last = closes[closes.length - 1];
-    const high = Math.max(...highs);
-    const low = Math.min(...lows);
-    const avgVolume = volumes.reduce((sum, value) => sum + value, 0) / volumes.length;
-    const recentVolume = volumes.slice(-10).reduce((sum, value) => sum + value, 0) / Math.min(10, volumes.length);
-    return {
-      firstClose: roundNumber(first),
-      lastClose: roundNumber(last),
-      changePct: roundNumber(((last - first) / first) * 100, 4),
-      high: roundNumber(high),
-      low: roundNumber(low),
-      rangePct: roundNumber(((high - low) / last) * 100, 4),
-      avgVolume: roundNumber(avgVolume, 4),
-      recentVolume: roundNumber(recentVolume, 4),
-      volumeRatio: avgVolume > 0 ? recentVolume / avgVolume : 1,
-    };
-  }
-
-  buildPrompt(symbol, context, candleSummary) {
-    const {
-      currentPrice,
-      lower,
-      upper,
-      levels,
-      trailingUpJustShifted = false,
-      trailingDownJustShifted = false,
-    } = context;
-    const distLowerPct = ((currentPrice - lower) / currentPrice) * 100;
-    const distUpperPct = ((upper - currentPrice) / currentPrice) * 100;
-    const { changePct = 0, rangePct = 0, recentVolume = 0, avgVolume = 0 } = candleSummary;
-    const volumeRatio = avgVolume > 0 ? recentVolume / avgVolume : 1;
-    const trend = changePct > 0 ? 'UPTREND' : changePct < 0 ? 'DOWNTREND' : 'RANGING';
-
-    return `
-You validate whether a Binance spot grid bot may place new orders in a ${trend} market.
-
-Return ONLY valid JSON (no markdown, no explanation):
-{
-  "allowTrading": true/false,
-  "allowBuy": true/false,
-  "allowSell": true/false,
-  "confidence": 0-100,
-  "reason": "specific reason (max 100 chars)"
-}
-
-DECISION FRAMEWORK:
-1. VOLATILITY FILTER (rangePct = ${rangePct.toFixed(2)}%):
-   - Block if rangePct > 8% (extreme volatility = unsafe grid)
-   - Use caution if rangePct > 5% (elevated volatility)
-
-2. VOLUME FILTER (volume ratio = ${volumeRatio.toFixed(2)}x):
-   - Block if recent volume < 50% of average (liquidity warning)
-
-3. TREND ANALYSIS (change = ${changePct.toFixed(2)}%):
-   - STRONG TREND: |changePct| > 5% = directional pressure
-     * In UPTREND: allowSell = false
-     * In DOWNTREND: allowBuy = false
-   - RANGING: |changePct| < 2% = grid optimal
-
-4. PRICE POSITION:
-   - Distance to Lower: ${distLowerPct.toFixed(1)}%
-   - Distance to Upper: ${distUpperPct.toFixed(1)}%
-   - If near bound (<5% away): evaluate trend before allowing that direction
-
-5. TRAILING SHIFTS:
-   - Trailing Up Just Shifted: ${trailingUpJustShifted}
-   - Trailing Down Just Shifted: ${trailingDownJustShifted}
-   - Assess new market regime after shift
-   - Do not block solely because price is near the new upper bound
-   - Do not block solely because price is near the new lower bound
-
-Be conservative. Protect capital first.
-`;
-  }
-
-  parseResponse(text) {
-    const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim();
-    const start = cleaned.indexOf('{');
-    const end = cleaned.lastIndexOf('}');
-    if (start === -1 || end === -1) throw new Error('No JSON object in Gemini response');
-    const parsed = JSON.parse(cleaned.slice(start, end + 1));
-    const confidence = Number(parsed.confidence);
-    const allowTrading = parsed.allowTrading === true;
-    const allowBuy = parsed.allowBuy === true;
-    const allowSell = parsed.allowSell === true;
-    const confVal = Number.isFinite(confidence) ? confidence : 0;
-    return {
-      allowTrading,
-      allowBuy,
-      allowSell,
-      confidence: confVal,
-      reason: String(parsed.reason || 'no reason').slice(0, 200),
-    };
-  }
-
-  async validate(symbol, context, options = {}) {
-    if (!AI_VALIDATION_ENABLED) {
-      const decision = AIGridValidator.allow();
-      this.rememberDecision(symbol, decision);
-      return decision;
-    }
-
-    const { ignoreMinInterval = false } = options;
-    const cacheKey = this.cacheKey(symbol, context.currentPrice, context.levels);
-    if (!ignoreMinInterval) {
-      const cached = this.getCached(cacheKey);
-      if (cached) return cached;
-    }
-
-    const lastDecision = this.getLastDecisionEntry(symbol);
-    if (!ignoreMinInterval && lastDecision && Date.now() - lastDecision.at < AI_VALIDATION_MIN_INTERVAL_MS) {
-      return lastDecision.value;
-    }
-
-    if (AIGridValidator.rateLimitedUntil > Date.now()) {
-      const stale = this.getLastDecision(symbol, true);
-      if (stale) return stale;
-      return AIGridValidator.block('AI validation skipped: Gemini rate-limit backoff active');
-    }
-
-    try {
-      const ohlcv = await retry(
-        () => this.exchange.fetchOHLCV(symbol, AI_VALIDATION_TIMEFRAME, undefined, AI_VALIDATION_LOOKBACK),
-        Math.max(AI_VALIDATION_RETRIES, 1)
-      );
-      const candleSummary = this.summarizeCandles(ohlcv);
-      const prompt = this.buildPrompt(symbol, context, candleSummary);
-      let decision;
-      for (let attempt = 1; attempt <= AI_VALIDATION_RETRIES + 1; attempt++) {
-        try {
-          const result = await withTimeout(
-            this.model.generateContent(prompt),
-            AI_VALIDATION_TIMEOUT_MS,
-            `Gemini validation timed out after ${AI_VALIDATION_TIMEOUT_MS}ms`
-          );
-          decision = this.parseResponse(result.response.text());
-          this.applyConfidenceRules(decision);
-          if (decision.confidence < AI_MIN_CONFIDENCE) {
-            decision = this.blockAndRemember(
-              symbol,
-              cacheKey,
-              `Low AI confidence: ${decision.reason}`,
-              decision.confidence
-            );
-          } else {
-            this.setCached(cacheKey, decision);
-            this.rememberDecision(symbol, decision);
-          }
-          break;
-        } catch (err) {
-          if (this.isRateLimitError(err)) {
-            AIGridValidator.rateLimitedUntil = Date.now() + AI_VALIDATION_BACKOFF_MS;
-            const stale = this.getLastDecision(symbol, true);
-            if (stale) return stale;
-            throw err;
-          }
-          if (attempt > AI_VALIDATION_RETRIES) throw err;
-          await sleep(1000 * attempt);
-        }
-      }
-
-      // ---- Learning Memory Integration ----
-      if (this.learningMemory && decision) {
-        const factor = this.learningMemory.getAdjustment(symbol);
-        if (factor !== 1.0) {
-          const oldConf = decision.confidence;
-          decision.confidence = Math.min(100, decision.confidence * factor);
-          decision.reason += ` | Memory: factor=${factor.toFixed(2)} (${oldConf.toFixed(1)} → ${decision.confidence.toFixed(1)})`;
-          console.log(`[MEMORY] ${symbol} confidence adjusted by x${factor.toFixed(2)}`);
-
-          // Re‑apply confidence rules after adjustment
-          this.applyConfidenceRules(decision);
-          if (decision.confidence < AI_MIN_CONFIDENCE) {
-            decision = AIGridValidator.block(
-              `Low confidence after memory adjustment: ${decision.reason}`,
-              decision.confidence
-            );
-          }
-          this.setCached(cacheKey, decision);
-          this.rememberDecision(symbol, decision);
-        }
-      }
-      // ------------------------------------------------
-
-      return decision;
-    } catch (err) {
-      const reason = this.isRateLimitError(err)
-        ? `AI validation rate-limited; paused Gemini calls for ${Math.round(AI_VALIDATION_BACKOFF_MS / MINUTE_MS)}m`
-        : `AI validation failed: ${err.message}`;
-      if (this.isRateLimitError(err)) {
-        AIGridValidator.rateLimitedUntil = Date.now() + AI_VALIDATION_BACKOFF_MS;
-      }
-      return this.blockAndRemember(symbol, cacheKey, reason);
-    }
-  }
-}
-
-// ------------------------------
 //  Binance-Style Spot Grid Engine
 // ------------------------------
+// ------------------------------
+//  Smart Grid Range Advisor (Gemini AI)
+// ------------------------------
+//
+// Re-evaluated every cycle (cheap local checks), but only actually calls the
+// Gemini API at most once per GEMINI_RANGE_ADVISOR_MIN_INTERVAL_MS per symbol,
+// to avoid burning API quota/cost on tight INTERVAL_MINUTES.
+//
+// Pipeline per symbol:
+//   1. fetchOHLCV (ccxt)              -> candle history
+//   2. computeIndicators (pure JS)    -> RSI(14), ATR(14), Bollinger Bands(20,2)
+//   3. Gemini API (with googleSearch grounding tool) -> { lower, upper, confidence, reasoning }
+//   4. Sanity clamp vs. current price / max shift % / min confidence
+//   5. Cache result; SpotGridEngine.buildRange() consumes the cached suggestion.
+class TechnicalIndicators {
+  static rsi(closes, period = 14) {
+    if (closes.length < period + 1) return null;
+    let gains = 0;
+    let losses = 0;
+    for (let i = closes.length - period; i < closes.length; i++) {
+      const diff = closes[i] - closes[i - 1];
+      if (diff >= 0) gains += diff;
+      else losses -= diff;
+    }
+    const avgGain = gains / period;
+    const avgLoss = losses / period;
+    if (avgLoss === 0) return 100;
+    const rs = avgGain / avgLoss;
+    return roundNumber(100 - 100 / (1 + rs), 2);
+  }
+
+  static atr(candles, period = 14) {
+    if (candles.length < period + 1) return null;
+    const trueRanges = [];
+    for (let i = 1; i < candles.length; i++) {
+      const [, , high, low] = candles[i];
+      const prevClose = candles[i - 1][4];
+      trueRanges.push(Math.max(
+        high - low,
+        Math.abs(high - prevClose),
+        Math.abs(low - prevClose)
+      ));
+    }
+    const lastN = trueRanges.slice(-period);
+    const atr = lastN.reduce((a, b) => a + b, 0) / lastN.length;
+    return roundNumber(atr, 8);
+  }
+
+  static bollinger(closes, period = 20, stdDevMultiplier = 2) {
+    if (closes.length < period) return null;
+    const window = closes.slice(-period);
+    const mean = window.reduce((a, b) => a + b, 0) / period;
+    const variance = window.reduce((sum, v) => sum + (v - mean) ** 2, 0) / period;
+    const stdDev = Math.sqrt(variance);
+    return {
+      middle: roundNumber(mean, 8),
+      upper: roundNumber(mean + stdDevMultiplier * stdDev, 8),
+      lower: roundNumber(mean - stdDevMultiplier * stdDev, 8),
+      stdDev: roundNumber(stdDev, 8),
+    };
+  }
+
+  static volatilityPct(candles) {
+    if (!candles.length) return null;
+    const closes = candles.map(c => c[4]);
+    const high = Math.max(...closes);
+    const low = Math.min(...closes);
+    if (low <= 0) return null;
+    return roundNumber(((high - low) / low) * 100, 2);
+  }
+}
+
+class GeminiRangeAdvisor {
+  constructor(exchange) {
+    this.exchange = exchange;
+    this.cache = this.loadCache();
+  }
+
+  loadCache() {
+    try {
+      if (fs.existsSync(GEMINI_RANGE_ADVISOR_STATE_PATH)) {
+        return JSON.parse(fs.readFileSync(GEMINI_RANGE_ADVISOR_STATE_PATH, 'utf8')) || {};
+      }
+    } catch (err) {
+      console.warn('[GEMINI] Failed to read advisor cache, starting fresh:', err.message);
+    }
+    return {};
+  }
+
+  async saveCache() {
+    await AtomicFileWriter.write(GEMINI_RANGE_ADVISOR_STATE_PATH, () => JSON.stringify(this.cache, null, 2));
+  }
+
+  isEnabled() {
+    return GEMINI_RANGE_ADVISOR_ENABLED && Boolean(GEMINI_API_KEY);
+  }
+
+  /**
+   * Returns the cached/fresh suggestion for a symbol, or null if disabled,
+   * not yet due for refresh, or the last attempt failed.
+   * This is cheap to call every cycle: it only triggers a real Gemini call
+   * once the per-symbol cooldown has elapsed.
+   */
+  async getSuggestion(symbol, currentPrice) {
+    if (!this.isEnabled()) return null;
+    const entry = this.cache[symbol];
+    const now = Date.now();
+    const due = !entry || (now - (entry.fetchedAt || 0)) >= GEMINI_RANGE_ADVISOR_MIN_INTERVAL_MS;
+    if (!due) return entry?.suggestion || null;
+
+    try {
+      const suggestion = await this.computeSuggestion(symbol, currentPrice);
+      this.cache[symbol] = { fetchedAt: now, suggestion };
+      await this.saveCache();
+      return suggestion;
+    } catch (err) {
+      console.warn(`[GEMINI] ${symbol} range advisor failed, keeping previous suggestion:`, err.message);
+      // Keep stale suggestion (if any) but stamp fetchedAt so we don't hammer
+      // the API on every cycle while it's failing.
+      if (entry) entry.fetchedAt = now;
+      else this.cache[symbol] = { fetchedAt: now, suggestion: null, lastError: err.message };
+      await this.saveCache();
+      return entry?.suggestion || null;
+    }
+  }
+
+  async computeSuggestion(symbol, currentPrice) {
+    const candles = await retry(() => this.exchange.fetchOHLCV(
+      symbol,
+      GEMINI_RANGE_ADVISOR_TIMEFRAME,
+      undefined,
+      GEMINI_RANGE_ADVISOR_CANDLE_LIMIT
+    ));
+    if (!Array.isArray(candles) || candles.length < 20) {
+      throw new Error(`insufficient candle history (${candles?.length || 0})`);
+    }
+    const closes = candles.map(c => c[4]);
+    const indicators = {
+      rsi14: TechnicalIndicators.rsi(closes, 14),
+      atr14: TechnicalIndicators.atr(candles, 14),
+      bollinger20: TechnicalIndicators.bollinger(closes, 20, 2),
+      volatilityPct: TechnicalIndicators.volatilityPct(candles),
+      candleCount: candles.length,
+      timeframe: GEMINI_RANGE_ADVISOR_TIMEFRAME,
+    };
+
+    const raw = await this.callGemini(symbol, currentPrice, indicators);
+    return this.sanitizeSuggestion(symbol, currentPrice, raw);
+  }
+
+  buildPrompt(symbol, currentPrice, indicators) {
+    return `You are a quantitative trading assistant advising a SPOT GRID TRADING bot (buy low / sell high within a fixed price range).
+Grid bots perform best when the price range tightly matches realistic near-term price action (ranging/sideways market), and perform badly if the price breaks far outside the range or if the market is strongly trending.
+
+Symbol: ${symbol}
+Current price: ${currentPrice}
+Timeframe analyzed: ${indicators.timeframe} (${indicators.candleCount} candles)
+RSI(14): ${indicators.rsi14}
+ATR(14): ${indicators.atr14}
+Bollinger Bands(20,2): lower=${indicators.bollinger20?.lower}, middle=${indicators.bollinger20?.middle}, upper=${indicators.bollinger20?.upper}
+Recent range volatility: ${indicators.volatilityPct}%
+
+${GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH
+  ? 'Use Google Search to check for any very recent (last 24-48h) crypto market news or sentiment relevant to this symbol or the broader crypto market that could affect short-term volatility or trend direction.'
+  : 'Do not use external search; rely only on the indicators provided.'}
+
+Based on all of this, recommend a grid trading price range (lower and upper bound) that is appropriate for the next few hours to a day, and assess whether current conditions favor grid trading (ranging) or disfavor it (strongly trending, about to break out).
+
+Minimum range width requirement: the recommended range MUST span at least ${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}% of the current price (i.e. upper - lower >= ${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}% * ${currentPrice}). Do not recommend a narrower range even if volatility appears very low; widen the range as needed to meet this minimum.
+
+Respond with ONLY a single valid JSON object, no markdown fences, no commentary, in exactly this shape:
+{
+  "lower": <number>,
+  "upper": <number>,
+  "confidence": <number between 0 and 1>,
+  "marketCondition": "<RANGING|TRENDING_UP|TRENDING_DOWN|VOLATILE|UNCERTAIN>",
+  "reasoning": "<short 1-2 sentence explanation>"
+}`;
+  }
+
+  async callGemini(symbol, currentPrice, indicators) {
+    const prompt = this.buildPrompt(symbol, currentPrice, indicators);
+    const body = {
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.2 },
+    };
+    if (GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH) {
+      body.tools = [{ googleSearch: {} }];
+    }
+    const payload = JSON.stringify(body);
+    const url = `${GEMINI_API_BASE_URL}/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+
+    const text = await withTimeout(
+      new Promise((resolve, reject) => {
+        const req = https.request(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload),
+          },
+        }, response => {
+          let raw = '';
+          response.setEncoding('utf8');
+          response.on('data', chunk => { raw += chunk; });
+          response.on('end', () => {
+            if (response.statusCode < 200 || response.statusCode >= 300) {
+              reject(new Error(`Gemini API returned HTTP ${response.statusCode}: ${raw.slice(0, 300)}`));
+              return;
+            }
+            try {
+              const json = JSON.parse(raw);
+              const parts = json?.candidates?.[0]?.content?.parts || [];
+              const combined = parts.map(p => p.text || '').join('').trim();
+              if (!combined) {
+                reject(new Error('Gemini API returned an empty response'));
+                return;
+              }
+              resolve(combined);
+            } catch (err) {
+              reject(new Error(`Failed to parse Gemini API response: ${err.message}`));
+            }
+          });
+        });
+        req.once('error', reject);
+        req.end(payload);
+      }),
+      GEMINI_RANGE_ADVISOR_TIMEOUT_MS,
+      `Gemini API call timed out after ${GEMINI_RANGE_ADVISOR_TIMEOUT_MS}ms`
+    );
+
+    const cleaned = text.replace(/```json|```/g, '').trim();
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (err) {
+      throw new Error(`Gemini did not return valid JSON: ${cleaned.slice(0, 200)}`);
+    }
+    return parsed;
+  }
+
+  sanitizeSuggestion(symbol, currentPrice, raw) {
+    const lower = Number(raw?.lower);
+    const upper = Number(raw?.upper);
+    const confidence = Number(raw?.confidence);
+    if (!(lower > 0) || !(upper > 0) || !(lower < upper)) {
+      throw new Error(`Gemini returned an invalid range: lower=${raw?.lower}, upper=${raw?.upper}`);
+    }
+    if (!(confidence >= 0 && confidence <= 1)) {
+      throw new Error(`Gemini returned an invalid confidence: ${raw?.confidence}`);
+    }
+    // Safety clamp: the suggested range must contain the current price and
+    // must not deviate further than GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT from it,
+    // so a hallucinated or out-of-date suggestion can't blow up the grid.
+    const maxLower = currentPrice * (1 - GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT / 100);
+    const maxUpper = currentPrice * (1 + GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT / 100);
+    const clampedLower = Math.max(lower, maxLower);
+    const clampedUpper = Math.min(upper, maxUpper);
+    if (!(clampedLower < currentPrice && clampedUpper > currentPrice)) {
+      throw new Error(
+        `Gemini suggested range ${lower}-${upper} does not bracket current price ${currentPrice} after clamping`
+      );
+    }
+    const suggestion = {
+      lower: roundNumber(clampedLower, 8),
+      upper: roundNumber(clampedUpper, 8),
+      confidence: roundNumber(confidence, 2),
+      marketCondition: typeof raw?.marketCondition === 'string' ? raw.marketCondition : 'UNCERTAIN',
+      reasoning: typeof raw?.reasoning === 'string' ? raw.reasoning.slice(0, 500) : '',
+      wasClamped: clampedLower !== roundNumber(lower, 8) || clampedUpper !== roundNumber(upper, 8),
+    };
+    console.log(
+      `[GEMINI] ${symbol} suggestion: range=${suggestion.lower}-${suggestion.upper} ` +
+      `confidence=${suggestion.confidence} condition=${suggestion.marketCondition}` +
+      `${suggestion.wasClamped ? ' (clamped to safety bounds)' : ''} — ${suggestion.reasoning}`
+    );
+    return suggestion;
+  }
+}
+
 class SpotGridEngine {
   constructor() {
     this.exchange = ExchangeManager.getInstance();
-    this.aiValidator = new AIGridValidator(this.exchange);
     this.state = new GridState();
     this.isRunning = false;
     this.symbolLocks = new Map();
@@ -1122,6 +976,7 @@ class SpotGridEngine {
     this.circuitBreaker = { errors: 0, pausedUntil: 0 };
     // for stuck investment warning deduplication
     this.stuckInvestmentWarned = new Set();
+    this.rangeAdvisor = new GeminiRangeAdvisor(this.exchange);
   }
 
   async init() {
@@ -1201,6 +1056,11 @@ class SpotGridEngine {
     const manualRange = hasManualGridRange();
     let storedLower = Number(symState.config.lower) || 0;
     let storedUpper = Number(symState.config.upper) || 0;
+    // Captured BEFORE storedLower/storedUpper get zeroed out below, so we
+    // still know what the previous range was if a reset happens.
+    const previousLower = storedLower;
+    const previousUpper = storedUpper;
+    let rangeWasReset = false;
 
     if (!manualRange && storedLower > 0 && storedUpper > 0) {
       const stale = this.isStoredRangeStale(symbol, currentPrice, storedLower, storedUpper);
@@ -1209,6 +1069,7 @@ class SpotGridEngine {
           console.warn(`[RANGE] ${symbol} auto-resetting stale range around current price (GRID_STALE_RANGE_AUTO_RESET=true).`);
           storedLower = 0;
           storedUpper = 0;
+          rangeWasReset = true;
         } else {
           console.warn(
             `[RANGE] ${symbol} keeping stale stored range because GRID_STALE_RANGE_AUTO_RESET=false. ` +
@@ -1222,15 +1083,53 @@ class SpotGridEngine {
     const resetAutoRange = !manualRange &&
       GRID_RESET_RANGE_ON_START &&
       !(this.rangeResetSymbols && this.rangeResetSymbols.has(symbol));
+    if (resetAutoRange && previousLower > 0 && previousUpper > 0) {
+      rangeWasReset = true;
+    }
+
+    // Smart Grid Range Advisor: ask Gemini for a recommended range. Only
+    // considered when it's allowed to influence this symbol's range mode
+    // (AUTO_RANGE_ONLY = never override a manual GRID_LOWER/UPPER_PRICE range;
+    // ALWAYS = also override manual ranges) and when confidence clears the bar.
+    const advisorAllowed = GEMINI_RANGE_ADVISOR_APPLY_ON === 'ALWAYS' || !manualRange;
+    let aiSuggestion = null;
+    if (advisorAllowed) {
+      aiSuggestion = await this.rangeAdvisor.getSuggestion(symbol, currentPrice);
+      if (aiSuggestion && aiSuggestion.confidence < GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE) {
+        console.log(
+          `[GEMINI] ${symbol} suggestion confidence ${aiSuggestion.confidence} below threshold ` +
+          `${GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE}; ignoring for this cycle.`
+        );
+        aiSuggestion = null;
+      }
+    }
+
+    const fallbackLower = (resetAutoRange ? 0 : storedLower) || currentPrice * (1 - GRID_RANGE_PCT / 100);
+    const fallbackUpper = (resetAutoRange ? 0 : storedUpper) || currentPrice * (1 + GRID_RANGE_PCT / 100);
     const lower = manualRange
-      ? GRID_LOWER_PRICE
-      : (resetAutoRange ? 0 : storedLower) || currentPrice * (1 - GRID_RANGE_PCT / 100);
+      ? (aiSuggestion ? aiSuggestion.lower : GRID_LOWER_PRICE)
+      : (aiSuggestion ? aiSuggestion.lower : fallbackLower);
     const upper = manualRange
-      ? GRID_UPPER_PRICE
-      : (resetAutoRange ? 0 : storedUpper) || currentPrice * (1 + GRID_RANGE_PCT / 100);
+      ? (aiSuggestion ? aiSuggestion.upper : GRID_UPPER_PRICE)
+      : (aiSuggestion ? aiSuggestion.upper : fallbackUpper);
     if (lower <= 0 || upper <= 0 || lower >= upper) {
       throw new Error(`Invalid grid range. lower=${lower}, upper=${upper}`);
     }
+
+    // Unlike a trailing shift (which is a parallel translation of the same
+    // grid, handled by applyTrailingRangeShift's offset-based remap), a
+    // stale-range auto-reset or GRID_RESET_RANGE_ON_START produces a
+    // brand-new lower/upper with no fixed relationship to the old one. If we
+    // simply swap symState.config without reconciling, any open managed
+    // orders and accumulated lastBuyByLevel records stay indexed against the
+    // OLD grid's level numbering while levels[] is rebuilt from the NEW
+    // range — silently desyncing buy/sell pairing, P&L, and refill prices.
+    // Reconcile BEFORE the new range is persisted.
+    if (rangeWasReset && previousLower > 0 && previousUpper > 0 &&
+        (previousLower !== lower || previousUpper !== upper)) {
+      await this.remapStateAfterRangeReset(symbol, previousLower, previousUpper, lower, upper);
+    }
+
     symState.config = {
       mode: GRID_MODE,
       count: GRID_COUNT,
@@ -1238,6 +1137,12 @@ class SpotGridEngine {
       upper,
       autoRange: !manualRange,
       orderSizeUsdt: this.getOrderSizeUsdt(),
+      aiAdvisor: aiSuggestion ? {
+        confidence: aiSuggestion.confidence,
+        marketCondition: aiSuggestion.marketCondition,
+        reasoning: aiSuggestion.reasoning,
+        appliedAt: new Date().toISOString(),
+      } : undefined,
     };
     if (resetAutoRange) {
       if (!this.rangeResetSymbols) this.rangeResetSymbols = new Set();
@@ -1245,6 +1150,101 @@ class SpotGridEngine {
     }
     await this.state.save();
     return { lower, upper };
+  }
+
+  /**
+   * Reconciles open grid order metadata and accumulated buy records when the
+   * range is RESET to a brand-new lower/upper (stale-range auto-reset or
+   * GRID_RESET_RANGE_ON_START), as opposed to incrementally TRAILED.
+   *
+   * A trailing shift is a parallel translation of the existing grid, so
+   * applyTrailingRangeShift can safely fix it up with a constant level-index
+   * offset. A reset has no such fixed relationship to the old grid (the new
+   * lower/upper/step can be completely different), so old level indexes are
+   * meaningless against the new grid. Instead we:
+   *   1. Cancel any bot-managed open orders — they were placed at OLD-range
+   *      prices and no longer correspond to any level on the NEW grid. Left
+   *      alone, they'd sit there until GRID_CANCEL_OUT_OF_RANGE eventually
+   *      catches them (if even enabled), with state.orders meanwhile
+   *      pointing at stale level indexes.
+   *   2. Re-map each accumulated buy record (lastBuyByLevel) from its OLD
+   *      level index to whichever NEW level its actual average fill price
+   *      lands closest to, merging records that collapse onto the same new
+   *      level (same weighted-average merge used by applyTrailingRangeShift)
+   *      so a future sell fill still finds the correct cost basis at
+   *      levelIndex - 1 on the NEW grid.
+   */
+  async remapStateAfterRangeReset(symbol, oldLower, oldUpper, newLower, newUpper) {
+    const symState = this.state.getSymbol(symbol);
+
+    const cancelResult = await this.cancelGridOrders(symbol, 'range-reset');
+    if (cancelResult.failed.length > 0) {
+      const failedIds = cancelResult.failed.map(f => f.id).join(', ');
+      // Do NOT abort the remap: some orders may still be live on the
+      // exchange. The next reconcile cycle's getManagedOpenOrders/
+      // GRID_CANCEL_OUT_OF_RANGE will catch anything left behind.
+      console.warn(
+        `[RANGE] ${symbol} range-reset: ${cancelResult.failed.length} cancellation(s) failed ` +
+        `(ids: ${failedIds}). Proceeding with remap; stale orders will be cleaned up in the next cycle.`
+      );
+    }
+    if (Object.keys(symState.orders).length > 0) {
+      console.warn(
+        `[RANGE] ${symbol} had ${Object.keys(symState.orders).length} managed order(s) after cancellation; clearing stale local metadata`
+      );
+      symState.orders = {};
+    }
+
+    const oldEntries = Object.entries(symState.lastBuyByLevel);
+    if (oldEntries.length === 0) {
+      await this.state.save();
+      return;
+    }
+
+    let newLevels;
+    try {
+      newLevels = this.buildLevels(newLower, newUpper, symbol);
+    } catch (err) {
+      // New range can't even produce distinct levels for this symbol/tick
+      // size — there is no sane new level to attribute old buys to. Clear
+      // them rather than keep stale data that would corrupt P&L; buildRange
+      // will throw separately on the next call if the range itself stays
+      // invalid, which surfaces the problem to the operator.
+      console.warn(
+        `[RANGE] ${symbol} could not build levels for new range ${roundNumber(newLower)}-${roundNumber(newUpper)} ` +
+        `during remap (${err.message}); clearing ${oldEntries.length} buy record(s) to avoid stale P&L data.`
+      );
+      symState.lastBuyByLevel = {};
+      await this.state.save();
+      return;
+    }
+
+    const remapped = {};
+    for (const [oldIdx, buy] of oldEntries) {
+      const fillPrice = Number(buy.price) || 0;
+      if (!(fillPrice > 0)) continue;
+      const newIdx = this.getLevelIndex(newLevels, fillPrice);
+      const collapsed = Boolean(remapped[newIdx]);
+      remapped[newIdx] = this.mergeBuyRecords(remapped[newIdx], buy, {
+        aggregatedAcrossLevels: collapsed,
+      });
+      console.warn(
+        `[RANGE] ${symbol} remapped buy record from old level ${oldIdx} (avg price ${roundNumber(fillPrice)}) ` +
+        `to new level ${newIdx} after range reset ${roundNumber(oldLower)}-${roundNumber(oldUpper)} -> ` +
+        `${roundNumber(newLower)}-${roundNumber(newUpper)}`
+      );
+    }
+    symState.lastBuyByLevel = remapped;
+    await this.state.save();
+
+    console.log(
+      `[RANGE] ${symbol} range reset: remapped ${oldEntries.length} buy record(s) onto new grid ` +
+      `${roundNumber(newLower)}-${roundNumber(newUpper)}`
+    );
+    await this.sendAlert(
+      `[GRID RANGE RESET] ${symbol} range changed ${roundNumber(oldLower)}-${roundNumber(oldUpper)} -> ` +
+      `${roundNumber(newLower)}-${roundNumber(newUpper)}; remapped ${oldEntries.length} buy record(s)`
+    );
   }
 
   getTrailingUpState(symbol) {
@@ -1259,45 +1259,76 @@ class SpotGridEngine {
     return symState.trailingDown;
   }
 
-  calculateTrailingShift(currentPrice, lower, upper, direction) {
+  calculateTrailingShift(currentPrice, lower, upper, direction, symbol = null) {
+    let shift;
     if (GRID_MODE === 'GEOMETRIC') {
       const ratio = Math.pow(upper / lower, 1 / GRID_COUNT);
       if (!(ratio > 1)) return null;
       if (direction === 'up') {
         if (currentPrice < this.getTrailingUpTrigger(lower, upper)) return null;
         const steps = Math.max(1, Math.floor(Math.log(currentPrice / upper) / Math.log(ratio)));
-        return {
+        shift = {
           steps,
           lower: lower * Math.pow(ratio, steps),
           upper: upper * Math.pow(ratio, steps),
         };
+      } else {
+        if (currentPrice > this.getTrailingDownTrigger(lower, upper)) return null;
+        const steps = Math.max(1, Math.floor(Math.log(lower / currentPrice) / Math.log(ratio)));
+        shift = {
+          steps,
+          lower: lower / Math.pow(ratio, steps),
+          upper: upper / Math.pow(ratio, steps),
+        };
       }
-      if (currentPrice > this.getTrailingDownTrigger(lower, upper)) return null;
-      const steps = Math.max(1, Math.floor(Math.log(lower / currentPrice) / Math.log(ratio)));
-      return {
-        steps,
-        lower: lower / Math.pow(ratio, steps),
-        upper: upper / Math.pow(ratio, steps),
-      };
+    } else {
+      const stepSize = (upper - lower) / GRID_COUNT;
+      if (!(stepSize > 0)) return null;
+      if (direction === 'up') {
+        if (currentPrice < this.getTrailingUpTrigger(lower, upper)) return null;
+        const steps = Math.max(1, Math.floor((currentPrice - upper) / stepSize));
+        shift = {
+          steps,
+          lower: lower + stepSize * steps,
+          upper: upper + stepSize * steps,
+        };
+      } else {
+        if (currentPrice > this.getTrailingDownTrigger(lower, upper)) return null;
+        const steps = Math.max(1, Math.floor((lower - currentPrice) / stepSize));
+        shift = {
+          steps,
+          lower: lower - stepSize * steps,
+          upper: upper - stepSize * steps,
+        };
+      }
     }
-    const stepSize = (upper - lower) / GRID_COUNT;
-    if (!(stepSize > 0)) return null;
-    if (direction === 'up') {
-      if (currentPrice < this.getTrailingUpTrigger(lower, upper)) return null;
-      const steps = Math.max(1, Math.floor((currentPrice - upper) / stepSize));
-      return {
-        steps,
-        lower: lower + stepSize * steps,
-        upper: upper + stepSize * steps,
-      };
+    if (!shift) return null;
+    if (symbol && !this.shiftLevelsAreUsable(symbol, shift, direction)) return null;
+    return shift;
+  }
+
+  // Validates that the range resulting from a trailing shift would still
+  // produce distinct grid price levels once rounded to the exchange's tick
+  // size, for BOTH grid modes. Previously this guard used a raw-step
+  // comparison that only ran for ARITHMETIC mode (rawStep was forced to null
+  // for GEOMETRIC), so a GEOMETRIC grid could trail into a collapsed range
+  // undetected here and only surface later as an uncaught error thrown by
+  // buildLevels()/assertLevelsAreDistinct() during the next reconcile cycle.
+  // Reusing buildLevels()/assertLevelsAreDistinct() directly (instead of a
+  // hand-rolled step/tick-size comparison) also makes the check exact: it
+  // mirrors precisely what will happen when the new range is actually used.
+  shiftLevelsAreUsable(symbol, shift, direction) {
+    try {
+      this.buildLevels(shift.lower, shift.upper, symbol);
+      return true;
+    } catch (err) {
+      console.warn(
+        `[TRAILING] ${symbol} skipping ${direction} shift: resulting range ` +
+        `${roundNumber(shift.lower)}-${roundNumber(shift.upper)} would produce overlapping grid levels ` +
+        `after rounding to exchange tick size (${err.message}). Widen the range or lower GRID_COUNT.`
+      );
+      return false;
     }
-    if (currentPrice > this.getTrailingDownTrigger(lower, upper)) return null;
-    const steps = Math.max(1, Math.floor((lower - currentPrice) / stepSize));
-    return {
-      steps,
-      lower: lower - stepSize * steps,
-      upper: upper - stepSize * steps,
-    };
   }
 
   getTrailingUpTrigger(lower, upper) {
@@ -1458,7 +1489,7 @@ class SpotGridEngine {
     const trailingState = this.getTrailingUpState(symbol);
     const lastShiftAt = Date.parse(trailingState.lastShiftAt || 0);
     if (GRID_TRAILING_UP_COOLDOWN_MS > Date.now() - lastShiftAt) return null;
-    const shift = this.calculateTrailingShift(currentPrice, lower, upper, 'up');
+    const shift = this.calculateTrailingShift(currentPrice, lower, upper, 'up', symbol);
     if (!shift) return null;
     try {
       return await this.applyTrailingRangeShift(symbol, lower, upper, shift, 'up');
@@ -1473,7 +1504,7 @@ class SpotGridEngine {
     const trailingState = this.getTrailingDownState(symbol);
     const lastShiftAt = Date.parse(trailingState.lastShiftAt || 0);
     if (GRID_TRAILING_DOWN_COOLDOWN_MS > Date.now() - lastShiftAt) return null;
-    const shift = this.calculateTrailingShift(currentPrice, lower, upper, 'down');
+    const shift = this.calculateTrailingShift(currentPrice, lower, upper, 'down', symbol);
     if (!shift) return null;
     try {
       return await this.applyTrailingRangeShift(symbol, lower, upper, shift, 'down');
@@ -1483,20 +1514,60 @@ class SpotGridEngine {
     }
   }
 
-  buildLevels(lower, upper) {
+  buildLevels(lower, upper, symbol = null) {
     if (GRID_COUNT < 2) throw new Error('GRID_COUNT minimal 2.');
+    let levels;
     if (GRID_MODE === 'GEOMETRIC') {
       const ratio = Math.pow(upper / lower, 1 / GRID_COUNT);
-      const levels = Array.from({ length: GRID_COUNT + 1 }, (_, i) => lower * Math.pow(ratio, i));
+      levels = Array.from({ length: GRID_COUNT + 1 }, (_, i) => lower * Math.pow(ratio, i));
       levels[0] = lower;
       levels[GRID_COUNT] = upper;
-      return levels;
+    } else {
+      const step = (upper - lower) / GRID_COUNT;
+      levels = Array.from({ length: GRID_COUNT + 1 }, (_, i) => lower + step * i);
+      levels[0] = lower;
+      levels[GRID_COUNT] = upper;
     }
-    const step = (upper - lower) / GRID_COUNT;
-    const levels = Array.from({ length: GRID_COUNT + 1 }, (_, i) => lower + step * i);
-    levels[0] = lower;
-    levels[GRID_COUNT] = upper;
+    if (symbol) this.assertLevelsAreDistinct(symbol, levels, lower, upper);
     return levels;
+  }
+
+  // Guards against grid levels collapsing onto the same exchange-rounded price.
+  // This can happen when the range becomes too narrow relative to GRID_COUNT —
+  // e.g. after several trailing up/down shifts, or a tight AI-suggested range —
+  // causing the raw step size to fall below the exchange's price tick size.
+  // Two distinct level indexes mapping to the same rounded price would otherwise
+  // cause duplicate orders at an identical price, and would break getLevelIndex's
+  // nearest-level matching (ties silently resolve to the lower index).
+  assertLevelsAreDistinct(symbol, levels, lower, upper) {
+    const tickSize = this.getMarketTickSize(symbol);
+    if (!(tickSize > 0)) return;
+    const rounded = levels.map(level => {
+      try {
+        return Number(this.exchange.priceToPrecision(symbol, level));
+      } catch {
+        return level;
+      }
+    });
+    const seen = new Map();
+    const collisions = [];
+    rounded.forEach((price, index) => {
+      if (seen.has(price)) {
+        collisions.push({ a: seen.get(price), b: index, price });
+      } else {
+        seen.set(price, index);
+      }
+    });
+    if (collisions.length > 0) {
+      const detail = collisions
+        .map(c => `level ${c.a} & ${c.b} -> ${c.price}`)
+        .join(', ');
+      throw new Error(
+        `${symbol} grid range ${roundNumber(lower, 8)}-${roundNumber(upper, 8)} with GRID_COUNT=${GRID_COUNT} ` +
+        `produces overlapping price levels after rounding to exchange tick size ${tickSize} (${detail}). ` +
+        `Widen the range, lower GRID_COUNT, or use GRID_MODE=GEOMETRIC for a wide range on a low-priced asset.`
+      );
+    }
   }
 
   getLevelIndex(levels, price) {
@@ -1524,7 +1595,7 @@ class SpotGridEngine {
     ]);
     const currentPrice = Number(ticker.last);
     const { lower, upper } = await this.buildRange(symbol, currentPrice);
-    const levels = this.buildLevels(lower, upper);
+    const levels = this.buildLevels(lower, upper, symbol);
     return { ticker, currentPrice, openOrders, balance, lower, upper, levels };
   }
 
@@ -1716,6 +1787,22 @@ class SpotGridEngine {
     return Number(market?.limits?.cost?.min || 0);
   }
 
+  // Smallest price increment the exchange will accept/round to for this symbol.
+  // Used to detect when grid levels would collapse onto the same price after
+  // rounding (e.g. range too narrow for GRID_COUNT, or after several trailing
+  // shifts / a tight AI-suggested range).
+  getMarketTickSize(symbol) {
+    const market = this.exchange?.markets?.[symbol];
+    const precisionPrice = market?.precision?.price;
+    if (precisionPrice && precisionPrice > 0) {
+      // ccxt may express price precision either as a tick size (e.g. 0.01) or
+      // as a decimal-place count (e.g. 2). Treat values >= 1 as decimal places.
+      return precisionPrice >= 1 ? Math.pow(10, -precisionPrice) : precisionPrice;
+    }
+    const minPriceLimit = Number(market?.limits?.price?.min || 0);
+    return minPriceLimit > 0 ? minPriceLimit : 0.00000001;
+  }
+
   getTradeFeeCurrency(trade) {
     return String(trade.fee?.currency || trade.info?.commissionAsset || '').toUpperCase();
   }
@@ -1780,7 +1867,7 @@ class SpotGridEngine {
     }
   }
 
-  async handleBuyFill(symbol, levels, aiDecision, symState, trade, orderMeta, openOrderIds) {
+  async handleBuyFill(symbol, levels, symState, trade, orderMeta, openOrderIds) {
     const price = Number(trade.price);
     const amount = Number(trade.amount);
     const levelIndex = Number(orderMeta.levelIndex);
@@ -1808,7 +1895,7 @@ class SpotGridEngine {
     await this.forgetOrderIfClosed(symState, trade, openOrderIds);
     await this.state.markProcessedTrade(symbol, this.getTradeId(trade));
     await this.sendAlert(`[GRID BUY] ${symbol} amount=${amount} @ ${price} | sellable=${sellableAmount} | fee=${feeQuote.toFixed(4)} ${quote}`);
-    if (!GRID_REFILL_ON_FILLED || !aiDecision.allowTrading || !aiDecision.allowSell || levelIndex + 1 >= levels.length) return;
+    if (!GRID_REFILL_ON_FILLED || levelIndex + 1 >= levels.length) return;
     const sellLevelIndex = levelIndex + 1;
     const sellPrice = levels[sellLevelIndex];
 
@@ -1862,7 +1949,7 @@ class SpotGridEngine {
     await this.placeLimit(symbol, 'sell', sellLevelIndex, sellPrice, totalSellable);
   }
 
-  async handleSellFill(symbol, levels, aiDecision, symState, trade, orderMeta, openOrderIds) {
+  async handleSellFill(symbol, levels, symState, trade, orderMeta, openOrderIds) {
     const price = Number(trade.price);
     const amount = Number(trade.amount);
     const levelIndex = Number(orderMeta.levelIndex);
@@ -1871,7 +1958,7 @@ class SpotGridEngine {
     if (!buy) {
       console.warn(`[SELL] ${symbol} level ${levelIndex} has no corresponding buy record. Skipping profit calculation.`);
       await this.forgetOrderIfClosed(symState, trade, openOrderIds);
-      this.state.markProcessedTrade(symbol, this.getTradeId(trade));
+      await this.state.markProcessedTrade(symbol, this.getTradeId(trade));
       return;
     }
 
@@ -1886,19 +1973,13 @@ class SpotGridEngine {
     if (!(sellableAtBuy > 0)) {
       console.warn(`[SELL] ${symbol} level ${levelIndex} buy record has zero sellable amount. Skipping profit calculation.`);
       await this.forgetOrderIfClosed(symState, trade, openOrderIds);
-      this.state.markProcessedTrade(symbol, this.getTradeId(trade));
+      await this.state.markProcessedTrade(symbol, this.getTradeId(trade));
       return;
     }
     const proportion = Math.min(amount / sellableAtBuy, 1.0);
     const allocatedBuyCost = buy.totalCostQuote * proportion;
     const allocatedBuyFee = buy.totalFeeQuote * proportion;
     const profit = (proceedsQuote - feeQuote) - (allocatedBuyCost + allocatedBuyFee);
-
-    // ---- Record profit for learning memory ----
-    if (this.aiValidator.learningMemory) {
-      await this.aiValidator.learningMemory.recordProfit(symbol, profit);
-    }
-    // -------------------------------------------
 
     symState.realizedGridProfit += profit;
     this.state.data.totals.realizedGridProfit += profit;
@@ -1921,7 +2002,7 @@ class SpotGridEngine {
     await this.state.markProcessedTrade(symbol, this.getTradeId(trade));
     await this.sendAlert(`[GRID SELL] ${symbol} amount=${amount} @ ${price} | profit=${profit.toFixed(4)} ${quote} | fee=${feeQuote.toFixed(4)} ${quote}`);
 
-    if (GRID_REFILL_ON_FILLED && aiDecision.allowTrading && aiDecision.allowBuy && levelIndex - 1 >= 0) {
+    if (GRID_REFILL_ON_FILLED && levelIndex - 1 >= 0) {
       const buyPrice = levels[levelIndex - 1];
       if (this.hasActiveOrderAtLevel(symState, 'buy', levelIndex - 1)) {
         console.warn(`[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | buy order already active`);
@@ -1982,15 +2063,20 @@ class SpotGridEngine {
       const lastTimestamp = trades[trades.length - 1].timestamp;
       if (trades.length < TRADE_FETCH_LIMIT) break;
       if (lastTimestamp === from) {
-        if (trades.length >= TRADE_FETCH_LIMIT) {
-          console.warn(
-            `[TRADES] ${symbol} pagination stopped: full page (${TRADE_FETCH_LIMIT}) of trades share ` +
-            `timestamp ${lastTimestamp}. Fills within this timestamp bucket may be partially missed. ` +
-            `processedTrade() deduplication handles re-seen fills, but unseen fills in this bucket ` +
-            `will be picked up on the next cycle if they appear in a subsequent fetch window.`
-          );
-        }
-        break;
+        // A full page of trades all share the same millisecond timestamp.
+        // We cannot safely advance `from` to lastTimestamp+1 because there
+        // may be MORE trades at this exact timestamp on the next page that
+        // the exchange hasn't returned yet.  Stop here and do NOT advance
+        // lastTradeTimestamp — the next cycle will re-fetch from this same
+        // timestamp.  processedTrade() deduplication ensures already-seen
+        // fills are skipped without re-processing.
+        console.warn(
+          `[TRADES] ${symbol} pagination stopped: full page (${TRADE_FETCH_LIMIT}) of trades share ` +
+          `timestamp ${lastTimestamp}. Holding lastTradeTimestamp at ${from} so unseen fills ` +
+          `in this timestamp bucket are picked up on the next cycle.`
+        );
+        // Return what we have but DO NOT update lastTradeTimestamp.
+        return allTrades;
       }
       from = lastTimestamp + 1;
       iteration++;
@@ -2004,7 +2090,7 @@ class SpotGridEngine {
     return allTrades;
   }
 
-  async handleFilledTrades(symbol, levels, aiDecision) {
+  async handleFilledTrades(symbol, levels, preloadedOpenOrders = null) {
     const symState = this.state.getSymbol(symbol);
     const quoteAsset = this.getQuoteAsset(symbol);
 
@@ -2022,9 +2108,12 @@ class SpotGridEngine {
         .map(t => this.cacheFeeTokenPrice(t, quoteAsset))
     );
 
+    // Reuse caller-supplied openOrders when available to avoid an extra round-trip.
     const [trades, openOrders] = await Promise.all([
       this.fetchNewTrades(symbol, symState),
-      retry(() => this.exchange.fetchOpenOrders(symbol)),
+      preloadedOpenOrders
+        ? Promise.resolve(preloadedOpenOrders)
+        : retry(() => this.exchange.fetchOpenOrders(symbol)),
     ]);
     const openOrderIds = new Set(openOrders.map(order => String(order.id)));
     for (const trade of trades.sort((a, b) => a.timestamp - b.timestamp)) {
@@ -2058,7 +2147,7 @@ class SpotGridEngine {
             `[SKIP] ${symbol} trade ${id}: order ${trade.order} not in state and ` +
             `no parseable clientOrderId – fill cannot be attributed to a grid level`
           );
-          this.state.markProcessedTrade(symbol, id);
+          await this.state.markProcessedTrade(symbol, id);
           continue;
         }
       }
@@ -2066,12 +2155,12 @@ class SpotGridEngine {
       const orderMeta_final = orderMeta;
       const side = String(trade.side).toLowerCase();
       if (side === 'buy') {
-        await this.handleBuyFill(symbol, levels, aiDecision, symState, trade, orderMeta_final, openOrderIds);
+        await this.handleBuyFill(symbol, levels, symState, trade, orderMeta_final, openOrderIds);
       } else if (side === 'sell') {
-        await this.handleSellFill(symbol, levels, aiDecision, symState, trade, orderMeta_final, openOrderIds);
+        await this.handleSellFill(symbol, levels, symState, trade, orderMeta_final, openOrderIds);
       } else {
         await this.forgetOrderIfClosed(symState, trade, openOrderIds);
-        this.state.markProcessedTrade(symbol, id);
+        await this.state.markProcessedTrade(symbol, id);
       }
     }
     await this.syncManagedOrdersWithExchange(symbol, symState, openOrderIds);
@@ -2137,37 +2226,22 @@ class SpotGridEngine {
     finalContext.trailingUpJustShifted = !!trailedUp;
     finalContext.trailingDownJustShifted = !!trailedDown;
 
-    const aiDecision = canContinue
-      ? await this.aiValidator.validate(
-          symbol,
-          finalContext,
-          { ignoreMinInterval: !!(trailedUp || trailedDown) }
-        )
-      : AIGridValidator.block('Trading halted: stop-loss/take-profit boundary reached');
-    if (AI_VALIDATION_ENABLED) {
-      console.log(
-        `[AI] ${symbol}${trailedUp ? ' trailing-up' : ''}${trailedDown ? ' trailing-down' : ''} ` +
-        `allow=${aiDecision.allowTrading} buy=${aiDecision.allowBuy} sell=${aiDecision.allowSell} ` +
-        `confidence=${aiDecision.confidence.toFixed(1)} | ${aiDecision.reason}`
-      );
-    }
-
     // Always reconcile fills that already happened on the exchange, even while trading
     // is halted by stop-loss/take-profit, so profit, sellable amount, and lastBuyByLevel
     // never go unrecorded.
-    await this.handleFilledTrades(symbol, levels, aiDecision);
+    // Fetch openOrders once here and pass it into handleFilledTrades so we avoid a
+    // redundant exchange round-trip (handleFilledTrades previously fetched its own copy).
+    let freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+    await this.handleFilledTrades(symbol, levels, freshOpenOrders);
 
     if (!canContinue) {
       console.log(`[SYNC] ${symbol} trading halted (stop-loss/take-profit); no new orders will be placed`);
       return;
     }
 
-    // The learning memory profit outcomes are updated immediately via recordProfit in handleSellFill,
-    // so no extra updateOutcomes call needed.
-
-    // Re-read balances after any refill orders so placement loops use fresh funds.
+    // Re-read balances and open orders after fill handling so placement loops use fresh state.
     balance = await retry(() => this.exchange.fetchBalance());
-    let freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+    freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
     let managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
 
     if (GRID_CANCEL_OUT_OF_RANGE) {
@@ -2205,7 +2279,6 @@ class SpotGridEngine {
     let remainingInvestmentUsdt = this.getRemainingInvestmentUsdt(symbol);
 
     for (const level of below) {
-      if (!aiDecision.allowTrading || !aiDecision.allowBuy) break;
       if (this.countActiveOrders(this.state.getSymbol(symbol), 'buy') >= GRID_MAX_ACTIVE_BUY_ORDERS) {
         console.warn(`[SKIP] ${symbol} BUY level=${level.index} | active buy order limit (${GRID_MAX_ACTIVE_BUY_ORDERS}) reached`);
         break;
@@ -2245,7 +2318,6 @@ class SpotGridEngine {
     }
 
     for (const level of above) {
-      if (!aiDecision.allowTrading || !aiDecision.allowSell) break;
       if (this.countActiveOrders(this.state.getSymbol(symbol), 'sell') >= GRID_MAX_ACTIVE_SELL_ORDERS) {
         console.warn(`[SKIP] ${symbol} SELL level=${level.index} | active sell order limit (${GRID_MAX_ACTIVE_SELL_ORDERS}) reached`);
         break;
@@ -2288,13 +2360,24 @@ class SpotGridEngine {
     if (!(GRID_TOTAL_INVESTMENT_USDT > 0)) return 0;
     const symState = this.state.getSymbol(symbol);
     let allocated = 0;
-    for (const buy of Object.values(symState.lastBuyByLevel)) {
+
+    // Sum cost of all filled buys tracked in lastBuyByLevel.
+    const filledLevels = new Set();
+    for (const [levelIndex, buy] of Object.entries(symState.lastBuyByLevel)) {
       allocated += Number(buy.totalCostQuote) || 0;
+      filledLevels.add(Number(levelIndex));
     }
+
+    // Sum cost of open (pending) buy orders, but ONLY for levels that do NOT
+    // already have a filled buy record in lastBuyByLevel.  An order that has
+    // been filled but whose state entry hasn't been cleaned up yet would
+    // otherwise be double-counted against the investment cap.
     for (const order of Object.values(symState.orders)) {
       if (String(order.side).toLowerCase() !== 'buy') continue;
+      if (filledLevels.has(Number(order.levelIndex))) continue; // already counted via lastBuyByLevel
       allocated += (Number(order.amount) || 0) * (Number(order.price) || 0);
     }
+
     return allocated;
   }
 
@@ -2425,9 +2508,10 @@ Trailing Up: ${GRID_TRAILING_UP_ENABLED ? `ON (range-follow trigger, cooldown=${
 Trailing Down: ${GRID_TRAILING_DOWN_ENABLED ? `ON (range-follow trigger, cooldown=${GRID_TRAILING_DOWN_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
 Max Active Orders: buy=${GRID_MAX_ACTIVE_BUY_ORDERS}, sell=${GRID_MAX_ACTIVE_SELL_ORDERS}
 Recreate On Start: ${GRID_RECREATE_ON_START ? 'ON' : 'OFF'}
-AI Validation: ${AI_VALIDATION_ENABLED ? `ON (${GEMINI_MODEL})` : 'OFF'}
 Post Only (Maker): ${GRID_POST_ONLY ? 'ON' : 'OFF'}
-Learning Memory: ${LEARNING_MEMORY_ENABLED ? 'ON' : 'OFF'}
+Smart Range Advisor (Gemini): ${GEMINI_RANGE_ADVISOR_ENABLED
+      ? `ON (model=${GEMINI_MODEL}, min-interval=${GEMINI_RANGE_ADVISOR_MIN_INTERVAL_MS / MINUTE_MS}m, web-search=${GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH ? 'ON' : 'OFF'}, min-range-width=${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}%, applies-to=${GEMINI_RANGE_ADVISOR_APPLY_ON})`
+      : 'OFF'}
 `);
     await this.init();
     while (true) {
@@ -2443,7 +2527,6 @@ async function bootstrap() {
   // Remove any *.tmp files left behind by a previous crashed process before
   // acquiring the lock so they don't interfere with new atomic writes.
   await AtomicFileWriter.cleanupStaleTempFiles(GRID_STATE_PATH);
-  await AtomicFileWriter.cleanupStaleTempFiles(LEARNING_MEMORY_PATH);
 
   const lock = new ProcessLock(BOT_LOCK_PATH);
   lock.acquire();
@@ -2472,12 +2555,12 @@ if (require.main === module) {
 }
 
 module.exports = {
-  AIGridValidator,
   Config,
   GridState,
-  LearningMemory,
   ProcessLock,
   SpotGridEngine,
+  GeminiRangeAdvisor,
+  TechnicalIndicators,
   bootstrap,
   validateRuntimeConfiguration,
 };
