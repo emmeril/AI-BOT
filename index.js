@@ -1195,12 +1195,16 @@ class SpotGridEngine {
     const cancelResult = await this.cancelGridOrders(symbol, 'range-reset');
     if (cancelResult.failed.length > 0) {
       const failedIds = cancelResult.failed.map(f => f.id).join(', ');
-      // Do NOT abort the remap: some orders may still be live on the
-      // exchange. The next reconcile cycle's getManagedOpenOrders/
-      // GRID_CANCEL_OUT_OF_RANGE will catch anything left behind.
-      console.warn(
-        `[RANGE] ${symbol} range-reset: ${cancelResult.failed.length} cancellation(s) failed ` +
-        `(ids: ${failedIds}). Proceeding with remap; stale orders will be cleaned up in the next cycle.`
+      // Abort the remap entirely: some orders are still live on the
+      // exchange. If we clear local state below anyway, those orders become
+      // "ghost" orders — when getManagedOpenOrders() recovers them later via
+      // clientOrderId, the embedded old level index may no longer be valid
+      // against the new grid (different bounds/level count), corrupting
+      // level tracking and P&L. Bail out and let the caller retry the reset
+      // on the next cycle once all orders are confirmed cancelled.
+      throw new Error(
+        `[RANGE] ${symbol} range-reset aborted: ${cancelResult.failed.length} order cancellation(s) ` +
+        `failed (ids: ${failedIds}). Will retry reset next cycle once all orders are cancelled.`
       );
     }
     if (Object.keys(symState.orders).length > 0) {
@@ -2381,19 +2385,17 @@ class SpotGridEngine {
     let allocated = 0;
 
     // Sum cost of all filled buys tracked in lastBuyByLevel.
-    const filledLevels = new Set();
-    for (const [levelIndex, buy] of Object.entries(symState.lastBuyByLevel)) {
+    for (const buy of Object.values(symState.lastBuyByLevel)) {
       allocated += Number(buy.totalCostQuote) || 0;
-      filledLevels.add(Number(levelIndex));
     }
 
-    // Sum cost of open (pending) buy orders, but ONLY for levels that do NOT
-    // already have a filled buy record in lastBuyByLevel.  An order that has
-    // been filled but whose state entry hasn't been cleaned up yet would
-    // otherwise be double-counted against the investment cap.
+    // Sum cost of ALL open (pending) buy orders. A level can simultaneously
+    // have a filled buy record in lastBuyByLevel (e.g. partially sold) AND a
+    // new pending replenishment buy order open at that same level — both
+    // amounts are real allocated capital and must both be counted, or the
+    // investment cap is under-reported and the bot can over-allocate funds.
     for (const order of Object.values(symState.orders)) {
       if (String(order.side).toLowerCase() !== 'buy') continue;
-      if (filledLevels.has(Number(order.levelIndex))) continue; // already counted via lastBuyByLevel
       allocated += (Number(order.amount) || 0) * (Number(order.price) || 0);
     }
 
