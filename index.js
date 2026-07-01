@@ -889,7 +889,13 @@ Respond with ONLY a single valid JSON object, no markdown fences, no commentary,
       body.tools = [{ googleSearch: {} }];
     }
     const payload = JSON.stringify(body);
-    const url = `${GEMINI_API_BASE_URL}/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+    // API key is sent via the x-goog-api-key header instead of the URL query
+    // string. Query strings are commonly written to access logs, reverse-proxy
+    // logs, and error messages (e.g. this function's own HTTP-status error
+    // includes response text, and some infra logs the full request URL) — put
+    // the key in the URL and it can leak into those logs. The header is not
+    // logged by default infra and is Google's documented alternative to ?key=.
+    const url = `${GEMINI_API_BASE_URL}/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
     const text = await withTimeout(
       new Promise((resolve, reject) => {
@@ -898,6 +904,7 @@ Respond with ONLY a single valid JSON object, no markdown fences, no commentary,
           headers: {
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(payload),
+            'x-goog-api-key': GEMINI_API_KEY,
           },
         }, response => {
           let raw = '';
