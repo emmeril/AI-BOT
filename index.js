@@ -188,12 +188,11 @@ const STOP_TRADING = Config.isTrue('STOP_TRADING');
 const KILL_SWITCH_FILE = Config.get('KILL_SWITCH_FILE', 'bot-paused.flag');
 const KILL_SWITCH_PATH = path.resolve(process.cwd(), KILL_SWITCH_FILE);
 
-const FONNTE_ENABLED = Config.boolean('FONNTE_ENABLED', false);
-const FONNTE_TOKEN = Config.get('FONNTE_TOKEN', '');
-const FONNTE_TARGET = Config.get('FONNTE_TARGET', '');
-const FONNTE_API_URL = Config.get('FONNTE_API_URL', 'https://api.fonnte.com/send');
-const FONNTE_COUNTRY_CODE = Config.get('FONNTE_COUNTRY_CODE', '62');
-const FONNTE_TIMEOUT_MS = Config.number('FONNTE_TIMEOUT_MS', 10_000);
+const TELEGRAM_ENABLED = Config.boolean('TELEGRAM_ENABLED', false);
+const TELEGRAM_BOT_TOKEN = Config.get('TELEGRAM_BOT_TOKEN', '');
+const TELEGRAM_CHAT_ID = Config.get('TELEGRAM_CHAT_ID', '');
+const TELEGRAM_API_URL = Config.get('TELEGRAM_API_URL', 'https://api.telegram.org');
+const TELEGRAM_TIMEOUT_MS = Config.number('TELEGRAM_TIMEOUT_MS', 10_000);
 
 const MAX_PROCESSED_TRADE_IDS = 2000;
 const TRADE_FETCH_LIMIT = 100;
@@ -365,7 +364,7 @@ function validateRuntimeConfiguration() {
   requireInteger('GRID_MAX_ACTIVE_BUY_ORDERS', GRID_MAX_ACTIVE_BUY_ORDERS);
   requireInteger('GRID_MAX_ACTIVE_SELL_ORDERS', GRID_MAX_ACTIVE_SELL_ORDERS);
   requireNonNegative('BOT_LOCK_STALE_GRACE_MS', BOT_LOCK_STALE_GRACE_MS);
-  requirePositive('FONNTE_TIMEOUT_MS', FONNTE_TIMEOUT_MS);
+  requirePositive('TELEGRAM_TIMEOUT_MS', TELEGRAM_TIMEOUT_MS);
 
   const hasLower = GRID_LOWER_PRICE > 0;
   const hasUpper = GRID_UPPER_PRICE > 0;
@@ -379,8 +378,8 @@ function validateRuntimeConfiguration() {
   if (!process.env.EXCHANGE_API_KEY || !process.env.EXCHANGE_SECRET) {
     errors.push('EXCHANGE_API_KEY and EXCHANGE_SECRET are required');
   }
-  if (FONNTE_ENABLED && (!FONNTE_TOKEN || !FONNTE_TARGET)) {
-    errors.push('FONNTE_TOKEN and FONNTE_TARGET are required when FONNTE_ENABLED=true');
+  if (TELEGRAM_ENABLED && (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID)) {
+    errors.push('TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required when TELEGRAM_ENABLED=true');
   }
   if (GEMINI_RANGE_ADVISOR_ENABLED) {
     if (!GEMINI_API_KEY) errors.push('GEMINI_API_KEY is required when GEMINI_RANGE_ADVISOR_ENABLED=true');
@@ -2598,32 +2597,33 @@ class SpotGridEngine {
   }
 
   async sendAlert(message) {
-    if (!FONNTE_ENABLED || !FONNTE_TOKEN || !FONNTE_TARGET) return;
+    if (!TELEGRAM_ENABLED || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
     try {
-      const form = new URLSearchParams({
-        target: FONNTE_TARGET,
-        message,
-        countryCode: FONNTE_COUNTRY_CODE,
-      }).toString();
+      const body = JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text: message,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      });
       await new Promise((resolve, reject) => {
-        const req = https.request(FONNTE_API_URL, {
+        const req = https.request(`${TELEGRAM_API_URL}/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
           method: 'POST',
           headers: {
-            Authorization: FONNTE_TOKEN,
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Content-Length': Buffer.byteLength(form),
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body),
           },
-          timeout: FONNTE_TIMEOUT_MS,
+          timeout: TELEGRAM_TIMEOUT_MS,
         }, response => {
-          response.resume();
+          let data = '';
+          response.on('data', chunk => { data += chunk; });
           response.once('end', () => {
             if (response.statusCode >= 200 && response.statusCode < 300) resolve();
-            else reject(new Error(`Fonnte returned HTTP ${response.statusCode}`));
+            else reject(new Error(`Telegram returned HTTP ${response.statusCode}: ${data}`));
           });
         });
-        req.once('timeout', () => req.destroy(new Error(`Fonnte request timed out after ${FONNTE_TIMEOUT_MS}ms`)));
+        req.once('timeout', () => req.destroy(new Error(`Telegram request timed out after ${TELEGRAM_TIMEOUT_MS}ms`)));
         req.once('error', reject);
-        req.end(form);
+        req.end(body);
       });
     } catch (err) {
       console.warn('[ALERT] Failed:', err.message);
