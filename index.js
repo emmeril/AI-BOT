@@ -154,7 +154,6 @@ const GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS = Math.max(
 // re-analyze the same OHLCV data and burn API quota for no new information.
 // Change GEMINI_RANGE_ADVISOR_TIMEFRAME if you want a different call frequency.
 const GEMINI_RANGE_ADVISOR_CANDLE_LIMIT = Config.number('GEMINI_RANGE_ADVISOR_CANDLE_LIMIT', 100);
-const GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH = Config.boolean('GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH', true);
 // How far the AI-recommended range is allowed to differ from the current
 // auto/manual range before being applied; a safety clamp against bad output.
 const GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT = Config.number('GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT', 40);
@@ -742,7 +741,7 @@ class GridState {
 // Pipeline per symbol:
 //   1. fetchOHLCV (ccxt)              -> candle history
 //   2. computeIndicators (pure JS)    -> RSI(14), ATR(14), Bollinger Bands(20,2)
-//   3. Gemini API (with googleSearch grounding tool) -> { lower, upper, confidence, reasoning }
+//   3. Gemini API -> { lower, upper, confidence, reasoning }
 //   4. Sanity clamp vs. current price / max shift % / min confidence
 //   5. Cache result; SpotGridEngine.buildRange() consumes the cached suggestion.
 class TechnicalIndicators {
@@ -916,10 +915,6 @@ Trailing Down Just Shifted: ${trailingDownJustShifted}
 ${trailingUpJustShifted ? 'Do not block solely because price is near the new upper bound immediately after a completed trailing-up shift.' : ''}
 ${trailingDownJustShifted ? 'Do not block solely because price is near the new lower bound immediately after a completed trailing-down shift.' : ''}
 
-${GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH
-  ? 'Use Google Search to check for any very recent (last 24-48h) crypto market news or sentiment relevant to this symbol or the broader crypto market that could affect short-term volatility or trend direction.'
-  : 'Do not use external search; rely only on the indicators provided.'}
-
 Based on all of this, recommend a grid trading price range (lower and upper bound) that is appropriate for the next few hours to a day, and assess whether current conditions favor grid trading (ranging) or disfavor it (strongly trending, about to break out).
 
 Minimum range width requirement: the recommended range MUST span at least ${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}% of the current price (i.e. upper - lower >= ${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}% * ${currentPrice}). Do not recommend a narrower range even if volatility appears very low; widen the range as needed to meet this minimum.
@@ -940,9 +935,6 @@ Respond with ONLY a single valid JSON object, no markdown fences, no commentary,
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig: { temperature: 0.2 },
     };
-    if (GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH) {
-      body.tools = [{ googleSearch: {} }];
-    }
     const payload = JSON.stringify(body);
     // API key is sent via the x-goog-api-key header instead of the URL query
     // string. Query strings are commonly written to access logs, reverse-proxy
@@ -2593,7 +2585,7 @@ Max Active Orders: buy=${GRID_MAX_ACTIVE_BUY_ORDERS}, sell=${GRID_MAX_ACTIVE_SEL
 Recreate On Start: ${GRID_RECREATE_ON_START ? 'ON' : 'OFF'}
 Post Only (Maker): ${GRID_POST_ONLY ? 'ON' : 'OFF'}
 Smart Range Advisor (Gemini): ${GEMINI_RANGE_ADVISOR_ENABLED
-      ? `ON (model=${GEMINI_MODEL}, timeframe=${GEMINI_RANGE_ADVISOR_TIMEFRAME} [candle-close aligned], web-search=${GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH ? 'ON' : 'OFF'}, min-range-width=${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}%, applies-to=${GEMINI_RANGE_ADVISOR_APPLY_ON})`
+      ? `ON (model=${GEMINI_MODEL}, timeframe=${GEMINI_RANGE_ADVISOR_TIMEFRAME} [candle-close aligned], min-range-width=${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}%, applies-to=${GEMINI_RANGE_ADVISOR_APPLY_ON})`
       : 'OFF'}
 `);
     await this.init();
