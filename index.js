@@ -103,13 +103,56 @@ const GEMINI_API_BASE_URL = Config.get(
   'GEMINI_API_BASE_URL',
   'https://generativelanguage.googleapis.com'
 );
-// Minimum gap between actual Gemini calls per symbol, even though the advisor is
-// evaluated every cycle. Protects API quota/cost when INTERVAL_MINUTES is small.
-const GEMINI_RANGE_ADVISOR_MIN_INTERVAL_MS = Math.max(
-  Config.number('GEMINI_RANGE_ADVISOR_MIN_INTERVAL_MINUTES', 15),
-  0
-) * MINUTE_MS;
 const GEMINI_RANGE_ADVISOR_TIMEFRAME = Config.get('GEMINI_RANGE_ADVISOR_TIMEFRAME', '1h');
+
+// Converts a ccxt-style timeframe string (e.g. '1m', '15m', '1h', '4h', '1d')
+// into milliseconds. Prefers ccxt's own parser (so it stays consistent with
+// however the exchange defines each unit) and falls back to a manual regex
+// parser, then to 60 minutes, if that's unavailable or the string is invalid.
+function timeframeToMs(timeframe) {
+  const fallbackMs = 60 * MINUTE_MS;
+  if (typeof timeframe !== 'string' || !timeframe.trim()) return fallbackMs;
+  if (ccxt?.Exchange?.parseTimeframe) {
+    try {
+      const seconds = ccxt.Exchange.parseTimeframe(timeframe);
+      if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+    } catch (err) {
+      // fall through to manual parsing below
+    }
+  }
+  const match = /^(\d+)([mhdwM])$/.exec(timeframe.trim());
+  if (!match) {
+    console.warn(
+      `[CONFIG] Could not parse GEMINI_RANGE_ADVISOR_TIMEFRAME "${timeframe}"; defaulting interval sync to 60m.`
+    );
+    return fallbackMs;
+  }
+  const amount = Number(match[1]);
+  const unitMs = {
+    m: MINUTE_MS,
+    h: 60 * MINUTE_MS,
+    d: 24 * 60 * MINUTE_MS,
+    w: 7 * 24 * 60 * MINUTE_MS,
+    M: 30 * 24 * 60 * MINUTE_MS,
+  }[match[2]];
+  return amount * unitMs;
+}
+
+const GEMINI_RANGE_ADVISOR_TIMEFRAME_MS = timeframeToMs(GEMINI_RANGE_ADVISOR_TIMEFRAME);
+
+// Small grace period after an exchange candle-close boundary before the advisor
+// is allowed to fetch it, in case the exchange takes a moment to finalize/publish
+// the just-closed candle. Doesn't delay by a full cycle - just a few seconds.
+const GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS = Math.max(
+  Config.number('GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_SECONDS', 5),
+  0
+) * 1000;
+
+// Gemini is called at most once per candle close for GEMINI_RANGE_ADVISOR_TIMEFRAME
+// (e.g. once an hour for '1h'), never more often - a new candle for that
+// timeframe only closes once per period, so calling more often would just
+// re-analyze the same OHLCV data and burn API quota for no new information.
+// Change GEMINI_RANGE_ADVISOR_TIMEFRAME if you want a different call frequency.
 const GEMINI_RANGE_ADVISOR_CANDLE_LIMIT = Config.number('GEMINI_RANGE_ADVISOR_CANDLE_LIMIT', 100);
 const GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH = Config.boolean('GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH', true);
 // How far the AI-recommended range is allowed to differ from the current
@@ -333,6 +376,7 @@ function validateRuntimeConfiguration() {
     if (!GEMINI_API_KEY) errors.push('GEMINI_API_KEY is required when GEMINI_RANGE_ADVISOR_ENABLED=true');
     requirePositive('GEMINI_RANGE_ADVISOR_CANDLE_LIMIT', GEMINI_RANGE_ADVISOR_CANDLE_LIMIT);
     requirePositive('GEMINI_RANGE_ADVISOR_TIMEOUT_MS', GEMINI_RANGE_ADVISOR_TIMEOUT_MS);
+    requireNonNegative('GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS', GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS);
     if (!(GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE >= 0 && GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE <= 1)) {
       errors.push('GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE must be between 0 and 1');
     }
@@ -691,8 +735,9 @@ class GridState {
 // ------------------------------
 //
 // Re-evaluated every cycle (cheap local checks), but only actually calls the
-// Gemini API at most once per GEMINI_RANGE_ADVISOR_MIN_INTERVAL_MS per symbol,
-// to avoid burning API quota/cost on tight INTERVAL_MINUTES.
+// Gemini API right after a new exchange candle closes for GEMINI_RANGE_ADVISOR_TIMEFRAME
+// (epoch-aligned boundaries, e.g. on the hour for '1h'), to avoid burning API
+// quota/cost on tight INTERVAL_MINUTES.
 //
 // Pipeline per symbol:
 //   1. fetchOHLCV (ccxt)              -> candle history
@@ -787,26 +832,36 @@ class GeminiRangeAdvisor {
    * Returns the cached/fresh suggestion for a symbol, or null if disabled,
    * not yet due for refresh, or the last attempt failed.
    * This is cheap to call every cycle: it only triggers a real Gemini call
-   * once the per-symbol cooldown has elapsed.
+   * right after a new exchange candle closes for GEMINI_RANGE_ADVISOR_TIMEFRAME
+   * (epoch-aligned, e.g. every hour on the hour for '1h'), instead of on an
+   * arbitrary rolling clock started from whenever the bot happened to boot.
    */
   async getSuggestion(symbol, currentPrice) {
     if (!this.isEnabled()) return null;
     const entry = this.cache[symbol];
     const now = Date.now();
-    const due = !entry || (now - (entry.fetchedAt || 0)) >= GEMINI_RANGE_ADVISOR_MIN_INTERVAL_MS;
+    const currentBoundary = Math.floor(now / GEMINI_RANGE_ADVISOR_TIMEFRAME_MS) * GEMINI_RANGE_ADVISOR_TIMEFRAME_MS;
+    const readyAt = currentBoundary + GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS;
+    const lastBoundary = entry?.candleBoundary ?? -1;
+    const due = now >= readyAt && currentBoundary > lastBoundary;
     if (!due) return entry?.suggestion || null;
 
     try {
       const suggestion = await this.computeSuggestion(symbol, currentPrice);
-      this.cache[symbol] = { fetchedAt: now, suggestion };
+      this.cache[symbol] = { fetchedAt: now, candleBoundary: currentBoundary, suggestion };
       await this.saveCache();
       return suggestion;
     } catch (err) {
       console.warn(`[GEMINI] ${symbol} range advisor failed, keeping previous suggestion:`, err.message);
-      // Keep stale suggestion (if any) but stamp fetchedAt so we don't hammer
-      // the API on every cycle while it's failing.
-      if (entry) entry.fetchedAt = now;
-      else this.cache[symbol] = { fetchedAt: now, suggestion: null, lastError: err.message };
+      // Keep stale suggestion (if any) but stamp the boundary so we don't
+      // hammer the API every cycle while it's failing; retry on the next
+      // candle close instead.
+      if (entry) {
+        entry.fetchedAt = now;
+        entry.candleBoundary = currentBoundary;
+      } else {
+        this.cache[symbol] = { fetchedAt: now, candleBoundary: currentBoundary, suggestion: null, lastError: err.message };
+      }
       await this.saveCache();
       return entry?.suggestion || null;
     }
@@ -2538,7 +2593,7 @@ Max Active Orders: buy=${GRID_MAX_ACTIVE_BUY_ORDERS}, sell=${GRID_MAX_ACTIVE_SEL
 Recreate On Start: ${GRID_RECREATE_ON_START ? 'ON' : 'OFF'}
 Post Only (Maker): ${GRID_POST_ONLY ? 'ON' : 'OFF'}
 Smart Range Advisor (Gemini): ${GEMINI_RANGE_ADVISOR_ENABLED
-      ? `ON (model=${GEMINI_MODEL}, min-interval=${GEMINI_RANGE_ADVISOR_MIN_INTERVAL_MS / MINUTE_MS}m, web-search=${GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH ? 'ON' : 'OFF'}, min-range-width=${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}%, applies-to=${GEMINI_RANGE_ADVISOR_APPLY_ON})`
+      ? `ON (model=${GEMINI_MODEL}, timeframe=${GEMINI_RANGE_ADVISOR_TIMEFRAME} [candle-close aligned], web-search=${GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH ? 'ON' : 'OFF'}, min-range-width=${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}%, applies-to=${GEMINI_RANGE_ADVISOR_APPLY_ON})`
       : 'OFF'}
 `);
     await this.init();
