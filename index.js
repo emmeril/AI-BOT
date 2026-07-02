@@ -4,6 +4,17 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const crypto = require('crypto');
+const { AsyncLocalStorage } = require('async_hooks');
+
+// Tracks, per async call chain, which symbols' locks are currently held by
+// an ancestor call. Used by withSymbolLock() to detect true re-entrancy
+// (a lock holder calling back into withSymbolLock for the same symbol from
+// within its own execution) and fail fast instead of deadlocking. This is
+// distinct from ordinary queueing, where a second *unrelated* call for the
+// same symbol arrives while the first is still running — that call has no
+// entry in this store (it didn't descend from the holder's call chain) and
+// is legitimately queued via the promise chain instead.
+const symbolLockContext = new AsyncLocalStorage();
 
 const TRUE_VALUES = new Set(['true', '1', 'yes', 'on']);
 const FALSE_VALUES = new Set(['false', '0', 'no', 'off']);
@@ -706,9 +717,15 @@ class GridState {
   processedTrade(symbol, id) {
     this.ensureProcessedTradeIndex();
     const scopedId = scopedTradeId(symbol, id);
-    const legacyId = String(id);
-    return this.processedTradeIdSet.has(scopedId) ||
-      this.processedTradeIdSet.has(legacyId);
+    // NOTE: previously this also checked the legacy, unscoped `String(id)`
+    // for backward compatibility with old state files. That was removed:
+    // if two different symbols happen to share a numeric trade id and one
+    // was ever stored as a legacy (unscoped) id, the other symbol's genuine
+    // trade would be wrongly treated as already-processed and silently
+    // skipped (missed fill -> stale P&L / buy records). All trades written
+    // by this version use the scoped id; any legacy ids left over in an old
+    // state file are simply ignored now rather than trusted.
+    return this.processedTradeIdSet.has(scopedId);
   }
 
   markProcessedTrade(symbol, id) {
@@ -1434,9 +1451,28 @@ class SpotGridEngine {
   shiftStoredOrderIndexes(symState, offset) {
     const shiftedOrders = {};
     for (const [orderId, order] of Object.entries(symState.orders)) {
+      const shiftedIndex = Number(order.levelIndex) + offset;
+      const clampedIndex = this.clampBuyLevelIndex(shiftedIndex);
+      if (clampedIndex !== shiftedIndex) {
+        // Without clamping, an order's levelIndex could land outside
+        // [0, GRID_COUNT-1]. That breaks every lookup keyed on levelIndex:
+        // reconcileSymbolUnlocked's activeBuyLevels/activeSellLevels
+        // wouldn't recognize the order (risking a duplicate placed at the
+        // same price), handleSellFill's `levelIndex - 1` buy lookup could
+        // go negative and silently skip profit accounting, and
+        // handleBuyFill's `levelIndex + 1` sell-refill lookup could target
+        // a non-existent level. Clamping keeps the index valid; this order
+        // is pinned to the boundary grid level, so its bookkeeping stays
+        // internally consistent even though its live exchange price sits
+        // just past that level's nominal price after the shift.
+        console.warn(
+          `[TRAILING] Order ${orderId} (${order.side}) level index ${shiftedIndex} out of range ` +
+          `[0, ${GRID_COUNT - 1}] after shift; clamping to boundary level ${clampedIndex}.`
+        );
+      }
       shiftedOrders[orderId] = {
         ...order,
-        levelIndex: Number(order.levelIndex) + offset,
+        levelIndex: clampedIndex,
       };
     }
     symState.orders = shiftedOrders;
@@ -1501,14 +1537,16 @@ class SpotGridEngine {
     const cancelResult = await this.cancelGridOrders(symbol, `trailing-${direction}`);
     if (cancelResult.failed.length > 0) {
       const failedIds = cancelResult.failed.map(f => f.id).join(', ');
-      // Do NOT abort the shift: some orders may still be live on the exchange.
-      // Log clearly and continue – the next reconcile cycle will detect those
-      // orders via getManagedOpenOrders (they'll be in state.orders or carry a
-      // parseable clientOrderId) and either cancel them (GRID_CANCEL_OUT_OF_RANGE)
-      // or adopt them at the new grid level.
-      console.warn(
-        `[TRAILING] ${symbol} trailing-${direction} shift: ${cancelResult.failed.length} cancellation(s) failed ` +
-        `(ids: ${failedIds}). Proceeding with shift; stale orders will be cleaned up in the next cycle.`
+      // Abort the shift entirely: some orders are still live on the exchange
+      // at OLD-range prices. If we shifted local state anyway, those orders'
+      // levelIndex would now point at NEW-grid levels that don't match their
+      // actual price -- if one later fills, profit calc pairs it with the
+      // wrong buy record, corrupting P&L. Mirrors remapStateAfterRangeReset's
+      // strictness: bail out and let the caller retry next cycle once all
+      // orders are confirmed cancelled.
+      throw new Error(
+        `[TRAILING] ${symbol} trailing-${direction} shift aborted: ${cancelResult.failed.length} order ` +
+        `cancellation(s) failed (ids: ${failedIds}). Will retry shift next cycle once all orders are cancelled.`
       );
     }
 
@@ -1518,10 +1556,16 @@ class SpotGridEngine {
       : this.getTrailingDownState(symbol);
     const offset = direction === 'up' ? -shift.steps : shift.steps;
 
+    // cancelGridOrders() already called state.forgetOrder() for every order
+    // it cancelled above, so symState.orders should normally be empty here.
+    // This is a defensive fallback for any order that ended up in local
+    // state without being picked up as "managed" by getManagedOpenOrders --
+    // shiftStoredOrderIndexes() clamps its levelIndex to stay valid.
     const storedOrderCount = Object.keys(symState.orders).length;
     if (storedOrderCount > 0) {
       console.warn(
-        `[TRAILING] ${symbol} had ${storedOrderCount} managed order(s) after cancellation; shifting local metadata`
+        `[TRAILING] ${symbol} had ${storedOrderCount} unexpected leftover order(s) in local state after ` +
+        `full cancellation; shifting (and clamping) their local metadata defensively`
       );
       this.shiftStoredOrderIndexes(symState, offset);
     }
@@ -2257,13 +2301,30 @@ class SpotGridEngine {
   }
 
   async withSymbolLock(symbol, fn) {
+    const holdingSymbols = symbolLockContext.getStore();
+    if (holdingSymbols && holdingSymbols.has(symbol)) {
+      // A call already descended from a withSymbolLock(symbol, ...) that
+      // hasn't released yet is trying to acquire the SAME symbol's lock
+      // again. Proceeding would queue behind a promise that only resolves
+      // after this very call finishes -> permanent deadlock. Fail fast with
+      // a clear diagnostic instead.
+      throw new Error(
+        `[LOCK] Reentrant withSymbolLock('${symbol}') call detected: a function that already ` +
+        `holds this symbol's lock attempted to acquire it again from within its own execution. ` +
+        `This would deadlock. Refactor the calling code so it does not nest withSymbolLock calls ` +
+        `for the same symbol (call the *Unlocked variant directly instead of re-locking).`
+      );
+    }
+
     const previous = this.symbolLocks.get(symbol) || Promise.resolve();
     let release;
     const current = new Promise(resolve => { release = resolve; });
     this.symbolLocks.set(symbol, current);
     try {
       await previous;
-      return await fn();
+      const nextHolding = new Set(holdingSymbols);
+      nextHolding.add(symbol);
+      return await symbolLockContext.run(nextHolding, () => fn());
     } finally {
       release();
       if (this.symbolLocks.get(symbol) === current) this.symbolLocks.delete(symbol);
