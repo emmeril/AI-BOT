@@ -1082,7 +1082,6 @@ class SpotGridEngine {
     // still know what the previous range was if a reset happens.
     const previousLower = storedLower;
     const previousUpper = storedUpper;
-    let rangeWasReset = false;
 
     if (!manualRange && storedLower > 0 && storedUpper > 0) {
       const stale = this.isStoredRangeStale(symbol, currentPrice, storedLower, storedUpper);
@@ -1091,7 +1090,6 @@ class SpotGridEngine {
           console.warn(`[RANGE] ${symbol} auto-resetting stale range around current price (GRID_STALE_RANGE_AUTO_RESET=true).`);
           storedLower = 0;
           storedUpper = 0;
-          rangeWasReset = true;
         } else {
           console.warn(
             `[RANGE] ${symbol} keeping stale stored range because GRID_STALE_RANGE_AUTO_RESET=false. ` +
@@ -1105,9 +1103,6 @@ class SpotGridEngine {
     const resetAutoRange = !manualRange &&
       GRID_RESET_RANGE_ON_START &&
       !(this.rangeResetSymbols && this.rangeResetSymbols.has(symbol));
-    if (resetAutoRange && previousLower > 0 && previousUpper > 0) {
-      rangeWasReset = true;
-    }
 
     // Smart Grid Range Advisor: ask Gemini for a recommended range. Only
     // considered when it's allowed to influence this symbol's range mode
@@ -1140,15 +1135,20 @@ class SpotGridEngine {
 
     // Unlike a trailing shift (which is a parallel translation of the same
     // grid, handled by applyTrailingRangeShift's offset-based remap), a
-    // stale-range auto-reset or GRID_RESET_RANGE_ON_START produces a
-    // brand-new lower/upper with no fixed relationship to the old one. If we
-    // simply swap symState.config without reconciling, any open managed
-    // orders and accumulated lastBuyByLevel records stay indexed against the
-    // OLD grid's level numbering while levels[] is rebuilt from the NEW
-    // range — silently desyncing buy/sell pairing, P&L, and refill prices.
-    // Reconcile BEFORE the new range is persisted.
-    if (rangeWasReset && previousLower > 0 && previousUpper > 0 &&
-        (previousLower !== lower || previousUpper !== upper)) {
+    // stale-range auto-reset, GRID_RESET_RANGE_ON_START, or a fresh Gemini
+    // range-advisor suggestion can all produce a brand-new lower/upper with
+    // no fixed relationship to the old one. If we simply swap symState.config
+    // without reconciling, any open managed orders and accumulated
+    // lastBuyByLevel records stay indexed against the OLD grid's level
+    // numbering while levels[] is rebuilt from the NEW range — silently
+    // desyncing buy/sell pairing, P&L, and refill prices. Reconcile BEFORE
+    // the new range is persisted. Note: this deliberately does NOT gate on
+    // `rangeWasReset` — any actual change to lower/upper (whatever the
+    // cause) needs the same remap, since the level-index-to-price mapping
+    // has no guaranteed relationship to the previous cycle's mapping.
+    const rangeActuallyChanged = previousLower > 0 && previousUpper > 0 &&
+      (previousLower !== lower || previousUpper !== upper);
+    if (rangeActuallyChanged) {
       await this.remapStateAfterRangeReset(symbol, previousLower, previousUpper, lower, upper);
     }
 
