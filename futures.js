@@ -805,7 +805,7 @@ class GridState {
     return this.processedTradeIdSet.has(scopedId);
   }
 
-  markProcessedTrade(symbol, id) {
+  async markProcessedTrade(symbol, id) {
     this.ensureProcessedTradeIndex();
     const scopedId = scopedTradeId(symbol, id);
     if (this.processedTrade(symbol, id)) return false;
@@ -815,7 +815,12 @@ class GridState {
     if (this.data.processedTradeIds.length >= MAX_PROCESSED_TRADE_IDS) {
       this.rebuildProcessedTradeIndex();
     }
-    this.save();
+    // Must be awaited: callers rely on the processed-trade flag being durably
+    // persisted before they consider the fill "handled". Without this, a
+    // crash between marking-in-memory and the write landing on disk causes
+    // the same fill to be re-fetched and re-processed on restart (double
+    // counting of profit/loss and duplicate order refills).
+    await this.save();
     return true;
   }
 }
@@ -1162,7 +1167,12 @@ class FuturesGridEngine {
   // Enables Hedge Mode (dual-side position) on the account, if not already
   // enabled. Binance returns an error ("No need to change position side")
   // when it's already set, which is treated as success rather than a fatal
-  // startup error.
+  // startup error. Every order this engine sends carries an explicit
+  // positionSide, which Binance only accepts in Hedge Mode — if the account
+  // is actually in One-Way Mode, every single order would be rejected and
+  // the bot would spin forever without placing anything. Since that failure
+  // mode can go unnoticed if logs aren't watched, we abort startup instead
+  // of merely warning.
   async setupHedgeMode() {
     if (!this.exchange.setPositionMode) return;
     try {
@@ -1174,10 +1184,10 @@ class FuturesGridEngine {
         console.log('[FUTURES] Hedge mode already enabled.');
         return;
       }
-      console.warn(
-        `[FUTURES] Could not confirm hedge mode is enabled: ${err.message}. ` +
-        `Orders will still be sent with positionSide=${POSITION_SIDE}; if the account ` +
-        `is actually in one-way mode, Binance will reject them.`
+      throw new Error(
+        `Hedge mode required but could not be enabled: ${err.message}. ` +
+        `Refusing to start, since orders are sent with positionSide=${POSITION_SIDE} ` +
+        `and would be rejected by Binance if the account is in one-way mode.`
       );
     }
   }
@@ -2324,7 +2334,16 @@ class FuturesGridEngine {
     }
   }
 
-  async fetchNewTrades(symbol, symState) {
+  // Fetches trades since symState.lastTradeTimestamp. By default this does
+  // NOT advance/persist lastTradeTimestamp itself — that is the caller's
+  // responsibility, and should only happen after the returned trades have
+  // been fully and successfully processed (see handleFilledTrades). This
+  // prevents permanently losing a fill if processing throws partway through:
+  // if the timestamp were advanced here (before processing), a failed trade
+  // would never be re-fetched on the next cycle. Pass
+  // { updateTimestamp: true } to opt back into the old fetch-and-advance
+  // behavior for callers that don't need this guarantee.
+  async fetchNewTrades(symbol, symState, { updateTimestamp = false } = {}) {
     const since = symState.lastTradeTimestamp || 0;
     let allTrades = [];
     let from = since;
@@ -2356,7 +2375,7 @@ class FuturesGridEngine {
       iteration++;
       await sleep(200);
     }
-    if (allTrades.length) {
+    if (updateTimestamp && allTrades.length) {
       const maxTs = Math.max(...allTrades.map(t => t.timestamp));
       symState.lastTradeTimestamp = maxTs;
       await this.state.save();
@@ -2383,8 +2402,12 @@ class FuturesGridEngine {
     );
 
     // Reuse caller-supplied openOrders when available to avoid an extra round-trip.
+    // Note: fetchNewTrades does NOT advance symState.lastTradeTimestamp here.
+    // We only do that below, after every trade below has been processed
+    // without throwing — otherwise a failure partway through this batch
+    // would permanently skip the unprocessed trades on the next cycle.
     const [trades, openOrders] = await Promise.all([
-      this.fetchNewTrades(symbol, symState),
+      this.fetchNewTrades(symbol, symState, { updateTimestamp: false }),
       preloadedOpenOrders
         ? Promise.resolve(preloadedOpenOrders)
         : retry(() => this.exchange.fetchOpenOrders(symbol)),
@@ -2434,6 +2457,19 @@ class FuturesGridEngine {
       } else {
         await this.forgetOrderIfClosed(symState, trade, openOrderIds);
         await this.state.markProcessedTrade(symbol, id);
+      }
+    }
+    // Every trade in this batch was processed without throwing — safe to
+    // advance the watermark now so these trades aren't re-fetched. If any
+    // handler above had thrown, execution would never reach here, so
+    // lastTradeTimestamp stays put and the same trades (including the
+    // failed one) are retried next cycle; already-processed ones among them
+    // are skipped via processedTrade() deduplication.
+    if (trades.length) {
+      const maxTs = Math.max(...trades.map(t => t.timestamp));
+      if (maxTs > (symState.lastTradeTimestamp || 0)) {
+        symState.lastTradeTimestamp = maxTs;
+        await this.state.save();
       }
     }
     await this.syncManagedOrdersWithExchange(symbol, symState, openOrderIds);
