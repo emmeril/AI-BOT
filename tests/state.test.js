@@ -71,21 +71,22 @@ test('GridState.getSymbol replaces an invalid symbol entry', () => {
   assert.equal(symbol.realizedGridProfit, 0);
 });
 
-test('processed trade IDs are scoped by symbol and remain legacy-compatible', () => {
+test('processed trade IDs are scoped by symbol and ignore legacy unscoped IDs', async () => {
   const state = Object.create(GridState.prototype);
   state.data = GridState.createEmpty();
   state.save = () => {};
 
-  state.markProcessedTrade('BTC/USDT', '42');
+  await state.markProcessedTrade('BTC/USDT', '42');
 
   assert.equal(state.processedTrade('BTC/USDT', '42'), true);
   assert.equal(state.processedTrade('ETH/USDT', '42'), false);
 
   state.data.processedTradeIds.push('99');
-  assert.equal(state.processedTrade('BTC/USDT', '99'), true);
+  state.rebuildProcessedTradeIndex();
+  assert.equal(state.processedTrade('BTC/USDT', '99'), false);
 });
 
-test('markProcessedTrade is idempotent', () => {
+test('markProcessedTrade is idempotent', async () => {
   const state = Object.create(GridState.prototype);
   state.data = GridState.createEmpty();
   let saves = 0;
@@ -93,8 +94,8 @@ test('markProcessedTrade is idempotent', () => {
     saves++;
   };
 
-  assert.equal(state.markProcessedTrade('BTC/USDT', '42'), true);
-  assert.equal(state.markProcessedTrade('BTC/USDT', '42'), false);
+  assert.equal(await state.markProcessedTrade('BTC/USDT', '42'), true);
+  assert.equal(await state.markProcessedTrade('BTC/USDT', '42'), false);
   assert.deepEqual(state.data.processedTradeIds, ['BTC/USDT|42']);
   assert.equal(saves, 1);
 });

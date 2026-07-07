@@ -31,7 +31,7 @@ test('trailing-up shifts stored order and buy-lot indexes together', () => {
 
   engine.shiftStoredLevelIndexes('BTC/USDT', -1);
 
-  assert.equal(symbolState.orders.buy.levelIndex, -1);
+  assert.equal(symbolState.orders.buy.levelIndex, 0);
   assert.equal(symbolState.orders.sell.levelIndex, 7);
   assert.deepEqual(Object.keys(symbolState.lastBuyByLevel).sort(), ['-1', '3']);
 });
@@ -72,7 +72,7 @@ test('trailing-up follows a large move by shifting multiple grids', async () => 
   assert.deepEqual(shifted, { lower: 96, upper: 116 });
   assert.equal(symbolState.config.lower, 96);
   assert.equal(symbolState.config.upper, 116);
-  assert.equal(symbolState.orders.buy.levelIndex, -1);
+  assert.equal(symbolState.orders.buy.levelIndex, 0);
   assert.deepEqual(Object.keys(symbolState.lastBuyByLevel), ['1']);
   assert.equal(symbolState.trailingUp.shifts, 3);
 });

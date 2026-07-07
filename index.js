@@ -219,9 +219,6 @@ class AtomicFileWriter {
           throw err;
         }
       })
-      .catch(err => {
-        console.warn(`[FILE] Failed to persist ${filePath}:`, err.message);
-      })
       .finally(() => {
         if (AtomicFileWriter.queues.get(filePath) === current) {
           AtomicFileWriter.queues.delete(filePath);
@@ -2294,7 +2291,16 @@ class SpotGridEngine {
     }
   }
 
-  async fetchNewTrades(symbol, symState) {
+  // Fetches trades since symState.lastTradeTimestamp. By default this does
+  // NOT advance/persist lastTradeTimestamp itself - that is the caller's
+  // responsibility, and should only happen after the returned trades have
+  // been fully and successfully processed (see handleFilledTrades). This
+  // prevents permanently losing a fill if processing throws partway through:
+  // if the timestamp were advanced here (before processing), a failed trade
+  // would never be re-fetched on the next cycle. Pass
+  // { updateTimestamp: true } to opt back into the old fetch-and-advance
+  // behavior for callers that don't need this guarantee.
+  async fetchNewTrades(symbol, symState, { updateTimestamp = false } = {}) {
     const since = symState.lastTradeTimestamp || 0;
     let allTrades = [];
     let from = since;
@@ -2326,7 +2332,7 @@ class SpotGridEngine {
       iteration++;
       await sleep(200);
     }
-    if (allTrades.length) {
+    if (updateTimestamp && allTrades.length) {
       const maxTs = Math.max(...allTrades.map(t => t.timestamp));
       symState.lastTradeTimestamp = maxTs;
       await this.state.save();
@@ -2353,8 +2359,12 @@ class SpotGridEngine {
     );
 
     // Reuse caller-supplied openOrders when available to avoid an extra round-trip.
+    // Note: fetchNewTrades does NOT advance symState.lastTradeTimestamp here.
+    // We only do that below, after every trade below has been processed
+    // without throwing - otherwise a failure partway through this batch
+    // would permanently skip the unprocessed trades on the next cycle.
     const [trades, openOrders] = await Promise.all([
-      this.fetchNewTrades(symbol, symState),
+      this.fetchNewTrades(symbol, symState, { updateTimestamp: false }),
       preloadedOpenOrders
         ? Promise.resolve(preloadedOpenOrders)
         : retry(() => this.exchange.fetchOpenOrders(symbol)),
@@ -2404,6 +2414,19 @@ class SpotGridEngine {
       } else {
         this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
         this.state.markProcessedTradeLocal(symbol, id);
+        await this.state.save();
+      }
+    }
+    // Every trade in this batch was processed without throwing - safe to
+    // advance the watermark now so these trades aren't re-fetched. If any
+    // handler above had thrown, execution would never reach here, so
+    // lastTradeTimestamp stays put and the same trades (including the
+    // failed one) are retried next cycle; already-processed ones among them
+    // are skipped via processedTrade() deduplication.
+    if (trades.length) {
+      const maxTs = Math.max(...trades.map(t => t.timestamp));
+      if (maxTs > (symState.lastTradeTimestamp || 0)) {
+        symState.lastTradeTimestamp = maxTs;
         await this.state.save();
       }
     }
