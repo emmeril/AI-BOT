@@ -759,6 +759,7 @@ class GridState {
         lastTradeTimestamp: 0,
         trailingUp: { shifts: 0, lastShiftAt: null },
         trailingDown: { shifts: 0, lastShiftAt: null },
+        rangeTransition: null,
       };
     }
     const sym = this.data.symbols[symbol];
@@ -769,6 +770,14 @@ class GridState {
     sym.lastTradeTimestamp = numberOrZero(sym.lastTradeTimestamp);
     if (!sym.trailingUp) sym.trailingUp = { shifts: 0, lastShiftAt: null };
     if (!sym.trailingDown) sym.trailingDown = { shifts: 0, lastShiftAt: null };
+    // Marker for an in-flight range reset/trailing shift: set (and persisted)
+    // BEFORE any exchange orders are cancelled, cleared only once the local
+    // remap has been fully computed and persisted in the same save(). If the
+    // process crashes/restarts between those two points, this survives on
+    // disk so the transition can be resumed against the SAME target range
+    // instead of silently leaving cancelled-on-exchange orders paired with
+    // stale local config/lastBuyByLevel. See resumeInterruptedRangeTransition().
+    if (sym.rangeTransition === undefined) sym.rangeTransition = null;
     return sym;
   }
 
@@ -805,7 +814,16 @@ class GridState {
     return this.processedTradeIdSet.has(scopedId);
   }
 
-  async markProcessedTrade(symbol, id) {
+  // Mutates in-memory state only - does NOT persist. Callers that also touch
+  // other parts of symState (buy records, profit totals, order bookkeeping)
+  // in the same handler should call this, make all their other mutations,
+  // and then call save() exactly once at the end. This is what closes the
+  // double-processing hole: previously a trade could be persisted as
+  // "processed" via its own separate save() while a sibling mutation from
+  // the same fill (e.g. the buy record) had not yet been written, or vice
+  // versa, so a crash in between made the fill look unprocessed again on
+  // the next cycle even though part of its effect was already applied.
+  markProcessedTradeLocal(symbol, id) {
     this.ensureProcessedTradeIndex();
     const scopedId = scopedTradeId(symbol, id);
     if (this.processedTrade(symbol, id)) return false;
@@ -815,13 +833,15 @@ class GridState {
     if (this.data.processedTradeIds.length >= MAX_PROCESSED_TRADE_IDS) {
       this.rebuildProcessedTradeIndex();
     }
-    // Must be awaited: callers rely on the processed-trade flag being durably
-    // persisted before they consider the fill "handled". Without this, a
-    // crash between marking-in-memory and the write landing on disk causes
-    // the same fill to be re-fetched and re-processed on restart (double
-    // counting of profit/loss and duplicate order refills).
-    await this.save();
     return true;
+  }
+
+  // Convenience wrapper for call sites that have no other pending mutation
+  // to batch with - mutates and immediately persists by itself.
+  async markProcessedTrade(symbol, id) {
+    const changed = this.markProcessedTradeLocal(symbol, id);
+    if (changed) await this.save();
+    return changed;
   }
 }
 
@@ -1282,8 +1302,54 @@ class FuturesGridEngine {
     return true;
   }
 
+  // Completes a range reset/trailing shift that a previous process
+  // instance started (and persisted a marker for, BEFORE cancelling any
+  // exchange orders) but never finished. Exchange orders for the old range
+  // may already be gone; cancelGridOrders() below is a harmless no-op for
+  // any that already are, and will retry any that turn out not to be.
+  // Re-running the same function that was interrupted, with the exact
+  // bounds recorded in the marker, keeps this a single code path with the
+  // normal reset/shift logic rather than a separate parallel recovery path.
+  async resumeInterruptedRangeTransition(symbol, transition) {
+    console.warn(
+      `[RANGE] ${symbol} resuming ${transition.kind === 'trail' ? 'trailing shift' : 'range reset'} ` +
+      `interrupted by a previous restart: ${roundNumber(transition.oldLower)}-${roundNumber(transition.oldUpper)} -> ` +
+      `${roundNumber(transition.newLower)}-${roundNumber(transition.newUpper)}`
+    );
+    if (transition.kind === 'trail') {
+      const shift = { lower: transition.newLower, upper: transition.newUpper, steps: transition.steps };
+      return await this.applyTrailingRangeShift(
+        symbol, transition.oldLower, transition.oldUpper, shift, transition.direction
+      );
+    }
+    await this.remapStateAfterRangeReset(
+      symbol, transition.oldLower, transition.oldUpper, transition.newLower, transition.newUpper
+    );
+    const symState = this.state.getSymbol(symbol);
+    symState.config = {
+      ...symState.config,
+      lower: transition.newLower,
+      upper: transition.newUpper,
+      autoRange: symState.config.autoRange !== false,
+    };
+    await this.state.save();
+    return { lower: transition.newLower, upper: transition.newUpper };
+  }
+
   async buildRange(symbol, currentPrice) {
     const symState = this.state.getSymbol(symbol);
+
+    // If a previous cycle crashed/restarted after orders were already
+    // cancelled on the exchange for a range reset/trailing shift but before
+    // the local remap finished being persisted, finish that SAME transition
+    // now instead of computing a brand-new range from the current price.
+    // Recomputing fresh here would risk landing on a different range than
+    // the one orders were actually cancelled for, leaving lastBuyByLevel
+    // permanently mismatched against reality.
+    if (symState.rangeTransition) {
+      return await this.resumeInterruptedRangeTransition(symbol, symState.rangeTransition);
+    }
+
     const manualRange = hasManualGridRange();
     let storedLower = Number(symState.config.lower) || 0;
     let storedUpper = Number(symState.config.upper) || 0;
@@ -1408,6 +1474,19 @@ class FuturesGridEngine {
   async remapStateAfterRangeReset(symbol, oldLower, oldUpper, newLower, newUpper) {
     const symState = this.state.getSymbol(symbol);
 
+    // Persist the transition BEFORE the irreversible step (cancelling live
+    // orders on the exchange). If the process dies anywhere after this point
+    // and before the marker is cleared below, resumeInterruptedRangeTransition()
+    // will find it on the next cycle and finish remapping onto this exact
+    // oldLower/oldUpper -> newLower/newUpper pair, instead of buildRange
+    // computing a fresh (possibly different) range while orders that were
+    // already cancelled sit unaccounted for against stale local state.
+    if (!symState.rangeTransition || symState.rangeTransition.kind !== 'reset' ||
+        symState.rangeTransition.newLower !== newLower || symState.rangeTransition.newUpper !== newUpper) {
+      symState.rangeTransition = { kind: 'reset', oldLower, oldUpper, newLower, newUpper };
+      await this.state.save();
+    }
+
     const cancelResult = await this.cancelGridOrders(symbol, 'range-reset');
     if (cancelResult.failed.length > 0) {
       const failedIds = cancelResult.failed.map(f => f.id).join(', ');
@@ -1432,6 +1511,7 @@ class FuturesGridEngine {
 
     const oldEntries = Object.entries(symState.lastBuyByLevel);
     if (oldEntries.length === 0) {
+      symState.rangeTransition = null;
       await this.state.save();
       return;
     }
@@ -1450,6 +1530,7 @@ class FuturesGridEngine {
         `during remap (${err.message}); clearing ${oldEntries.length} buy record(s) to avoid stale P&L data.`
       );
       symState.lastBuyByLevel = {};
+      symState.rangeTransition = null;
       await this.state.save();
       return;
     }
@@ -1470,6 +1551,7 @@ class FuturesGridEngine {
       );
     }
     symState.lastBuyByLevel = remapped;
+    symState.rangeTransition = null;
     await this.state.save();
 
     console.log(
@@ -1679,6 +1761,19 @@ class FuturesGridEngine {
   }
 
   async applyTrailingRangeShift(symbol, lower, upper, shift, direction) {
+    const symStateForMarker = this.state.getSymbol(symbol);
+    // Persist BEFORE the irreversible step (cancelling live orders), same
+    // rationale as remapStateAfterRangeReset: survives a crash so the shift
+    // can be resumed onto this exact target range instead of left half-done.
+    const t = symStateForMarker.rangeTransition;
+    if (!t || t.kind !== 'trail' || t.newLower !== shift.lower || t.newUpper !== shift.upper) {
+      symStateForMarker.rangeTransition = {
+        kind: 'trail', direction, oldLower: lower, oldUpper: upper,
+        newLower: shift.lower, newUpper: shift.upper, steps: shift.steps,
+      };
+      await this.state.save();
+    }
+
     const cancelResult = await this.cancelGridOrders(symbol, `trailing-${direction}`);
     if (cancelResult.failed.length > 0) {
       const failedIds = cancelResult.failed.map(f => f.id).join(', ');
@@ -1736,6 +1831,7 @@ class FuturesGridEngine {
     symState.lastBuyByLevel = cleanedBuys;
     trailingState.shifts += shift.steps;
     trailingState.lastShiftAt = new Date().toISOString();
+    symState.rangeTransition = null;
     await this.state.save();
 
     console.log(
@@ -2175,9 +2271,17 @@ class FuturesGridEngine {
       }
     );
     this.state.data.totals.filledBuys++;
+    this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
+    // All mutations for this fill are applied in-memory first and persisted
+    // together in ONE save(). If the process crashes anywhere above this
+    // line, none of it was written and the fill is reprocessed cleanly next
+    // cycle; if it crashes anywhere below, all of it was written and the
+    // trade is correctly marked processed. There is no window where the buy
+    // record/order bookkeeping is saved but the trade is not (or vice
+    // versa), which is what previously allowed a crash to cause double
+    // counting of the same fill.
+    this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
-    await this.forgetOrderIfClosed(symState, trade, openOrderIds);
-    await this.state.markProcessedTrade(symbol, this.getTradeId(trade));
     await this.sendAlert(`[GRID BUY] ${symbol} amount=${amount} @ ${price} | sellable=${sellableAmount} | fee=${feeQuote.toFixed(4)} ${quote}`);
     if (!GRID_REFILL_ON_FILLED || levelIndex + 1 >= levels.length) return;
     const sellLevelIndex = levelIndex + 1;
@@ -2241,8 +2345,9 @@ class FuturesGridEngine {
     const buy = symState.lastBuyByLevel[buyLevelIndex];
     if (!buy) {
       console.warn(`[SELL] ${symbol} level ${levelIndex} has no corresponding buy record. Skipping profit calculation.`);
-      await this.forgetOrderIfClosed(symState, trade, openOrderIds);
-      await this.state.markProcessedTrade(symbol, this.getTradeId(trade));
+      this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
+      this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
+      await this.state.save();
       return;
     }
 
@@ -2256,8 +2361,9 @@ class FuturesGridEngine {
     const sellableAtBuy = buy.sellableAmount ?? totalBuyAmount;
     if (!(sellableAtBuy > 0)) {
       console.warn(`[SELL] ${symbol} level ${levelIndex} buy record has zero sellable amount. Skipping profit calculation.`);
-      await this.forgetOrderIfClosed(symState, trade, openOrderIds);
-      await this.state.markProcessedTrade(symbol, this.getTradeId(trade));
+      this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
+      this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
+      await this.state.save();
       return;
     }
     const proportion = Math.min(amount / sellableAtBuy, 1.0);
@@ -2268,7 +2374,7 @@ class FuturesGridEngine {
     symState.realizedGridProfit += profit;
     this.state.data.totals.realizedGridProfit += profit;
     this.state.data.totals.filledSells++;
-    await this.forgetOrderIfClosed(symState, trade, openOrderIds);
+    this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
     const remainingSellable = sellableAtBuy - amount;
     if (remainingSellable > 0) {
       const newProportion = remainingSellable / sellableAtBuy;
@@ -2282,8 +2388,11 @@ class FuturesGridEngine {
     } else {
       delete symState.lastBuyByLevel[buyLevelIndex];
     }
+    // Single atomic save for profit totals, buy-record update, order
+    // bookkeeping, and the processed-trade marker - see handleBuyFill for
+    // why this matters (no more partial-fill persistence on crash).
+    this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
-    await this.state.markProcessedTrade(symbol, this.getTradeId(trade));
     await this.sendAlert(`[GRID SELL] ${symbol} amount=${amount} @ ${price} | profit=${profit.toFixed(4)} ${quote} | fee=${feeQuote.toFixed(4)} ${quote}`);
 
     if (GRID_REFILL_ON_FILLED && levelIndex - 1 >= 0) {
@@ -2327,9 +2436,19 @@ class FuturesGridEngine {
     return String(trade.id || `${trade.order}-${trade.timestamp}`);
   }
 
-  async forgetOrderIfClosed(symState, trade, openOrderIds) {
+  // Mutates symState.orders in memory only - no persistence. See
+  // markProcessedTradeLocal() for why: handlers that make several related
+  // mutations for one fill batch them all and save() once at the end.
+  forgetOrderIfClosedLocal(symState, trade, openOrderIds) {
     if (!openOrderIds.has(String(trade.order))) {
       delete symState.orders[String(trade.order)];
+      return true;
+    }
+    return false;
+  }
+
+  async forgetOrderIfClosed(symState, trade, openOrderIds) {
+    if (this.forgetOrderIfClosedLocal(symState, trade, openOrderIds)) {
       await this.state.save();
     }
   }
@@ -2455,8 +2574,9 @@ class FuturesGridEngine {
       } else if (side === 'sell') {
         await this.handleSellFill(symbol, levels, symState, trade, orderMeta, openOrderIds);
       } else {
-        await this.forgetOrderIfClosed(symState, trade, openOrderIds);
-        await this.state.markProcessedTrade(symbol, id);
+        this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
+        this.state.markProcessedTradeLocal(symbol, id);
+        await this.state.save();
       }
     }
     // Every trade in this batch was processed without throwing — safe to
