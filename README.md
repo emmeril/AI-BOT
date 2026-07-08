@@ -2,6 +2,8 @@
 
 Bot grid spot Binance berbasis Node.js. Bot membaca konfigurasi dari `.env`, menyimpan state lokal, memakai lock file agar tidak berjalan ganda, dan dapat berjalan di Binance Spot `testnet` maupun `live`.
 
+Entrypoint runtime ada di `index.js`; implementasi utama sudah dipisah ke modul `src/` agar lebih mudah dirawat.
+
 ## Fitur
 
 - Trading grid spot untuk satu atau banyak pair, contoh `BTC/USDT,ETH/USDT`.
@@ -57,6 +59,21 @@ node index.js
 ```
 
 Saat berjalan, bot akan validasi konfigurasi, membersihkan temp file state, mengambil process lock, lalu sinkronisasi order dan fill setiap `INTERVAL_MINUTES`.
+
+## Struktur Kode
+
+- `index.js`: entrypoint, validasi runtime, process lock, dan bootstrap engine.
+- `src/config.js`: parser `.env`, konstanta runtime, dan validasi konfigurasi.
+- `src/spot-grid-engine.js`: alur utama grid bot dan rekonsiliasi symbol.
+- `src/order-execution.js`: fetch context, recovery managed order, cancel order, dan place limit order.
+- `src/trailing-range.js`: trailing up/down, remap level index, dan helper trailing.
+- `src/telegram-controller.js`: alert, status report, dan command Telegram.
+- `src/grid-state.js`: state grid lokal dan processed trade id.
+- `src/gemini-range-advisor.js`: indikator teknikal dan Smart Range Advisor Gemini.
+- `src/process-lock.js`: lock file satu proses.
+- `src/atomic-file-writer.js`: penulisan state/cache atomik.
+- `src/exchange-manager.js`: singleton Binance spot exchange via ccxt.
+- `src/utils.js`: helper umum.
 
 ## Test
 
@@ -148,10 +165,9 @@ Advisor mengambil candle OHLCV, menghitung indikator teknikal lokal, lalu memint
 - `GEMINI_API_KEY`: API key Gemini. Wajib jika advisor aktif.
 - `GEMINI_MODEL`: model Gemini yang dipakai.
 - `GEMINI_API_BASE_URL`: base URL Gemini API.
-- `GEMINI_RANGE_ADVISOR_MIN_INTERVAL_MINUTES`: jarak minimal antar request Gemini per symbol.
-- `GEMINI_RANGE_ADVISOR_TIMEFRAME`: timeframe OHLCV untuk konteks analisis.
+- `GEMINI_RANGE_ADVISOR_TIMEFRAME`: timeframe OHLCV untuk konteks analisis. Advisor hanya melakukan request setelah candle baru untuk timeframe ini close, bukan berdasarkan interval rolling.
+- `GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_SECONDS`: jeda kecil setelah boundary candle close sebelum advisor mengambil candle, agar exchange punya waktu memfinalisasi candle terbaru.
 - `GEMINI_RANGE_ADVISOR_CANDLE_LIMIT`: jumlah candle yang diambil.
-- `GEMINI_RANGE_ADVISOR_USE_WEB_SEARCH`: izinkan Gemini memakai Google Search untuk konteks market terbaru.
 - `GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT`: batas deviasi rekomendasi dari harga saat ini. Lower dan upper akan di-clamp agar tidak terlalu jauh.
 - `GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT`: lebar minimal rekomendasi sebagai persen dari harga saat ini.
 - `GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE`: confidence minimal `0` sampai `1` agar rekomendasi dipakai.
