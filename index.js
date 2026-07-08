@@ -1435,10 +1435,12 @@ class SpotGridEngine {
       `[RANGE] ${symbol} range reset: remapped ${oldEntries.length} buy record(s) onto new grid ` +
       `${roundNumber(newLower)}-${roundNumber(newUpper)}`
     );
-    await this.sendAlert(
-      `[GRID RANGE RESET] ${symbol} range changed ${roundNumber(oldLower)}-${roundNumber(oldUpper)} -> ` +
-      `${roundNumber(newLower)}-${roundNumber(newUpper)}; remapped ${oldEntries.length} buy record(s)`
-    );
+    await this.sendAlert(this.formatTelegramMessage('Range Reset', [
+      ['Symbol', symbol],
+      ['Old', `${this.formatPrice(oldLower)} - ${this.formatPrice(oldUpper)}`],
+      ['New', `${this.formatPrice(newLower)} - ${this.formatPrice(newUpper)}`],
+      ['Remapped Buys', oldEntries.length],
+    ]));
   }
 
   getTrailingUpState(symbol) {
@@ -1715,10 +1717,12 @@ class SpotGridEngine {
       `[TRAILING ${direction.toUpperCase()}] ${symbol} shifted ${shift.steps} grid(s): ` +
       `${roundNumber(lower)}-${roundNumber(upper)} -> ${roundNumber(shift.lower)}-${roundNumber(shift.upper)}`
     );
-    await this.sendAlert(
-      `[GRID TRAILING ${direction.toUpperCase()}] ${symbol} shifted ${shift.steps} grid(s) to ` +
-      `${roundNumber(shift.lower)}-${roundNumber(shift.upper)}`
-    );
+    await this.sendAlert(this.formatTelegramMessage(`Trailing ${direction.toUpperCase()}`, [
+      ['Symbol', symbol],
+      ['Shift', `${shift.steps} grid(s)`],
+      ['Old Range', `${this.formatPrice(lower)} - ${this.formatPrice(upper)}`],
+      ['New Range', `${this.formatPrice(shift.lower)} - ${this.formatPrice(shift.upper)}`],
+    ]));
 
     return { lower: shift.lower, upper: shift.upper };
   }
@@ -2141,7 +2145,14 @@ class SpotGridEngine {
     // counting of the same fill.
     this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
-    await this.sendAlert(`[GRID BUY] ${symbol} amount=${amount} @ ${price} | sellable=${sellableAmount} | fee=${feeQuote.toFixed(4)} ${quote}`);
+    await this.sendAlert(this.formatTelegramMessage('Buy Filled', [
+      ['Symbol', symbol],
+      ['Level', levelIndex],
+      ['Price', this.formatPrice(price)],
+      ['Amount', this.formatAmount(amount)],
+      ['Sellable', this.formatAmount(sellableAmount)],
+      ['Fee', `${this.formatMoney(feeQuote)} ${quote}`],
+    ]));
     if (!GRID_REFILL_ON_FILLED || levelIndex + 1 >= levels.length) return;
     const sellLevelIndex = levelIndex + 1;
     const sellPrice = levels[sellLevelIndex];
@@ -2252,7 +2263,14 @@ class SpotGridEngine {
     // why this matters (no more partial-fill persistence on crash).
     this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
-    await this.sendAlert(`[GRID SELL] ${symbol} amount=${amount} @ ${price} | profit=${profit.toFixed(4)} ${quote} | fee=${feeQuote.toFixed(4)} ${quote}`);
+    await this.sendAlert(this.formatTelegramMessage('Sell Filled', [
+      ['Symbol', symbol],
+      ['Level', levelIndex],
+      ['Price', this.formatPrice(price)],
+      ['Amount', this.formatAmount(amount)],
+      ['Profit', `${this.formatMoney(profit)} ${quote}`],
+      ['Fee', `${this.formatMoney(feeQuote)} ${quote}`],
+    ]));
 
     if (GRID_REFILL_ON_FILLED && levelIndex - 1 >= 0) {
       const buyPrice = levels[levelIndex - 1];
@@ -2457,12 +2475,22 @@ class SpotGridEngine {
   async enforceRangeExits(symbol, currentPrice) {
     if (STOP_LOSS_PRICE > 0 && currentPrice <= STOP_LOSS_PRICE) {
       await this.cancelGridOrders(symbol, `stop-loss ${STOP_LOSS_PRICE}`);
-      await this.sendAlert(`[GRID STOP] ${symbol} price=${currentPrice} <= ${STOP_LOSS_PRICE}`);
+      await this.sendAlert(this.formatTelegramMessage('Stop Loss', [
+        ['Symbol', symbol],
+        ['Price', this.formatPrice(currentPrice)],
+        ['Stop', this.formatPrice(STOP_LOSS_PRICE)],
+        ['Action', 'grid orders cancelled'],
+      ]));
       return false;
     }
     if (TAKE_PROFIT_PRICE > 0 && currentPrice >= TAKE_PROFIT_PRICE) {
       await this.cancelGridOrders(symbol, `take-profit ${TAKE_PROFIT_PRICE}`);
-      await this.sendAlert(`[GRID TAKE PROFIT] ${symbol} price=${currentPrice} >= ${TAKE_PROFIT_PRICE}`);
+      await this.sendAlert(this.formatTelegramMessage('Take Profit', [
+        ['Symbol', symbol],
+        ['Price', this.formatPrice(currentPrice)],
+        ['Target', this.formatPrice(TAKE_PROFIT_PRICE)],
+        ['Action', 'grid orders cancelled'],
+      ]));
       return false;
     }
     return true;
@@ -2804,8 +2832,27 @@ class SpotGridEngine {
   }
 
   formatPrice(value) {
+    const abs = Math.abs(Number(value));
+    const digits = abs >= 100 ? 2 : abs >= 1 ? 4 : 8;
+    const rounded = roundNumber(value, digits);
+    return rounded === null ? 'n/a' : String(rounded);
+  }
+
+  formatAmount(value) {
     const rounded = roundNumber(value, 8);
     return rounded === null ? 'n/a' : String(rounded);
+  }
+
+  formatMoney(value) {
+    const rounded = roundNumber(value, 4);
+    return rounded === null ? 'n/a' : String(rounded);
+  }
+
+  formatTelegramMessage(title, rows = []) {
+    const body = rows
+      .filter(([, value]) => value !== undefined && value !== null && value !== '')
+      .map(([label, value]) => `${label}: ${value}`);
+    return [`[${title}]`, ...body].join('\n');
   }
 
   getPauseStatusText() {
@@ -2835,34 +2882,38 @@ class SpotGridEngine {
       ? `${this.formatPrice(lower)}-${this.formatPrice(upper)}`
       : 'not initialized';
     return [
-      `${symbol}`,
-      `price=${this.formatPrice(ticker.last)}`,
-      `range=${rangeText}`,
-      `orders b/s=${buyCount}/${sellCount}`,
-      `free ${quote}=${this.formatPrice(this.getQuoteFree(balance, symbol))}`,
-      `free ${base}=${this.formatPrice(this.getBaseFree(balance, symbol))}`,
-      `profit=${this.formatPrice(symState.realizedGridProfit)} ${quote}`,
-    ].join(' | ');
+      '',
+      symbol,
+      `Price: ${this.formatPrice(ticker.last)}`,
+      `Range: ${rangeText}`,
+      `Orders: ${buyCount} buy / ${sellCount} sell`,
+      `Free ${quote}: ${this.formatMoney(this.getQuoteFree(balance, symbol))}`,
+      `Free ${base}: ${this.formatAmount(this.getBaseFree(balance, symbol))}`,
+      `Profit: ${this.formatMoney(symState.realizedGridProfit)} ${quote}`,
+    ].join('\n');
   }
 
   async buildStatusMessage() {
     const lines = [
-      '[GRID STATUS]',
-      `mode=${EXCHANGE_MODE} | pause=${this.getPauseStatusText()} | circuit=${this.circuitAllows() ? 'OK' : 'PAUSED'}`,
-      `totals buys=${this.state.data.totals.filledBuys} sells=${this.state.data.totals.filledSells} profit=${this.formatPrice(this.state.data.totals.realizedGridProfit)}`,
+      '[Status]',
+      `Mode: ${EXCHANGE_MODE}`,
+      `Trading: ${this.getPauseStatusText()}`,
+      `Circuit: ${this.circuitAllows() ? 'OK' : 'PAUSED'}`,
+      `Filled: ${this.state.data.totals.filledBuys} buy / ${this.state.data.totals.filledSells} sell`,
+      `Total Profit: ${this.formatMoney(this.state.data.totals.realizedGridProfit)}`,
     ];
     for (const symbol of SYMBOLS) {
       try {
         lines.push(await this.buildSymbolStatusLine(symbol));
       } catch (err) {
-        lines.push(`${symbol} | status error=${err.message}`);
+        lines.push('', symbol, `Status Error: ${err.message}`);
       }
     }
     return lines.join('\n').slice(0, 3900);
   }
 
   async buildOrdersMessage() {
-    const lines = ['[GRID ORDERS]'];
+    const lines = ['[Orders]'];
     for (const symbol of SYMBOLS) {
       try {
         const symState = this.state.getSymbol(symbol);
@@ -2873,14 +2924,14 @@ class SpotGridEngine {
         );
         const buys = managedOrders.filter(order => String(order.side).toLowerCase() === 'buy');
         const sells = managedOrders.filter(order => String(order.side).toLowerCase() === 'sell');
-        lines.push(`${symbol} active buy=${buys.length} sell=${sells.length} tracked=${Object.keys(symState.orders).length}`);
+        lines.push('', symbol, `Active: ${buys.length} buy / ${sells.length} sell`, `Tracked: ${Object.keys(symState.orders).length}`);
         for (const order of managedOrders.slice(0, 12)) {
           const level = this.getBotOrderLevel(order) ?? symState.orders[String(order.id)]?.levelIndex ?? '?';
-          lines.push(`- ${String(order.side).toUpperCase()} level=${level} amount=${this.formatPrice(order.amount)} price=${this.formatPrice(order.price)}`);
+          lines.push(`${String(order.side).toUpperCase()} L${level} | ${this.formatAmount(order.amount)} @ ${this.formatPrice(order.price)}`);
         }
-        if (managedOrders.length > 12) lines.push(`- ... ${managedOrders.length - 12} more`);
+        if (managedOrders.length > 12) lines.push(`... ${managedOrders.length - 12} more`);
       } catch (err) {
-        lines.push(`${symbol} | orders error=${err.message}`);
+        lines.push('', symbol, `Orders Error: ${err.message}`);
       }
     }
     return lines.join('\n').slice(0, 3900);
@@ -2899,11 +2950,10 @@ class SpotGridEngine {
     }
     if (command === '/pause') {
       await fs.promises.writeFile(KILL_SWITCH_PATH, `paused by telegram at ${new Date().toISOString()}\n`);
-      await this.sendAlert(
-        KILL_SWITCH_ENABLED
-          ? `[GRID PAUSED] Created ${KILL_SWITCH_FILE}. New trading cycles are paused.`
-          : `[GRID PAUSE REQUESTED] Created ${KILL_SWITCH_FILE}, but KILL_SWITCH_ENABLED=false so it will not pause trading until enabled.`
-      );
+      await this.sendAlert(this.formatTelegramMessage(KILL_SWITCH_ENABLED ? 'Paused' : 'Pause Requested', [
+        ['File', KILL_SWITCH_FILE],
+        ['Trading', KILL_SWITCH_ENABLED ? 'new orders paused' : 'not paused because KILL_SWITCH_ENABLED=false'],
+      ]));
       return;
     }
     if (command === '/resume') {
@@ -2912,11 +2962,20 @@ class SpotGridEngine {
       } catch (err) {
         if (err.code !== 'ENOENT') throw err;
       }
-      await this.sendAlert('[GRID RESUMED] Kill-switch file removed.');
+      await this.sendAlert(this.formatTelegramMessage('Resumed', [
+        ['File', `${KILL_SWITCH_FILE} removed`],
+        ['Trading', STOP_TRADING ? 'still stopped by STOP_TRADING=true' : 'active'],
+      ]));
       return;
     }
     if (command === '/help' || command === '/start') {
-      await this.sendAlert('Commands: /status, /orders, /pause, /resume');
+      await this.sendAlert([
+        '[Commands]',
+        '/status - bot summary',
+        '/orders - active grid orders',
+        '/pause - create kill-switch file',
+        '/resume - remove kill-switch file',
+      ].join('\n'));
     }
   }
 
