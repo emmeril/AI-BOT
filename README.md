@@ -12,7 +12,7 @@ Bot grid spot Binance berbasis Node.js. Bot membaca konfigurasi dari `.env`, men
 - Refill order setelah fill, cancel order out-of-range, post-only maker order, dan recovery order dari `clientOrderId`.
 - Stop trading manual, kill switch file, stop-loss, dan take-profit.
 - Smart Range Advisor opsional via Gemini untuk menyarankan range grid.
-- Notifikasi WhatsApp opsional via Fonnte.
+- Notifikasi, status berkala, dan command operasional via Telegram.
 
 ## Kebutuhan
 
@@ -161,19 +161,31 @@ Advisor mengambil candle OHLCV, menghitung indikator teknikal lokal, lalu memint
 
 Jika advisor nonaktif, gagal, atau confidence di bawah threshold, bot tetap memakai range manual atau auto range lokal.
 
-## Alert Fonnte
+## Telegram Alert, Status, Dan Command
 
 Aktifkan dengan:
 
 ```env
-FONNTE_ENABLED=true
-FONNTE_TOKEN=your_fonnte_token
-FONNTE_TARGET=628xxxxxxxxxx
+TELEGRAM_ENABLED=true
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
 ```
 
-- `FONNTE_API_URL`: endpoint Fonnte.
-- `FONNTE_COUNTRY_CODE`: kode negara target.
-- `FONNTE_TIMEOUT_MS`: timeout request alert.
+- `TELEGRAM_API_URL`: endpoint Telegram API.
+- `TELEGRAM_TIMEOUT_MS`: timeout request Telegram.
+- `TELEGRAM_STATUS_REPORT_ENABLED`: kirim laporan status berkala.
+- `TELEGRAM_STATUS_REPORT_INTERVAL_MINUTES`: jarak antar laporan status.
+- `TELEGRAM_COMMANDS_ENABLED`: aktifkan command dari chat Telegram yang sama dengan `TELEGRAM_CHAT_ID`.
+- `TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS`: interval polling command.
+- `TELEGRAM_COMMANDS_SKIP_OLD_UPDATES`: abaikan command lama saat bot baru start.
+
+Command yang tersedia:
+
+- `/status`: ringkasan mode, pause/circuit, total fill/profit, harga, range, order aktif, dan saldo free per symbol.
+- `/orders`: jumlah dan daftar ringkas order grid aktif.
+- `/pause`: membuat `KILL_SWITCH_FILE`. Agar benar-benar menghentikan new trading cycle, set `KILL_SWITCH_ENABLED=true`.
+- `/resume`: menghapus `KILL_SWITCH_FILE`.
+- `/help`: daftar command.
 
 ## Catatan Operasional
 

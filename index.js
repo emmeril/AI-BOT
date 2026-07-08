@@ -193,6 +193,17 @@ const TELEGRAM_BOT_TOKEN = Config.get('TELEGRAM_BOT_TOKEN', '');
 const TELEGRAM_CHAT_ID = Config.get('TELEGRAM_CHAT_ID', '');
 const TELEGRAM_API_URL = Config.get('TELEGRAM_API_URL', 'https://api.telegram.org');
 const TELEGRAM_TIMEOUT_MS = Config.number('TELEGRAM_TIMEOUT_MS', 10_000);
+const TELEGRAM_STATUS_REPORT_ENABLED = Config.boolean('TELEGRAM_STATUS_REPORT_ENABLED', false);
+const TELEGRAM_STATUS_REPORT_INTERVAL_MS = Math.max(
+  Config.number('TELEGRAM_STATUS_REPORT_INTERVAL_MINUTES', 60),
+  1
+) * MINUTE_MS;
+const TELEGRAM_COMMANDS_ENABLED = Config.boolean('TELEGRAM_COMMANDS_ENABLED', TELEGRAM_ENABLED);
+const TELEGRAM_COMMAND_POLL_INTERVAL_MS = Math.max(
+  Config.number('TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS', 5),
+  1
+) * 1000;
+const TELEGRAM_COMMANDS_SKIP_OLD_UPDATES = Config.boolean('TELEGRAM_COMMANDS_SKIP_OLD_UPDATES', true);
 
 const MAX_PROCESSED_TRADE_IDS = 2000;
 const TRADE_FETCH_LIMIT = 100;
@@ -362,6 +373,8 @@ function validateRuntimeConfiguration() {
   requireInteger('GRID_MAX_ACTIVE_SELL_ORDERS', GRID_MAX_ACTIVE_SELL_ORDERS);
   requireNonNegative('BOT_LOCK_STALE_GRACE_MS', BOT_LOCK_STALE_GRACE_MS);
   requirePositive('TELEGRAM_TIMEOUT_MS', TELEGRAM_TIMEOUT_MS);
+  requirePositive('TELEGRAM_STATUS_REPORT_INTERVAL_MS', TELEGRAM_STATUS_REPORT_INTERVAL_MS);
+  requirePositive('TELEGRAM_COMMAND_POLL_INTERVAL_MS', TELEGRAM_COMMAND_POLL_INTERVAL_MS);
 
   const hasLower = GRID_LOWER_PRICE > 0;
   const hasUpper = GRID_UPPER_PRICE > 0;
@@ -377,6 +390,9 @@ function validateRuntimeConfiguration() {
   }
   if (TELEGRAM_ENABLED && (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID)) {
     errors.push('TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required when TELEGRAM_ENABLED=true');
+  }
+  if ((TELEGRAM_STATUS_REPORT_ENABLED || TELEGRAM_COMMANDS_ENABLED) && !TELEGRAM_ENABLED) {
+    errors.push('TELEGRAM_ENABLED=true is required when Telegram status reports or commands are enabled');
   }
   if (GEMINI_RANGE_ADVISOR_ENABLED) {
     if (!GEMINI_API_KEY) errors.push('GEMINI_API_KEY is required when GEMINI_RANGE_ADVISOR_ENABLED=true');
@@ -1081,6 +1097,11 @@ class SpotGridEngine {
     this.pendingOrderLevels = new Set();
     this.rangeResetSymbols = new Set();
     this.circuitBreaker = { errors: 0, pausedUntil: 0 };
+    this.telegramUpdateOffset = null;
+    this.telegramPolling = false;
+    this.telegramStatusReporting = false;
+    this.telegramCommandTimer = null;
+    this.telegramStatusTimer = null;
     // for stuck investment warning deduplication
     this.stuckInvestmentWarned = new Set();
     this.rangeAdvisor = new GeminiRangeAdvisor(this.exchange);
@@ -2744,34 +2765,230 @@ class SpotGridEngine {
     }
   }
 
-  async sendAlert(message) {
-    if (!TELEGRAM_ENABLED || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+  telegramReady() {
+    return TELEGRAM_ENABLED && TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID;
+  }
+
+  async telegramRequest(method, payload = null, query = null) {
+    if (!this.telegramReady()) return null;
+    const qs = query ? `?${new URLSearchParams(query).toString()}` : '';
+    const body = payload ? JSON.stringify(payload) : '';
+    return await new Promise((resolve, reject) => {
+      const req = https.request(`${TELEGRAM_API_URL}/bot${TELEGRAM_BOT_TOKEN}/${method}${qs}`, {
+        method: payload ? 'POST' : 'GET',
+        headers: payload ? {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        } : undefined,
+        timeout: TELEGRAM_TIMEOUT_MS,
+      }, response => {
+        let data = '';
+        response.on('data', chunk => { data += chunk; });
+        response.once('end', () => {
+          if (response.statusCode < 200 || response.statusCode >= 300) {
+            reject(new Error(`Telegram ${method} returned HTTP ${response.statusCode}: ${data}`));
+            return;
+          }
+          try {
+            resolve(data ? JSON.parse(data) : null);
+          } catch (err) {
+            reject(new Error(`Telegram ${method} returned invalid JSON: ${err.message}`));
+          }
+        });
+      });
+      req.once('timeout', () => req.destroy(new Error(`Telegram request timed out after ${TELEGRAM_TIMEOUT_MS}ms`)));
+      req.once('error', reject);
+      if (body) req.write(body);
+      req.end();
+    });
+  }
+
+  formatPrice(value) {
+    const rounded = roundNumber(value, 8);
+    return rounded === null ? 'n/a' : String(rounded);
+  }
+
+  getPauseStatusText() {
+    if (STOP_TRADING) return 'STOP_TRADING=true';
+    if (!KILL_SWITCH_ENABLED) return 'kill switch disabled';
+    return killSwitchActive() ? `paused (${KILL_SWITCH_FILE})` : 'active';
+  }
+
+  async buildSymbolStatusLine(symbol) {
+    const symState = this.state.getSymbol(symbol);
+    const [ticker, openOrders, balance] = await Promise.all([
+      retry(() => this.exchange.fetchTicker(symbol)),
+      retry(() => this.exchange.fetchOpenOrders(symbol)),
+      retry(() => this.exchange.fetchBalance()),
+    ]);
+    const managedIds = new Set(Object.keys(symState.orders));
+    const managedOrders = openOrders.filter(order =>
+      managedIds.has(String(order.id)) || this.getBotOrderLevel(order) !== null
+    );
+    const buyCount = managedOrders.filter(order => String(order.side).toLowerCase() === 'buy').length;
+    const sellCount = managedOrders.filter(order => String(order.side).toLowerCase() === 'sell').length;
+    const base = this.getBaseAsset(symbol);
+    const quote = this.getQuoteAsset(symbol);
+    const lower = Number(symState.config?.lower) || 0;
+    const upper = Number(symState.config?.upper) || 0;
+    const rangeText = lower > 0 && upper > 0
+      ? `${this.formatPrice(lower)}-${this.formatPrice(upper)}`
+      : 'not initialized';
+    return [
+      `${symbol}`,
+      `price=${this.formatPrice(ticker.last)}`,
+      `range=${rangeText}`,
+      `orders b/s=${buyCount}/${sellCount}`,
+      `free ${quote}=${this.formatPrice(this.getQuoteFree(balance, symbol))}`,
+      `free ${base}=${this.formatPrice(this.getBaseFree(balance, symbol))}`,
+      `profit=${this.formatPrice(symState.realizedGridProfit)} ${quote}`,
+    ].join(' | ');
+  }
+
+  async buildStatusMessage() {
+    const lines = [
+      '[GRID STATUS]',
+      `mode=${EXCHANGE_MODE} | pause=${this.getPauseStatusText()} | circuit=${this.circuitAllows() ? 'OK' : 'PAUSED'}`,
+      `totals buys=${this.state.data.totals.filledBuys} sells=${this.state.data.totals.filledSells} profit=${this.formatPrice(this.state.data.totals.realizedGridProfit)}`,
+    ];
+    for (const symbol of SYMBOLS) {
+      try {
+        lines.push(await this.buildSymbolStatusLine(symbol));
+      } catch (err) {
+        lines.push(`${symbol} | status error=${err.message}`);
+      }
+    }
+    return lines.join('\n').slice(0, 3900);
+  }
+
+  async buildOrdersMessage() {
+    const lines = ['[GRID ORDERS]'];
+    for (const symbol of SYMBOLS) {
+      try {
+        const symState = this.state.getSymbol(symbol);
+        const openOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+        const managedIds = new Set(Object.keys(symState.orders));
+        const managedOrders = openOrders.filter(order =>
+          managedIds.has(String(order.id)) || this.getBotOrderLevel(order) !== null
+        );
+        const buys = managedOrders.filter(order => String(order.side).toLowerCase() === 'buy');
+        const sells = managedOrders.filter(order => String(order.side).toLowerCase() === 'sell');
+        lines.push(`${symbol} active buy=${buys.length} sell=${sells.length} tracked=${Object.keys(symState.orders).length}`);
+        for (const order of managedOrders.slice(0, 12)) {
+          const level = this.getBotOrderLevel(order) ?? symState.orders[String(order.id)]?.levelIndex ?? '?';
+          lines.push(`- ${String(order.side).toUpperCase()} level=${level} amount=${this.formatPrice(order.amount)} price=${this.formatPrice(order.price)}`);
+        }
+        if (managedOrders.length > 12) lines.push(`- ... ${managedOrders.length - 12} more`);
+      } catch (err) {
+        lines.push(`${symbol} | orders error=${err.message}`);
+      }
+    }
+    return lines.join('\n').slice(0, 3900);
+  }
+
+  async handleTelegramCommand(text) {
+    const command = String(text || '').trim().split(/\s+/)[0].toLowerCase().replace(/@.+$/, '');
+    if (!command) return;
+    if (command === '/status') {
+      await this.sendAlert(await this.buildStatusMessage());
+      return;
+    }
+    if (command === '/orders') {
+      await this.sendAlert(await this.buildOrdersMessage());
+      return;
+    }
+    if (command === '/pause') {
+      await fs.promises.writeFile(KILL_SWITCH_PATH, `paused by telegram at ${new Date().toISOString()}\n`);
+      await this.sendAlert(
+        KILL_SWITCH_ENABLED
+          ? `[GRID PAUSED] Created ${KILL_SWITCH_FILE}. New trading cycles are paused.`
+          : `[GRID PAUSE REQUESTED] Created ${KILL_SWITCH_FILE}, but KILL_SWITCH_ENABLED=false so it will not pause trading until enabled.`
+      );
+      return;
+    }
+    if (command === '/resume') {
+      try {
+        await fs.promises.unlink(KILL_SWITCH_PATH);
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
+      }
+      await this.sendAlert('[GRID RESUMED] Kill-switch file removed.');
+      return;
+    }
+    if (command === '/help' || command === '/start') {
+      await this.sendAlert('Commands: /status, /orders, /pause, /resume');
+    }
+  }
+
+  async pollTelegramCommands() {
+    if (!TELEGRAM_COMMANDS_ENABLED || !this.telegramReady() || this.telegramPolling) return;
+    this.telegramPolling = true;
     try {
-      const body = JSON.stringify({
+      const query = { timeout: '0', limit: '20', allowed_updates: JSON.stringify(['message']) };
+      if (this.telegramUpdateOffset !== null) query.offset = String(this.telegramUpdateOffset);
+      const response = await this.telegramRequest('getUpdates', null, query);
+      const updates = Array.isArray(response?.result) ? response.result : [];
+      for (const update of updates) {
+        this.telegramUpdateOffset = Math.max(this.telegramUpdateOffset || 0, Number(update.update_id) + 1);
+        const message = update.message;
+        const chatId = String(message?.chat?.id || '');
+        if (chatId !== String(TELEGRAM_CHAT_ID)) continue;
+        const text = String(message?.text || '').trim();
+        if (text.startsWith('/')) await this.handleTelegramCommand(text);
+      }
+    } catch (err) {
+      console.warn('[TELEGRAM] Command polling failed:', err.message);
+    } finally {
+      this.telegramPolling = false;
+    }
+  }
+
+  async startTelegramCommandPolling() {
+    if (!TELEGRAM_COMMANDS_ENABLED || !this.telegramReady() || this.telegramCommandTimer) return;
+    if (TELEGRAM_COMMANDS_SKIP_OLD_UPDATES) {
+      try {
+        const response = await this.telegramRequest('getUpdates', null, {
+          offset: '-1',
+          limit: '1',
+          timeout: '0',
+          allowed_updates: JSON.stringify(['message']),
+        });
+        const latest = Array.isArray(response?.result) ? response.result.at(-1) : null;
+        this.telegramUpdateOffset = latest ? Number(latest.update_id) + 1 : null;
+      } catch (err) {
+        console.warn('[TELEGRAM] Failed to initialize command offset:', err.message);
+      }
+    }
+    this.telegramCommandTimer = setInterval(() => {
+      this.pollTelegramCommands().catch(err => console.warn('[TELEGRAM] Command polling failed:', err.message));
+    }, TELEGRAM_COMMAND_POLL_INTERVAL_MS);
+    await this.pollTelegramCommands();
+  }
+
+  startTelegramStatusReports() {
+    if (!TELEGRAM_STATUS_REPORT_ENABLED || !this.telegramReady() || this.telegramStatusTimer) return;
+    this.telegramStatusTimer = setInterval(() => {
+      this.sendTelegramStatusReport().catch(err => console.warn('[TELEGRAM] Status report failed:', err.message));
+    }, TELEGRAM_STATUS_REPORT_INTERVAL_MS);
+  }
+
+  async sendTelegramStatusReport() {
+    if (this.telegramStatusReporting) return;
+    this.telegramStatusReporting = true;
+    try {
+      await this.sendAlert(await this.buildStatusMessage());
+    } finally {
+      this.telegramStatusReporting = false;
+    }
+  }
+
+  async sendAlert(message) {
+    if (!this.telegramReady()) return;
+    try {
+      await this.telegramRequest('sendMessage', {
         chat_id: TELEGRAM_CHAT_ID,
         text: message,
-        parse_mode: 'HTML',
         disable_web_page_preview: true,
-      });
-      await new Promise((resolve, reject) => {
-        const req = https.request(`${TELEGRAM_API_URL}/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(body),
-          },
-          timeout: TELEGRAM_TIMEOUT_MS,
-        }, response => {
-          let data = '';
-          response.on('data', chunk => { data += chunk; });
-          response.once('end', () => {
-            if (response.statusCode >= 200 && response.statusCode < 300) resolve();
-            else reject(new Error(`Telegram returned HTTP ${response.statusCode}: ${data}`));
-          });
-        });
-        req.once('timeout', () => req.destroy(new Error(`Telegram request timed out after ${TELEGRAM_TIMEOUT_MS}ms`)));
-        req.once('error', reject);
-        req.end(body);
       });
     } catch (err) {
       console.warn('[ALERT] Failed:', err.message);
@@ -2798,6 +3015,8 @@ Smart Range Advisor (Gemini): ${GEMINI_RANGE_ADVISOR_ENABLED
       : 'OFF'}
 `);
     await this.init();
+    await this.startTelegramCommandPolling();
+    this.startTelegramStatusReports();
     while (true) {
       await sleep(INTERVAL_MS);
       await this.executeCycle();
