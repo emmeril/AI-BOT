@@ -19,3 +19,4 @@ bot-paused.flag
 npm-debug.log*
 pnpm-debug.log*
 *.log
+futures.js
