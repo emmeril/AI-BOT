@@ -68,6 +68,10 @@ function killSwitchActive() {
   }
 }
 
+function tradeFetchResult(trades, holdWatermark = false) {
+  return { trades, holdWatermark };
+}
+
 class SpotGridEngine {
   constructor() {
     this.exchange = ExchangeManager.getInstance();
@@ -135,6 +139,10 @@ class SpotGridEngine {
 
   recordSuccess() {
     this.circuitBreaker.errors = 0;
+  }
+
+  canPlaceNewOrders() {
+    return !killSwitchActive();
   }
 
   getOrderSizeUsdt() {
@@ -272,10 +280,10 @@ class SpotGridEngine {
     // no fixed relationship to the old one. If we simply swap symState.config
     // without reconciling, any open managed orders and accumulated
     // lastBuyByLevel records stay indexed against the OLD grid's level
-    // numbering while levels[] is rebuilt from the NEW range � silently
+    // numbering while levels[] is rebuilt from the NEW range - silently
     // desyncing buy/sell pairing, P&L, and refill prices. Reconcile BEFORE
     // the new range is persisted. Note: this deliberately does NOT gate on
-    // `rangeWasReset` � any actual change to lower/upper (whatever the
+    // `rangeWasReset` - any actual change to lower/upper (whatever the
     // cause) needs the same remap, since the level-index-to-price mapping
     // has no guaranteed relationship to the previous cycle's mapping.
     const rangeActuallyChanged = previousLower > 0 && previousUpper > 0 &&
@@ -316,7 +324,7 @@ class SpotGridEngine {
    * offset. A reset has no such fixed relationship to the old grid (the new
    * lower/upper/step can be completely different), so old level indexes are
    * meaningless against the new grid. Instead we:
-   *   1. Cancel any bot-managed open orders � they were placed at OLD-range
+   *   1. Cancel any bot-managed open orders - they were placed at OLD-range
    *      prices and no longer correspond to any level on the NEW grid. Left
    *      alone, they'd sit there until GRID_CANCEL_OUT_OF_RANGE eventually
    *      catches them (if even enabled), with state.orders meanwhile
@@ -349,7 +357,7 @@ class SpotGridEngine {
       const failedIds = cancelResult.failed.map(f => f.id).join(', ');
       // Abort the remap entirely: some orders are still live on the
       // exchange. If we clear local state below anyway, those orders become
-      // "ghost" orders � when getManagedOpenOrders() recovers them later via
+      // "ghost" orders - when getManagedOpenOrders() recovers them later via
       // clientOrderId, the embedded old level index may no longer be valid
       // against the new grid (different bounds/level count), corrupting
       // level tracking and P&L. Bail out and let the caller retry the reset
@@ -378,7 +386,7 @@ class SpotGridEngine {
       newLevels = this.buildLevels(newLower, newUpper, symbol);
     } catch (err) {
       // New range can't even produce distinct levels for this symbol/tick
-      // size � there is no sane new level to attribute old buys to. Clear
+      // size - there is no sane new level to attribute old buys to. Clear
       // them rather than keep stale data that would corrupt P&L; buildRange
       // will throw separately on the next call if the range itself stays
       // invalid, which surfaces the problem to the operator.
@@ -442,8 +450,8 @@ class SpotGridEngine {
   }
 
   // Guards against grid levels collapsing onto the same exchange-rounded price.
-  // This can happen when the range becomes too narrow relative to GRID_COUNT �
-  // e.g. after several trailing up/down shifts, or a tight AI-suggested range �
+  // This can happen when the range becomes too narrow relative to GRID_COUNT -
+  // e.g. after several trailing up/down shifts, or a tight AI-suggested range -
   // causing the raw step size to fall below the exchange's price tick size.
   // Two distinct level indexes mapping to the same rounded price would otherwise
   // cause duplicate orders at an identical price, and would break getLevelIndex's
@@ -546,7 +554,7 @@ class SpotGridEngine {
     if (feeCurrency === quoteAsset) return feeCost;
     if (feeCurrency === baseAsset) return feeCost * price;
     // Third-party fee token (e.g. BNB).  We cannot convert synchronously
-    // without a live price � use the cached rate if available, otherwise 0.
+    // without a live price - use the cached rate if available, otherwise 0.
     // Call cacheFeeTokenPrice() asynchronously to keep rates fresh.
     const cachedRate = this.feeTokenRates?.get(feeCurrency);
     if (cachedRate > 0) {
@@ -554,7 +562,7 @@ class SpotGridEngine {
     }
     console.warn(
       `[FEE] Fee currency "${feeCurrency}" is neither base (${baseAsset}) nor quote ` +
-      `(${quoteAsset}). No cached rate available � recording fee as 0 ${quoteAsset}. ` +
+      `(${quoteAsset}). No cached rate available - recording fee as 0 ${quoteAsset}. ` +
       `Rate will be fetched in the background. Consider switching Binance fee payment ` +
       `to ${quoteAsset} for accurate P&L.`
     );
@@ -640,7 +648,7 @@ class SpotGridEngine {
       ['Sellable', this.formatAmount(sellableAmount)],
       ['Fee', `${this.formatMoney(feeQuote)} ${quote}`],
     ]));
-    if (!GRID_REFILL_ON_FILLED || levelIndex + 1 >= levels.length) return;
+    if (!GRID_REFILL_ON_FILLED || !this.canPlaceNewOrders() || levelIndex + 1 >= levels.length) return;
     const sellLevelIndex = levelIndex + 1;
     const sellPrice = levels[sellLevelIndex];
 
@@ -746,7 +754,7 @@ class SpotGridEngine {
       delete symState.lastBuyByLevel[buyLevelIndex];
     }
     // Single atomic save for profit totals, buy-record update, order
-    // bookkeeping, and the processed-trade marker � see handleBuyFill for
+    // bookkeeping, and the processed-trade marker - see handleBuyFill for
     // why this matters (no more partial-fill persistence on crash).
     this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
@@ -759,7 +767,7 @@ class SpotGridEngine {
       ['Fee', `${this.formatMoney(feeQuote)} ${quote}`],
     ]));
 
-    if (GRID_REFILL_ON_FILLED && levelIndex - 1 >= 0) {
+    if (GRID_REFILL_ON_FILLED && this.canPlaceNewOrders() && levelIndex - 1 >= 0) {
       const buyPrice = levels[levelIndex - 1];
       if (this.hasActiveOrderAtLevel(symState, 'buy', levelIndex - 1)) {
         console.warn(`[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | buy order already active`);
@@ -800,7 +808,7 @@ class SpotGridEngine {
     return String(trade.id || `${trade.order}-${trade.timestamp}`);
   }
 
-  // Mutates symState.orders in memory only � no persistence. See
+  // Mutates symState.orders in memory only - no persistence. See
   // markProcessedTradeLocal() for why: handlers that make several related
   // mutations for one fill batch them all and save() once at the end.
   forgetOrderIfClosedLocal(symState, trade, openOrderIds) {
@@ -843,7 +851,7 @@ class SpotGridEngine {
         // We cannot safely advance `from` to lastTimestamp+1 because there
         // may be MORE trades at this exact timestamp on the next page that
         // the exchange hasn't returned yet.  Stop here and do NOT advance
-        // lastTradeTimestamp � the next cycle will re-fetch from this same
+        // lastTradeTimestamp - the next cycle will re-fetch from this same
         // timestamp.  processedTrade() deduplication ensures already-seen
         // fills are skipped without re-processing.
         console.warn(
@@ -852,7 +860,7 @@ class SpotGridEngine {
           `in this timestamp bucket are picked up on the next cycle.`
         );
         // Return what we have but DO NOT update lastTradeTimestamp.
-        return allTrades;
+        return tradeFetchResult(allTrades, true);
       }
       from = lastTimestamp + 1;
       iteration++;
@@ -863,7 +871,7 @@ class SpotGridEngine {
       symState.lastTradeTimestamp = maxTs;
       await this.state.save();
     }
-    return allTrades;
+    return tradeFetchResult(allTrades);
   }
 
   async handleFilledTrades(symbol, levels, preloadedOpenOrders = null) {
@@ -889,12 +897,13 @@ class SpotGridEngine {
     // We only do that below, after every trade below has been processed
     // without throwing - otherwise a failure partway through this batch
     // would permanently skip the unprocessed trades on the next cycle.
-    const [trades, openOrders] = await Promise.all([
+    const [tradeFetch, openOrders] = await Promise.all([
       this.fetchNewTrades(symbol, symState, { updateTimestamp: false }),
       preloadedOpenOrders
         ? Promise.resolve(preloadedOpenOrders)
         : retry(() => this.exchange.fetchOpenOrders(symbol)),
     ]);
+    const { trades, holdWatermark } = tradeFetch;
     const openOrderIds = new Set(openOrders.map(order => String(order.id)));
     for (const trade of trades.sort((a, b) => a.timestamp - b.timestamp)) {
       const id = this.getTradeId(trade);
@@ -925,7 +934,7 @@ class SpotGridEngine {
           // but mark as processed so we don't retry on every cycle.
           console.warn(
             `[SKIP] ${symbol} trade ${id}: order ${trade.order} not in state and ` +
-            `no parseable clientOrderId � fill cannot be attributed to a grid level`
+            `no parseable clientOrderId - fill cannot be attributed to a grid level`
           );
           await this.state.markProcessedTrade(symbol, id);
           continue;
@@ -949,7 +958,7 @@ class SpotGridEngine {
     // lastTradeTimestamp stays put and the same trades (including the
     // failed one) are retried next cycle; already-processed ones among them
     // are skipped via processedTrade() deduplication.
-    if (trades.length) {
+    if (trades.length && !holdWatermark) {
       const maxTs = Math.max(...trades.map(t => t.timestamp));
       if (maxTs > (symState.lastTradeTimestamp || 0)) {
         symState.lastTradeTimestamp = maxTs;
@@ -1019,6 +1028,13 @@ class SpotGridEngine {
   }
 
   async reconcileSymbolUnlocked(symbol) {
+    if (!this.canPlaceNewOrders()) {
+      const freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+      await this.handleFilledTrades(symbol, [], freshOpenOrders);
+      console.log(`[SYNC] ${symbol} trading paused; fills reconciled but no new orders will be placed`);
+      return;
+    }
+
     let context = await this.fetchContext(symbol);
     let { currentPrice, balance, lower, upper, levels } = context;
 
@@ -1027,7 +1043,7 @@ class SpotGridEngine {
     let trailedUp = null;
     let trailedDown = null;
     let newContext = null;
-    if (canContinue) {
+    if (canContinue && this.canPlaceNewOrders()) {
       trailedUp = await this.maybeTrailUpRange(symbol, currentPrice, lower, upper);
       if (trailedUp) {
         newContext = await this.fetchContext(symbol);
@@ -1189,7 +1205,7 @@ class SpotGridEngine {
 
     // Sum cost of ALL open (pending) buy orders. A level can simultaneously
     // have a filled buy record in lastBuyByLevel (e.g. partially sold) AND a
-    // new pending replenishment buy order open at that same level � both
+    // new pending replenishment buy order open at that same level - both
     // amounts are real allocated capital and must both be counted, or the
     // investment cap is under-reported and the bot can over-allocate funds.
     for (const order of Object.values(symState.orders)) {
@@ -1261,7 +1277,7 @@ class SpotGridEngine {
     this.isRunning = true;
     let hadError = false;
     try {
-      if (!this.circuitAllows() || killSwitchActive()) return;
+      if (!this.circuitAllows()) return;
       for (const symbol of SYMBOLS) {
         try {
           await this.reconcileSymbol(symbol);

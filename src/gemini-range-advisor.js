@@ -224,7 +224,7 @@ Respond with ONLY a single valid JSON object, no markdown fences, no commentary,
     // API key is sent via the x-goog-api-key header instead of the URL query
     // string. Query strings are commonly written to access logs, reverse-proxy
     // logs, and error messages (e.g. this function's own HTTP-status error
-    // includes response text, and some infra logs the full request URL) — put
+    // includes response text, and some infra logs the full request URL) - put
     // the key in the URL and it can leak into those logs. The header is not
     // logged by default infra and is Google's documented alternative to ?key=.
     const url = `${GEMINI_API_BASE_URL}/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -311,7 +311,7 @@ Respond with ONLY a single valid JSON object, no markdown fences, no commentary,
     console.log(
       `[GEMINI] ${symbol} suggestion: range=${suggestion.lower}-${suggestion.upper} ` +
       `confidence=${suggestion.confidence} condition=${suggestion.marketCondition}` +
-      `${suggestion.wasClamped ? ' (clamped to safety bounds)' : ''} — ${suggestion.reasoning}`
+      `${suggestion.wasClamped ? ' (clamped to safety bounds)' : ''} - ${suggestion.reasoning}`
     );
     return suggestion;
   }
