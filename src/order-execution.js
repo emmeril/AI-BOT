@@ -26,8 +26,8 @@ async function fetchContext(symbol) {
     retry(() => this.exchange.fetchBalance()),
   ]);
   const currentPrice = Number(ticker.last);
-  const { lower, upper } = await this.buildRange(symbol, currentPrice);
-  const levels = this.buildLevels(lower, upper, symbol);
+  const { lower, upper, levels: advisedLevels } = await this.buildRange(symbol, currentPrice);
+  const levels = advisedLevels || this.buildLevels(lower, upper, symbol);
   return { ticker, currentPrice, openOrders, balance, lower, upper, levels };
 }
 

@@ -12,7 +12,8 @@ const {
   GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT,
   GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT,
   GEMINI_RANGE_ADVISOR_TIMEOUT_MS,
-  GEMINI_RANGE_ADVISOR_STATE_PATH
+  GEMINI_RANGE_ADVISOR_STATE_PATH,
+  GRID_COUNT
 } = require('./config');
 const { AtomicFileWriter } = require('./atomic-file-writer');
 const { retry, roundNumber, isPlainObject, withTimeout } = require('./utils');
@@ -200,7 +201,7 @@ Trailing Down Just Shifted: ${trailingDownJustShifted}
 ${trailingUpJustShifted ? 'Do not block solely because price is near the new upper bound immediately after a completed trailing-up shift.' : ''}
 ${trailingDownJustShifted ? 'Do not block solely because price is near the new lower bound immediately after a completed trailing-down shift.' : ''}
 
-Based on all of this, recommend a grid trading price range (lower and upper bound) that is appropriate for the next few hours to a day, and assess whether current conditions favor grid trading (ranging) or disfavor it (strongly trending, about to break out).
+Based on all of this, recommend a grid trading price range (lower and upper bound) that is appropriate for the next few hours to a day, recommend the exact grid order price levels, and assess whether current conditions favor grid trading (ranging) or disfavor it (strongly trending, about to break out).
 
 Minimum range width requirement: the recommended range MUST span at least ${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}% of the current price (i.e. upper - lower >= ${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}% * ${currentPrice}). Do not recommend a narrower range even if volatility appears very low; widen the range as needed to meet this minimum.
 
@@ -208,6 +209,7 @@ Respond with ONLY a single valid JSON object, no markdown fences, no commentary,
 {
   "lower": <number>,
   "upper": <number>,
+  "levels": [<${GRID_COUNT + 1} numbers from lower to upper, strictly increasing, no duplicates>],
   "confidence": <number between 0 and 1>,
   "marketCondition": "<RANGING|TRENDING_UP|TRENDING_DOWN|VOLATILE|UNCERTAIN>",
   "reasoning": "<short 1-2 sentence explanation>"
@@ -300,20 +302,47 @@ Respond with ONLY a single valid JSON object, no markdown fences, no commentary,
         `Gemini suggested range ${lower}-${upper} does not bracket current price ${currentPrice} after clamping`
       );
     }
+    const roundedLower = roundNumber(clampedLower, 8);
+    const roundedUpper = roundNumber(clampedUpper, 8);
+    const wasClamped = roundedLower !== roundNumber(lower, 8) || roundedUpper !== roundNumber(upper, 8);
+    const levels = this.sanitizeLevels(raw?.levels, roundedLower, roundedUpper, wasClamped);
     const suggestion = {
-      lower: roundNumber(clampedLower, 8),
-      upper: roundNumber(clampedUpper, 8),
+      lower: roundedLower,
+      upper: roundedUpper,
+      levels,
       confidence: roundNumber(confidence, 2),
       marketCondition: typeof raw?.marketCondition === 'string' ? raw.marketCondition : 'UNCERTAIN',
       reasoning: typeof raw?.reasoning === 'string' ? raw.reasoning.slice(0, 500) : '',
-      wasClamped: clampedLower !== roundNumber(lower, 8) || clampedUpper !== roundNumber(upper, 8),
+      wasClamped,
     };
     console.log(
       `[GEMINI] ${symbol} suggestion: range=${suggestion.lower}-${suggestion.upper} ` +
-      `confidence=${suggestion.confidence} condition=${suggestion.marketCondition}` +
+      `levels=${levels ? levels.length : 'fallback'} confidence=${suggestion.confidence} condition=${suggestion.marketCondition}` +
       `${suggestion.wasClamped ? ' (clamped to safety bounds)' : ''} - ${suggestion.reasoning}`
     );
     return suggestion;
+  }
+
+  sanitizeLevels(rawLevels, lower, upper, wasClamped = false) {
+    if (!Array.isArray(rawLevels)) return null;
+    if (wasClamped) return null;
+    if (rawLevels.length !== GRID_COUNT + 1) return null;
+
+    const levels = rawLevels.map(Number);
+    if (levels.some(level => !(level > 0) || !Number.isFinite(level))) return null;
+
+    for (let i = 1; i < levels.length; i++) {
+      if (!(levels[i] > levels[i - 1])) return null;
+    }
+
+    const rounded = levels.map(level => roundNumber(level, 8));
+    const endpointTolerance = Math.max((upper - lower) * 0.0001, upper * 1e-8, 1e-12);
+    if (Math.abs(rounded[0] - lower) > endpointTolerance) return null;
+    if (Math.abs(rounded[rounded.length - 1] - upper) > endpointTolerance) return null;
+
+    rounded[0] = lower;
+    rounded[rounded.length - 1] = upper;
+    return rounded;
   }
 }
 

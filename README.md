@@ -160,7 +160,7 @@ GEMINI_RANGE_ADVISOR_ENABLED=true
 GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
-Advisor mengambil candle OHLCV, menghitung indikator teknikal lokal, lalu meminta Gemini menyarankan `lower` dan `upper` range. Rekomendasi hanya dipakai jika confidence memenuhi threshold dan range masih lolos safety clamp.
+Advisor mengambil candle OHLCV, menghitung indikator teknikal lokal, lalu meminta Gemini menyarankan `lower`, `upper`, dan opsional `levels` untuk harga order grid. Rekomendasi hanya dipakai jika confidence memenuhi threshold dan range masih lolos safety clamp. Jika Gemini mengirim `levels`, jumlahnya harus tepat `GRID_COUNT + 1`, berurutan naik dari `lower` ke `upper`, tanpa duplikat, dan tetap distinct setelah precision exchange; kalau tidak valid bot fallback ke level lokal dari range.
 
 - `GEMINI_API_KEY`: API key Gemini. Wajib jika advisor aktif.
 - `GEMINI_MODEL`: model Gemini yang dipakai.

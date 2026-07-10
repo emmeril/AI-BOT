@@ -188,7 +188,7 @@ class SpotGridEngine {
       );
     }
     await this.remapStateAfterRangeReset(
-      symbol, transition.oldLower, transition.oldUpper, transition.newLower, transition.newUpper
+      symbol, transition.oldLower, transition.oldUpper, transition.newLower, transition.newUpper, transition.levels
     );
     const symState = this.state.getSymbol(symbol);
     symState.config = {
@@ -198,7 +198,7 @@ class SpotGridEngine {
       autoRange: symState.config.autoRange !== false,
     };
     await this.state.save();
-    return { lower: transition.newLower, upper: transition.newUpper };
+    return { lower: transition.newLower, upper: transition.newUpper, levels: transition.levels || null };
   }
 
   async buildRange(symbol, currentPrice) {
@@ -222,6 +222,9 @@ class SpotGridEngine {
     // still know what the previous range was if a reset happens.
     const previousLower = storedLower;
     const previousUpper = storedUpper;
+    const previousLevels = Array.isArray(symState.config.aiAdvisor?.levels)
+      ? symState.config.aiAdvisor.levels.map(Number)
+      : null;
 
     if (!manualRange && storedLower > 0 && storedUpper > 0) {
       const stale = this.isStoredRangeStale(symbol, currentPrice, storedLower, storedUpper);
@@ -273,6 +276,10 @@ class SpotGridEngine {
       throw new Error(`Invalid grid range. lower=${lower}, upper=${upper}`);
     }
 
+    const aiLevels = aiSuggestion?.levels
+      ? this.getUsableCustomLevels(symbol, aiSuggestion.levels, lower, upper, 'Gemini')
+      : null;
+
     // Unlike a trailing shift (which is a parallel translation of the same
     // grid, handled by applyTrailingRangeShift's offset-based remap), a
     // stale-range auto-reset, GRID_RESET_RANGE_ON_START, or a fresh Gemini
@@ -288,8 +295,10 @@ class SpotGridEngine {
     // has no guaranteed relationship to the previous cycle's mapping.
     const rangeActuallyChanged = previousLower > 0 && previousUpper > 0 &&
       (previousLower !== lower || previousUpper !== upper);
-    if (rangeActuallyChanged) {
-      await this.remapStateAfterRangeReset(symbol, previousLower, previousUpper, lower, upper);
+    const levelShapeChanged = previousLower > 0 && previousUpper > 0 &&
+      !this.levelArraysEqual(previousLevels, aiLevels);
+    if (rangeActuallyChanged || levelShapeChanged) {
+      await this.remapStateAfterRangeReset(symbol, previousLower, previousUpper, lower, upper, aiLevels);
     }
 
     symState.config = {
@@ -303,6 +312,7 @@ class SpotGridEngine {
         confidence: aiSuggestion.confidence,
         marketCondition: aiSuggestion.marketCondition,
         reasoning: aiSuggestion.reasoning,
+        levels: aiLevels || undefined,
         appliedAt: new Date().toISOString(),
       } : undefined,
     };
@@ -311,7 +321,7 @@ class SpotGridEngine {
       this.rangeResetSymbols.add(symbol);
     }
     await this.state.save();
-    return { lower, upper };
+    return { lower, upper, levels: aiLevels };
   }
 
   /**
@@ -336,7 +346,7 @@ class SpotGridEngine {
    *      so a future sell fill still finds the correct cost basis at
    *      levelIndex - 1 on the NEW grid.
    */
-  async remapStateAfterRangeReset(symbol, oldLower, oldUpper, newLower, newUpper) {
+  async remapStateAfterRangeReset(symbol, oldLower, oldUpper, newLower, newUpper, newLevelsOverride = null) {
     const symState = this.state.getSymbol(symbol);
 
     // Persist the transition BEFORE the irreversible step (cancelling live
@@ -348,7 +358,7 @@ class SpotGridEngine {
     // already cancelled sit unaccounted for against stale local state.
     if (!symState.rangeTransition || symState.rangeTransition.kind !== 'reset' ||
         symState.rangeTransition.newLower !== newLower || symState.rangeTransition.newUpper !== newUpper) {
-      symState.rangeTransition = { kind: 'reset', oldLower, oldUpper, newLower, newUpper };
+      symState.rangeTransition = { kind: 'reset', oldLower, oldUpper, newLower, newUpper, levels: newLevelsOverride || undefined };
       await this.state.save();
     }
 
@@ -383,7 +393,7 @@ class SpotGridEngine {
 
     let newLevels;
     try {
-      newLevels = this.buildLevels(newLower, newUpper, symbol);
+      newLevels = newLevelsOverride || this.buildLevels(newLower, newUpper, symbol);
     } catch (err) {
       // New range can't even produce distinct levels for this symbol/tick
       // size - there is no sane new level to attribute old buys to. Clear
@@ -447,6 +457,50 @@ class SpotGridEngine {
     }
     if (symbol) this.assertLevelsAreDistinct(symbol, levels, lower, upper);
     return levels;
+  }
+
+  getUsableCustomLevels(symbol, levels, lower, upper, source = 'custom') {
+    if (!Array.isArray(levels)) return null;
+    if (levels.length !== GRID_COUNT + 1) {
+      console.warn(`[GRID] ${symbol} ignoring ${source} levels: expected ${GRID_COUNT + 1}, got ${levels.length}`);
+      return null;
+    }
+    const normalized = levels.map(Number);
+    if (normalized.some(level => !(level > 0) || !Number.isFinite(level))) {
+      console.warn(`[GRID] ${symbol} ignoring ${source} levels: contains invalid price`);
+      return null;
+    }
+    for (let i = 1; i < normalized.length; i++) {
+      if (!(normalized[i] > normalized[i - 1])) {
+        console.warn(`[GRID] ${symbol} ignoring ${source} levels: levels must be strictly increasing at index ${i}`);
+        return null;
+      }
+    }
+    const endpointTolerance = Math.max((upper - lower) * 0.0001, upper * 1e-8, 1e-12);
+    if (Math.abs(normalized[0] - lower) > endpointTolerance ||
+        Math.abs(normalized[normalized.length - 1] - upper) > endpointTolerance) {
+      console.warn(`[GRID] ${symbol} ignoring ${source} levels: endpoints do not match range ${roundNumber(lower)}-${roundNumber(upper)}`);
+      return null;
+    }
+    normalized[0] = lower;
+    normalized[normalized.length - 1] = upper;
+    try {
+      this.assertLevelsAreDistinct(symbol, normalized, lower, upper);
+    } catch (err) {
+      console.warn(`[GRID] ${symbol} ignoring ${source} levels: ${err.message}`);
+      return null;
+    }
+    return normalized;
+  }
+
+  levelArraysEqual(a, b) {
+    if (!Array.isArray(a) && !Array.isArray(b)) return true;
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (Number(a[i]) !== Number(b[i])) return false;
+    }
+    return true;
   }
 
   // Guards against grid levels collapsing onto the same exchange-rounded price.
