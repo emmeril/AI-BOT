@@ -5,9 +5,12 @@ node_modules/
 .env
 .env.*
 .env.tuned
+env
+env.*
 tuned-config.json
 walk-forward-report.json
 ai-explain-log.jsonl
+learning-memory*.json
 profit-ledger.json
 profit-ledger-*.json
 risk-state.json
