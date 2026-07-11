@@ -293,11 +293,9 @@ class SpotGridEngine {
     // `rangeWasReset` - any actual change to lower/upper (whatever the
     // cause) needs the same remap, since the level-index-to-price mapping
     // has no guaranteed relationship to the previous cycle's mapping.
-    const rangeActuallyChanged = previousLower > 0 && previousUpper > 0 &&
-      (previousLower !== lower || previousUpper !== upper);
-    const levelShapeChanged = previousLower > 0 && previousUpper > 0 &&
-      !this.levelArraysEqual(previousLevels, aiLevels);
-    if (rangeActuallyChanged || levelShapeChanged) {
+    const effectiveGridChanged = previousLower > 0 && previousUpper > 0 &&
+      !this.effectiveGridLevelsEqual(symbol, previousLower, previousUpper, previousLevels, lower, upper, aiLevels);
+    if (effectiveGridChanged) {
       await this.remapStateAfterRangeReset(symbol, previousLower, previousUpper, lower, upper, aiLevels);
     }
 
@@ -499,6 +497,37 @@ class SpotGridEngine {
     if (a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) {
       if (Number(a[i]) !== Number(b[i])) return false;
+    }
+    return true;
+  }
+
+  getEffectiveGridLevels(symbol, lower, upper, customLevels = null) {
+    const levels = Array.isArray(customLevels)
+      ? customLevels.map(Number)
+      : this.buildLevels(lower, upper, symbol);
+    return levels.map(level => this.getComparablePrice(symbol, level));
+  }
+
+  getComparablePrice(symbol, price) {
+    try {
+      return String(this.exchange.priceToPrecision(symbol, price));
+    } catch {
+      return String(roundNumber(price, 8));
+    }
+  }
+
+  effectiveGridLevelsEqual(symbol, oldLower, oldUpper, oldLevels, newLower, newUpper, newLevels) {
+    let oldEffective;
+    let newEffective;
+    try {
+      oldEffective = this.getEffectiveGridLevels(symbol, oldLower, oldUpper, oldLevels);
+      newEffective = this.getEffectiveGridLevels(symbol, newLower, newUpper, newLevels);
+    } catch {
+      return false;
+    }
+    if (oldEffective.length !== newEffective.length) return false;
+    for (let i = 0; i < oldEffective.length; i++) {
+      if (oldEffective[i] !== newEffective[i]) return false;
     }
     return true;
   }

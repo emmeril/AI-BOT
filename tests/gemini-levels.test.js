@@ -49,3 +49,39 @@ test('engine uses valid Gemini grid levels after exchange precision validation',
 
   assert.deepEqual(levels, [90, 96, 101, 106, 110]);
 });
+
+test('engine does not range-reset when Gemini levels match the effective existing grid', async () => {
+  const symbolState = {
+    config: { lower: 90, upper: 110 },
+    orders: {},
+    lastBuyByLevel: { 1: { price: 95, amount: 1 } },
+  };
+  const engine = Object.create(SpotGridEngine.prototype);
+  engine.exchange = {
+    markets: {
+      'BTC/USDT': { precision: { price: 0.01 } },
+    },
+    priceToPrecision: (_symbol, price) => Number(price).toFixed(2),
+  };
+  engine.state = {
+    getSymbol: () => symbolState,
+    save: async () => {},
+  };
+  engine.rangeAdvisor = {
+    getSuggestion: async () => ({
+      lower: 90,
+      upper: 110,
+      levels: [90, 95, 100, 105, 110],
+      confidence: 0.8,
+      marketCondition: 'RANGING',
+      reasoning: 'Same grid.',
+    }),
+  };
+  engine.remapStateAfterRangeReset = async () => {
+    throw new Error('range reset should not run for an unchanged effective grid');
+  };
+
+  const range = await engine.buildRange('BTC/USDT', 100);
+
+  assert.deepEqual(range, { lower: 90, upper: 110, levels: [90, 95, 100, 105, 110] });
+});
