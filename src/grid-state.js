@@ -19,6 +19,33 @@ class GridState {
     };
   }
 
+  static createSymbolState() {
+    return {
+      createdAt: new Date().toISOString(),
+      config: {},
+      orders: {},
+      lastBuyByLevel: {},
+      realizedGridProfit: 0,
+      lastTradeTimestamp: 0,
+      trailingUp: { shifts: 0, lastShiftAt: null },
+      trailingDown: { shifts: 0, lastShiftAt: null },
+      rangeTransition: null,
+    };
+  }
+
+  static normalizeSymbolState(symbolState) {
+    const sym = isPlainObject(symbolState) ? symbolState : GridState.createSymbolState();
+    sym.config = isPlainObject(sym.config) ? sym.config : {};
+    sym.orders = isPlainObject(sym.orders) ? sym.orders : {};
+    sym.lastBuyByLevel = isPlainObject(sym.lastBuyByLevel) ? sym.lastBuyByLevel : {};
+    sym.realizedGridProfit = numberOrZero(sym.realizedGridProfit);
+    sym.lastTradeTimestamp = numberOrZero(sym.lastTradeTimestamp);
+    if (!isPlainObject(sym.trailingUp)) sym.trailingUp = { shifts: 0, lastShiftAt: null };
+    if (!isPlainObject(sym.trailingDown)) sym.trailingDown = { shifts: 0, lastShiftAt: null };
+    if (sym.rangeTransition === undefined) sym.rangeTransition = null;
+    return sym;
+  }
+
   static normalize(data) {
     const normalized = isPlainObject(data) ? data : {};
     normalized.version = numberOrZero(normalized.version) || 1;
@@ -64,28 +91,8 @@ class GridState {
   }
 
   getSymbol(symbol) {
-    const existing = this.data.symbols[symbol];
-    if (!isPlainObject(existing)) {
-      this.data.symbols[symbol] = {
-        createdAt: new Date().toISOString(),
-        config: {},
-        orders: {},
-        lastBuyByLevel: {},
-        realizedGridProfit: 0,
-        lastTradeTimestamp: 0,
-        trailingUp: { shifts: 0, lastShiftAt: null },
-        trailingDown: { shifts: 0, lastShiftAt: null },
-        rangeTransition: null,
-      };
-    }
-    const sym = this.data.symbols[symbol];
-    sym.config = isPlainObject(sym.config) ? sym.config : {};
-    sym.orders = isPlainObject(sym.orders) ? sym.orders : {};
-    sym.lastBuyByLevel = isPlainObject(sym.lastBuyByLevel) ? sym.lastBuyByLevel : {};
-    sym.realizedGridProfit = numberOrZero(sym.realizedGridProfit);
-    sym.lastTradeTimestamp = numberOrZero(sym.lastTradeTimestamp);
-    if (!sym.trailingUp) sym.trailingUp = { shifts: 0, lastShiftAt: null };
-    if (!sym.trailingDown) sym.trailingDown = { shifts: 0, lastShiftAt: null };
+    const sym = GridState.normalizeSymbolState(this.data.symbols[symbol]);
+    this.data.symbols[symbol] = sym;
     // Marker for an in-flight range reset/trailing shift: set (and persisted)
     // BEFORE any exchange orders are cancelled, cleared only once the local
     // remap has been fully computed and persisted in the same save(). If the
@@ -93,7 +100,6 @@ class GridState {
     // disk so the transition can be resumed against the SAME target range
     // instead of silently leaving cancelled-on-exchange orders paired with
     // stale local config/lastBuyByLevel. See resumeInterruptedRangeTransition().
-    if (sym.rangeTransition === undefined) sym.rangeTransition = null;
     return sym;
   }
 

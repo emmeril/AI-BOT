@@ -9,16 +9,40 @@ const {
 } = require('./config');
 const { roundNumber, numberOrZero } = require('./utils');
 
-function getTrailingUpState(symbol) {
+const TRAILING_CONFIG = {
+  up: {
+    enabled: GRID_TRAILING_UP_ENABLED,
+    cooldownMs: GRID_TRAILING_UP_COOLDOWN_MS,
+    stateKey: 'trailingUp',
+    label: 'Up',
+  },
+  down: {
+    enabled: GRID_TRAILING_DOWN_ENABLED,
+    cooldownMs: GRID_TRAILING_DOWN_COOLDOWN_MS,
+    stateKey: 'trailingDown',
+    label: 'Down',
+  },
+};
+
+function getTrailingConfig(direction) {
+  const config = TRAILING_CONFIG[direction];
+  if (!config) throw new Error(`Unsupported trailing direction: ${direction}`);
+  return config;
+}
+
+function getTrailingState(symbol, direction) {
   const symState = this.state.getSymbol(symbol);
-  if (!symState.trailingUp) symState.trailingUp = { shifts: 0, lastShiftAt: null };
-  return symState.trailingUp;
+  const { stateKey } = getTrailingConfig(direction);
+  if (!symState[stateKey]) symState[stateKey] = { shifts: 0, lastShiftAt: null };
+  return symState[stateKey];
+}
+
+function getTrailingUpState(symbol) {
+  return this.getTrailingState(symbol, 'up');
 }
 
 function getTrailingDownState(symbol) {
-  const symState = this.state.getSymbol(symbol);
-  if (!symState.trailingDown) symState.trailingDown = { shifts: 0, lastShiftAt: null };
-  return symState.trailingDown;
+  return this.getTrailingState(symbol, 'down');
 }
 
 function calculateTrailingShift(currentPrice, lower, upper, direction, symbol = null) {
@@ -27,7 +51,7 @@ function calculateTrailingShift(currentPrice, lower, upper, direction, symbol = 
     const ratio = Math.pow(upper / lower, 1 / GRID_COUNT);
     if (!(ratio > 1)) return null;
     if (direction === 'up') {
-      if (currentPrice < this.getTrailingUpTrigger(lower, upper)) return null;
+      if (currentPrice < this.getTrailingTrigger(lower, upper, direction)) return null;
       const steps = Math.max(1, Math.floor(Math.log(currentPrice / upper) / Math.log(ratio)));
       shift = {
         steps,
@@ -35,7 +59,7 @@ function calculateTrailingShift(currentPrice, lower, upper, direction, symbol = 
         upper: upper * Math.pow(ratio, steps),
       };
     } else {
-      if (currentPrice > this.getTrailingDownTrigger(lower, upper)) return null;
+      if (currentPrice > this.getTrailingTrigger(lower, upper, direction)) return null;
       const steps = Math.max(1, Math.floor(Math.log(lower / currentPrice) / Math.log(ratio)));
       shift = {
         steps,
@@ -47,7 +71,7 @@ function calculateTrailingShift(currentPrice, lower, upper, direction, symbol = 
     const stepSize = (upper - lower) / GRID_COUNT;
     if (!(stepSize > 0)) return null;
     if (direction === 'up') {
-      if (currentPrice < this.getTrailingUpTrigger(lower, upper)) return null;
+      if (currentPrice < this.getTrailingTrigger(lower, upper, direction)) return null;
       const steps = Math.max(1, Math.floor((currentPrice - upper) / stepSize));
       shift = {
         steps,
@@ -55,7 +79,7 @@ function calculateTrailingShift(currentPrice, lower, upper, direction, symbol = 
         upper: upper + stepSize * steps,
       };
     } else {
-      if (currentPrice > this.getTrailingDownTrigger(lower, upper)) return null;
+      if (currentPrice > this.getTrailingTrigger(lower, upper, direction)) return null;
       const steps = Math.max(1, Math.floor((lower - currentPrice) / stepSize));
       shift = {
         steps,
@@ -93,20 +117,21 @@ function shiftLevelsAreUsable(symbol, shift, direction) {
   }
 }
 
-function getTrailingUpTrigger(lower, upper) {
+function getTrailingTrigger(lower, upper, direction) {
   if (GRID_MODE === 'GEOMETRIC') {
     const ratio = Math.pow(upper / lower, 1 / GRID_COUNT);
-    return upper * ratio;
+    return direction === 'up' ? upper * ratio : lower / ratio;
   }
-  return upper + ((upper - lower) / GRID_COUNT);
+  const stepSize = (upper - lower) / GRID_COUNT;
+  return direction === 'up' ? upper + stepSize : lower - stepSize;
+}
+
+function getTrailingUpTrigger(lower, upper) {
+  return this.getTrailingTrigger(lower, upper, 'up');
 }
 
 function getTrailingDownTrigger(lower, upper) {
-  if (GRID_MODE === 'GEOMETRIC') {
-    const ratio = Math.pow(upper / lower, 1 / GRID_COUNT);
-    return lower / ratio;
-  }
-  return lower - ((upper - lower) / GRID_COUNT);
+  return this.getTrailingTrigger(lower, upper, 'down');
 }
 
 function shiftStoredLevelIndexes(symbol, offset) {
@@ -222,9 +247,7 @@ async function applyTrailingRangeShift(symbol, lower, upper, shift, direction) {
   }
 
   const symState = this.state.getSymbol(symbol);
-  const trailingState = direction === 'up'
-    ? this.getTrailingUpState(symbol)
-    : this.getTrailingDownState(symbol);
+  const trailingState = this.getTrailingState(symbol, direction);
   const offset = direction === 'up' ? -shift.steps : shift.steps;
 
   // cancelGridOrders() already called state.forgetOrder() for every order
@@ -279,42 +302,38 @@ async function applyTrailingRangeShift(symbol, lower, upper, shift, direction) {
   return { lower: shift.lower, upper: shift.upper };
 }
 
-async function maybeTrailUpRange(symbol, currentPrice, lower, upper) {
-  if (!GRID_TRAILING_UP_ENABLED || hasManualGridRange()) return null;
-  const trailingState = this.getTrailingUpState(symbol);
+async function maybeTrailRange(symbol, currentPrice, lower, upper, direction) {
+  const config = getTrailingConfig(direction);
+  if (!config.enabled || hasManualGridRange()) return null;
+  const trailingState = this.getTrailingState(symbol, direction);
   const lastShiftAt = Date.parse(trailingState.lastShiftAt || 0);
-  if (GRID_TRAILING_UP_COOLDOWN_MS > Date.now() - lastShiftAt) return null;
-  const shift = this.calculateTrailingShift(currentPrice, lower, upper, 'up', symbol);
+  if (config.cooldownMs > Date.now() - lastShiftAt) return null;
+  const shift = this.calculateTrailingShift(currentPrice, lower, upper, direction, symbol);
   if (!shift) return null;
   try {
-    return await this.applyTrailingRangeShift(symbol, lower, upper, shift, 'up');
+    return await this.applyTrailingRangeShift(symbol, lower, upper, shift, direction);
   } catch (err) {
-    console.error(`[TRAILING] Up shift failed for ${symbol}:`, err);
+    console.error(`[TRAILING] ${config.label} shift failed for ${symbol}:`, err);
     return null;
   }
 }
 
+async function maybeTrailUpRange(symbol, currentPrice, lower, upper) {
+  return this.maybeTrailRange(symbol, currentPrice, lower, upper, 'up');
+}
+
 async function maybeTrailDownRange(symbol, currentPrice, lower, upper) {
-  if (!GRID_TRAILING_DOWN_ENABLED || hasManualGridRange()) return null;
-  const trailingState = this.getTrailingDownState(symbol);
-  const lastShiftAt = Date.parse(trailingState.lastShiftAt || 0);
-  if (GRID_TRAILING_DOWN_COOLDOWN_MS > Date.now() - lastShiftAt) return null;
-  const shift = this.calculateTrailingShift(currentPrice, lower, upper, 'down', symbol);
-  if (!shift) return null;
-  try {
-    return await this.applyTrailingRangeShift(symbol, lower, upper, shift, 'down');
-  } catch (err) {
-    console.error(`[TRAILING] Down shift failed for ${symbol}:`, err);
-    return null;
-  }
+  return this.maybeTrailRange(symbol, currentPrice, lower, upper, 'down');
 }
 
 
 const trailingRangeMethods = {
+  getTrailingState,
   getTrailingUpState,
   getTrailingDownState,
   calculateTrailingShift,
   shiftLevelsAreUsable,
+  getTrailingTrigger,
   getTrailingUpTrigger,
   getTrailingDownTrigger,
   shiftStoredLevelIndexes,
@@ -324,6 +343,7 @@ const trailingRangeMethods = {
   hasActiveOrderAtLevel,
   countActiveOrders,
   applyTrailingRangeShift,
+  maybeTrailRange,
   maybeTrailUpRange,
   maybeTrailDownRange,
 };
