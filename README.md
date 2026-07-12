@@ -7,7 +7,7 @@ Entrypoint runtime ada di `index.js`; implementasi utama sudah dipisah ke modul 
 ## Fitur
 
 - Trading grid spot untuk satu atau banyak pair, contoh `BTC/USDT,ETH/USDT`.
-- Mode exchange `live`, `testnet`, atau `demo` (`demo` diperlakukan sebagai `testnet`).
+- Mode exchange `live`, `testnet`, atau `demo` (`demo` diperlakukan sebagai `testnet`; default aman adalah `testnet`).
 - Grid `ARITHMETIC` atau `GEOMETRIC`.
 - Range manual, auto range, stale range auto reset, trailing up, dan trailing down.
 - Batas modal per order atau total modal grid.
@@ -92,7 +92,7 @@ Angka persen ditulis sebagai angka biasa. Contoh `GRID_RANGE_PCT=5` berarti 5%.
 - `EXCHANGE_API_KEY`: API key Binance.
 - `EXCHANGE_SECRET`: secret key Binance.
 - `EXCHANGE_MODE`: `live`, `testnet`, atau `demo`. Nilai `demo` diperlakukan sebagai `testnet`.
-- `EXCHANGE_DEMO`: fallback legacy jika `EXCHANGE_MODE` kosong.
+- `EXCHANGE_DEMO`: legacy flag lama. Gunakan `EXCHANGE_MODE`; jika kosong, bot default ke `testnet`.
 - `SYMBOLS`: daftar pair dipisah koma, contoh `BTC/USDT,ETH/USDT`.
 - `INTERVAL_MINUTES`: jarak antar siklus sinkronisasi.
 
@@ -146,7 +146,7 @@ File runtime tersebut diabaikan lewat `.gitignore`.
 ## Safety
 
 - `STOP_TRADING=true`: bot tidak menempatkan order baru.
-- `KILL_SWITCH_ENABLED=true`: bot pause jika file `KILL_SWITCH_FILE` ada.
+- `KILL_SWITCH_ENABLED`: bot pause jika file `KILL_SWITCH_FILE` ada. Default `true`.
 - `KILL_SWITCH_FILE`: nama file pause lokal.
 - `GRID_STOP_LOSS_PRICE`: cancel grid dan stop order baru jika harga <= nilai ini. `0` berarti nonaktif.
 - `GRID_TAKE_PROFIT_PRICE`: cancel grid dan stop order baru jika harga >= nilai ini. `0` berarti nonaktif.
@@ -199,7 +199,7 @@ Command yang tersedia:
 
 - `/status`: ringkasan mode, pause/circuit, total fill/profit, harga, range, order aktif, dan saldo free per symbol.
 - `/orders`: jumlah dan daftar ringkas order grid aktif.
-- `/pause`: membuat `KILL_SWITCH_FILE`. Agar benar-benar menghentikan new trading cycle, set `KILL_SWITCH_ENABLED=true`.
+- `/pause`: membuat `KILL_SWITCH_FILE` dan menghentikan order baru. Jika `KILL_SWITCH_ENABLED=false`, command ditolak agar tidak memberi sinyal pause palsu.
 - `/resume`: menghapus `KILL_SWITCH_FILE`.
 - `/help`: daftar command.
 

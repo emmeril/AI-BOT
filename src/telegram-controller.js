@@ -186,10 +186,17 @@ async function handleTelegramCommand(text) {
     return;
   }
   if (command === '/pause') {
+    if (!KILL_SWITCH_ENABLED) {
+      await this.sendAlert(this.formatTelegramMessage('Pause Rejected', [
+        ['Trading', 'still active'],
+        ['Reason', 'KILL_SWITCH_ENABLED=false'],
+      ]));
+      return;
+    }
     await fs.promises.writeFile(KILL_SWITCH_PATH, `paused by telegram at ${new Date().toISOString()}\n`);
-    await this.sendAlert(this.formatTelegramMessage(KILL_SWITCH_ENABLED ? 'Paused' : 'Pause Requested', [
+    await this.sendAlert(this.formatTelegramMessage('Paused', [
       ['File', KILL_SWITCH_FILE],
-      ['Trading', KILL_SWITCH_ENABLED ? 'new orders paused' : 'not paused because KILL_SWITCH_ENABLED=false'],
+      ['Trading', 'new orders paused'],
     ]));
     return;
   }

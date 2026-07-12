@@ -25,6 +25,26 @@ test('Config.boolean parses explicit true and false values', () => {
   }
 });
 
+test('Config.number rejects invalid numeric env values', () => {
+  const original = process.env.TEST_NUMBER;
+  try {
+    process.env.TEST_NUMBER = '100O';
+    assert.throws(() => Config.number('TEST_NUMBER', 10), /TEST_NUMBER must be a numeric value/);
+
+    process.env.TEST_NUMBER = '';
+    assert.equal(Config.number('TEST_NUMBER', 10), 10);
+
+    process.env.TEST_NUMBER = '25.5';
+    assert.equal(Config.number('TEST_NUMBER', 10), 25.5);
+  } finally {
+    if (original === undefined) {
+      delete process.env.TEST_NUMBER;
+    } else {
+      process.env.TEST_NUMBER = original;
+    }
+  }
+});
+
 test('GridState.normalize repairs incomplete legacy state', () => {
   const state = GridState.normalize({
     symbols: null,

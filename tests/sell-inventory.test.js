@@ -54,3 +54,28 @@ test('placeLimit skips invalid dust amounts and clears pending level', async () 
   assert.equal(order, null);
   assert.equal(engine.pendingOrderLevels.size, 0);
 });
+
+test('post-only rejection is not retried as a taker order', async () => {
+  const engine = Object.create(SpotGridEngine.prototype);
+  engine.pendingOrderLevels = new Set();
+  engine.makeClientOrderId = () => 'grid-bonk-b-4-test';
+  engine.state = {
+    rememberOrder: () => {
+      throw new Error('should not remember failed order');
+    },
+  };
+  engine.exchange = {
+    priceToPrecision: () => '1',
+    amountToPrecision: () => '20',
+    createLimitOrder: async (symbol, side, amount, price, params) => {
+      assert.equal(params.postOnly, true);
+      throw new Error('Post only order rejected');
+    },
+  };
+
+  await assert.rejects(
+    () => engine.placeLimit('BONK/USDT', 'buy', 4, 1, 20),
+    /Post only order rejected/
+  );
+  assert.equal(engine.pendingOrderLevels.size, 0);
+});

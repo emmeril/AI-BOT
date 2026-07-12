@@ -89,34 +89,19 @@ async function cancelOrder(symbol, order, reason) {
   console.log(`[CANCEL] ${symbol} ${order.side} ${order.id} | ${reason}`);
 }
 
-async function createOrderWithFallback(symbol, side, amount, price, levelIndex) {
+async function createOrder(symbol, side, amount, price, levelIndex) {
   const clientOrderId = this.makeClientOrderId(symbol, side, levelIndex);
   const orderParams = { newClientOrderId: clientOrderId };
   if (GRID_POST_ONLY) {
     orderParams.postOnly = true;
   }
-  try {
-    return await this.exchange.createLimitOrder(
-      symbol,
-      side,
-      amount,
-      price,
-      orderParams
-    );
-  } catch (err) {
-    if (GRID_POST_ONLY && err.message && err.message.includes('Post only order rejected')) {
-      console.warn(`[POST-ONLY] ${symbol} ${side} level=${levelIndex} retrying without post-only flag`);
-      delete orderParams.postOnly;
-      return await this.exchange.createLimitOrder(
-        symbol,
-        side,
-        amount,
-        price,
-        orderParams
-      );
-    }
-    throw err;
-  }
+  return await this.exchange.createLimitOrder(
+    symbol,
+    side,
+    amount,
+    price,
+    orderParams
+  );
 }
 
 async function placeLimit(symbol, side, levelIndex, price, amount) {
@@ -156,7 +141,7 @@ async function placeLimit(symbol, side, levelIndex, price, amount) {
       return null;
     }
 
-    const order = await this.createOrderWithFallback(symbol, side, preciseAmount, precisePrice, levelIndex);
+    const order = await this.createOrder(symbol, side, preciseAmount, precisePrice, levelIndex);
     await this.state.rememberOrder(symbol, order, { levelIndex });
     console.log(`[GRID] ${symbol} ${side.toUpperCase()} level=${levelIndex} amount=${preciseAmount} price=${precisePrice}${GRID_POST_ONLY ? ' (postOnly)' : ''}`);
     return order;
@@ -208,7 +193,7 @@ const orderExecutionMethods = {
   makeClientOrderId,
   cancelGridOrders,
   cancelOrder,
-  createOrderWithFallback,
+  createOrder,
   placeLimit,
   isInsufficientFundsError,
   isInvalidOrderAmountError,

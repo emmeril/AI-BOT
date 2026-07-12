@@ -16,8 +16,13 @@ class Config {
   }
 
   static number(key, fallback) {
-    const parsed = Number(Config.get(key, fallback));
-    return Number.isFinite(parsed) ? parsed : fallback;
+    const value = process.env[key];
+    if (value === undefined || value === '') return fallback;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      throw new Error(`${key} must be a numeric value`);
+    }
+    return parsed;
   }
 
   static boolean(key, fallback = true) {
@@ -46,7 +51,7 @@ class Config {
 // ------------------------------
 const SYMBOLS = Config.list('SYMBOLS', 'BTC/USDT');
 const EXCHANGE_MODE = (() => {
-  const mode = Config.get('EXCHANGE_MODE', Config.boolean('EXCHANGE_DEMO', false) ? 'testnet' : 'live').toLowerCase();
+  const mode = Config.get('EXCHANGE_MODE', 'testnet').toLowerCase();
   if (mode === 'demo') return 'testnet';
   return mode;
 })();
@@ -170,7 +175,7 @@ const GEMINI_RANGE_ADVISOR_STATE_PATH = path.resolve(process.cwd(), GEMINI_RANGE
 
 const STOP_LOSS_PRICE = Config.number('GRID_STOP_LOSS_PRICE', 0);
 const TAKE_PROFIT_PRICE = Config.number('GRID_TAKE_PROFIT_PRICE', 0);
-const KILL_SWITCH_ENABLED = Config.boolean('KILL_SWITCH_ENABLED', false);
+const KILL_SWITCH_ENABLED = Config.boolean('KILL_SWITCH_ENABLED', true);
 const STOP_TRADING = Config.isTrue('STOP_TRADING');
 const KILL_SWITCH_FILE = Config.get('KILL_SWITCH_FILE', 'bot-paused.flag');
 const KILL_SWITCH_PATH = path.resolve(process.cwd(), KILL_SWITCH_FILE);
