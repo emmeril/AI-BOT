@@ -85,3 +85,33 @@ test('engine does not range-reset when Gemini levels match the effective existin
 
   assert.deepEqual(range, { lower: 90, upper: 110, levels: [90, 95, 100, 105, 110] });
 });
+
+test('range remap alert distinguishes unchanged bounds from rebuilt levels', async () => {
+  const symbolState = {
+    config: { lower: 90, upper: 110 },
+    orders: {},
+    lastBuyByLevel: { 1: { price: 96, amount: 1 } },
+    rangeTransition: null,
+  };
+  const alerts = [];
+  const engine = Object.create(SpotGridEngine.prototype);
+  engine.exchange = {
+    markets: {
+      'BTC/USDT': { precision: { price: 0.01 } },
+    },
+    priceToPrecision: (_symbol, price) => Number(price).toFixed(2),
+  };
+  engine.state = {
+    getSymbol: () => symbolState,
+    save: async () => {},
+  };
+  engine.cancelGridOrders = async () => ({ failed: [] });
+  engine.sendAlert = async message => { alerts.push(message); };
+
+  await engine.remapStateAfterRangeReset('BTC/USDT', 90, 110, 90, 110, [90, 96, 101, 106, 110]);
+
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0], /^\[Grid Levels Rebuilt\]/);
+  assert.match(alerts[0], /Bounds Changed: No/);
+  assert.doesNotMatch(alerts[0], /^\[Range Reset\]/);
+});

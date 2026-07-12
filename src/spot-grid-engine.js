@@ -431,10 +431,12 @@ class SpotGridEngine {
       `[RANGE] ${symbol} range reset: remapped ${oldEntries.length} buy record(s) onto new grid ` +
       `${roundNumber(newLower)}-${roundNumber(newUpper)}`
     );
-    await this.sendAlert(this.formatTelegramMessage('Range Reset', [
+    const boundsChanged = !this.effectiveRangeBoundsEqual(symbol, oldLower, oldUpper, newLower, newUpper);
+    await this.sendAlert(this.formatTelegramMessage(boundsChanged ? 'Range Reset' : 'Grid Levels Rebuilt', [
       ['Symbol', symbol],
       ['Old', `${this.formatPrice(oldLower)} - ${this.formatPrice(oldUpper)}`],
       ['New', `${this.formatPrice(newLower)} - ${this.formatPrice(newUpper)}`],
+      ['Bounds Changed', boundsChanged ? 'Yes' : 'No'],
       ['Remapped Buys', oldEntries.length],
     ]));
   }
@@ -530,6 +532,11 @@ class SpotGridEngine {
       if (oldEffective[i] !== newEffective[i]) return false;
     }
     return true;
+  }
+
+  effectiveRangeBoundsEqual(symbol, oldLower, oldUpper, newLower, newUpper) {
+    return this.getComparablePrice(symbol, oldLower) === this.getComparablePrice(symbol, newLower) &&
+      this.getComparablePrice(symbol, oldUpper) === this.getComparablePrice(symbol, newUpper);
   }
 
   // Guards against grid levels collapsing onto the same exchange-rounded price.
