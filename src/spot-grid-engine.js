@@ -745,7 +745,10 @@ class SpotGridEngine {
     const quote = this.getQuoteAsset(symbol);
     const sellableAmount = this.amountAfterBuyFee(symbol, trade);
     const costQuote = price * amount;
-    const feeQuote = this.feeToQuote(feeCost, feeCurrency, price, base, quote);
+    // If the buy fee is charged in base asset, it already reduces the
+    // sellable inventory below. Counting it again as quote cost would double
+    // charge the fee in realized P&L.
+    const feeQuote = feeCurrency === base ? 0 : this.feeToQuote(feeCost, feeCurrency, price, base, quote);
 
     symState.lastBuyByLevel[levelIndex] = this.mergeBuyRecords(
       symState.lastBuyByLevel[levelIndex],
