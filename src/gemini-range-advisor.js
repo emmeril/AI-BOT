@@ -13,7 +13,9 @@ const {
   GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT,
   GEMINI_RANGE_ADVISOR_TIMEOUT_MS,
   GEMINI_RANGE_ADVISOR_STATE_PATH,
-  GRID_COUNT
+  GRID_COUNT,
+  BINANCE_SPOT_MAKER_FEE_RATE,
+  GRID_MIN_NET_PROFIT_PCT
 } = require('./config');
 const { AtomicFileWriter } = require('./atomic-file-writer');
 const { retry, roundNumber, isPlainObject, withTimeout } = require('./utils');
@@ -183,6 +185,11 @@ class GeminiRangeAdvisor {
     const currentPrice = Number(context.currentPrice);
     const trailingUpJustShifted = Boolean(context.trailingUpJustShifted);
     const trailingDownJustShifted = Boolean(context.trailingDownJustShifted);
+    const feePctPerSide = BINANCE_SPOT_MAKER_FEE_RATE * 100;
+    const roundTripFeePct = feePctPerSide * 2;
+    const targetNetProfitRate = GRID_MIN_NET_PROFIT_PCT / 100;
+    const minGrossStepPct = roundNumber(((1 + targetNetProfitRate + BINANCE_SPOT_MAKER_FEE_RATE) /
+      (1 - BINANCE_SPOT_MAKER_FEE_RATE) - 1) * 100, 6);
 
     return `You are a quantitative trading assistant advising a SPOT GRID TRADING bot (buy low / sell high within a fixed price range).
 Grid bots perform best when the price range tightly matches realistic near-term price action (ranging/sideways market), and perform badly if the price breaks far outside the range or if the market is strongly trending.
@@ -207,7 +214,9 @@ Level construction rules:
 - levels MUST contain exactly ${GRID_COUNT + 1} numeric prices, including lower as the first value and upper as the last value.
 - levels MUST be strictly increasing with no duplicate values after rounding to 8 decimal places.
 - Do not use evenly spaced arithmetic levels unless there is no better structure. Prefer adaptive spacing: tighter near current price, likely support, and likely resistance; wider at the far edges.
-- Keep each adjacent step large enough to pay typical maker fees and noise; avoid tiny clustered steps that would overtrade.
+- Binance Spot maker fee assumption: ${feePctPerSide}% per side (${roundTripFeePct}% buy+sell round trip). Every adjacent buy-to-next-sell step MUST leave positive profit after fees.
+- For every adjacent pair, require gross step percent ((upperLevel / lowerLevel - 1) * 100) >= ${minGrossStepPct}% so the expected net grid profit is at least ${GRID_MIN_NET_PROFIT_PCT}% after Binance fees. Wider is better when volatility/noise is high.
+- Do not create tiny clustered steps near current price if they violate the fee-adjusted minimum; preserving net profit after fees is more important than adding dense levels.
 - For ranging markets, place more levels around the Bollinger middle/current-price mean-reversion zone. For trending/volatile/uncertain markets, widen spacing and lower confidence.
 - Return plain decimal numbers only, not strings.
 

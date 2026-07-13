@@ -95,6 +95,11 @@ const BOT_LOCK_PATH = path.resolve(process.cwd(), BOT_LOCK_FILE);
 const BOT_LOCK_STALE_GRACE_MS = Math.max(Config.number('BOT_LOCK_STALE_GRACE_MS', 2000), 0);
 const GRID_POST_ONLY = Config.boolean('GRID_POST_ONLY', true);
 const GRID_PRICE_PRECISION_MAX_DEVIATION_PCT = Config.number('GRID_PRICE_PRECISION_MAX_DEVIATION_PCT', 0.05);
+// Binance Spot default maker/taker fee is 0.1% per side for regular accounts.
+// Keep this configurable for BNB-fee discount or VIP tiers; the AI advisor uses
+// it to avoid grid steps that look profitable before fees but close negative.
+const BINANCE_SPOT_MAKER_FEE_RATE = Config.number('BINANCE_SPOT_MAKER_FEE_RATE', 0.001);
+const GRID_MIN_NET_PROFIT_PCT = Config.number('GRID_MIN_NET_PROFIT_PCT', 0.05);
 
 // ------------------------------
 //  Smart Grid Range Advisor (Gemini AI)
@@ -254,6 +259,8 @@ function validateRuntimeConfiguration() {
   if (!process.env.EXCHANGE_API_KEY || !process.env.EXCHANGE_SECRET) {
     errors.push('EXCHANGE_API_KEY and EXCHANGE_SECRET are required');
   }
+  requireNonNegative('BINANCE_SPOT_MAKER_FEE_RATE', BINANCE_SPOT_MAKER_FEE_RATE);
+  requireNonNegative('GRID_MIN_NET_PROFIT_PCT', GRID_MIN_NET_PROFIT_PCT);
   if (TELEGRAM_ENABLED && (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID)) {
     errors.push('TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required when TELEGRAM_ENABLED=true');
   }
@@ -326,6 +333,8 @@ module.exports = {
   BOT_LOCK_STALE_GRACE_MS,
   GRID_POST_ONLY,
   GRID_PRICE_PRECISION_MAX_DEVIATION_PCT,
+  BINANCE_SPOT_MAKER_FEE_RATE,
+  GRID_MIN_NET_PROFIT_PCT,
   GEMINI_RANGE_ADVISOR_ENABLED,
   GEMINI_API_KEY,
   GEMINI_MODEL,

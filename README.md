@@ -127,6 +127,8 @@ Trailing range hanya berlaku untuk auto range. Manual range tidak digeser oleh t
 - `GRID_REFILL_ON_FILLED`: buat order pengganti setelah fill.
 - `GRID_POST_ONLY`: gunakan maker/post-only order jika exchange mendukung.
 - `GRID_PRICE_PRECISION_MAX_DEVIATION_PCT`: toleransi perubahan harga setelah dibulatkan mengikuti precision exchange.
+- `BINANCE_SPOT_MAKER_FEE_RATE`: asumsi fee maker Binance Spot per sisi untuk prompt AI. Default `0.001` atau 0.1%; gunakan `0.00075` jika fee dibayar pakai BNB dengan diskon 25%, atau sesuaikan dengan tier VIP/pair akun.
+- `GRID_MIN_NET_PROFIT_PCT`: target profit bersih minimum per jarak grid setelah fee buy+sell. Default `0.05` atau 0.05%.
 
 ## State Dan Lock
 

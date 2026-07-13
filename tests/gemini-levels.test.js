@@ -92,6 +92,23 @@ test('engine keeps valid Gemini levels ahead of adaptive fallback', () => {
   assert.deepEqual(levels, [90, 96, 101, 106, 110]);
 });
 
+test('Gemini prompt requires fee-adjusted grid spacing', () => {
+  const advisor = Object.create(GeminiRangeAdvisor.prototype);
+
+  const prompt = advisor.buildPrompt('BTC/USDT', 100, {
+    timeframe: '1h',
+    candleCount: 100,
+    rsi14: 50,
+    atr14: 1,
+    bollinger20: { lower: 95, middle: 100, upper: 105 },
+    volatilityPct: 2,
+  });
+
+  assert.match(prompt, /Binance Spot maker fee assumption: 0\.1% per side \(0\.2% buy\+sell round trip\)/);
+  assert.match(prompt, /gross step percent .* >= 0\.25025%/);
+  assert.match(prompt, /expected net grid profit is at least 0\.05% after Binance fees/);
+});
+
 test('engine does not range-reset when Gemini levels match the effective existing grid', async () => {
   const symbolState = {
     config: { lower: 90, upper: 110 },
