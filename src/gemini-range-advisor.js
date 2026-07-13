@@ -203,6 +203,14 @@ ${trailingDownJustShifted ? 'Do not block solely because price is near the new l
 
 Based on all of this, recommend a grid trading price range (lower and upper bound) that is appropriate for the next few hours to a day, recommend the exact grid order price levels, and assess whether current conditions favor grid trading (ranging) or disfavor it (strongly trending, about to break out).
 
+Level construction rules:
+- levels MUST contain exactly ${GRID_COUNT + 1} numeric prices, including lower as the first value and upper as the last value.
+- levels MUST be strictly increasing with no duplicate values after rounding to 8 decimal places.
+- Do not use evenly spaced arithmetic levels unless there is no better structure. Prefer adaptive spacing: tighter near current price, likely support, and likely resistance; wider at the far edges.
+- Keep each adjacent step large enough to pay typical maker fees and noise; avoid tiny clustered steps that would overtrade.
+- For ranging markets, place more levels around the Bollinger middle/current-price mean-reversion zone. For trending/volatile/uncertain markets, widen spacing and lower confidence.
+- Return plain decimal numbers only, not strings.
+
 Minimum range width requirement: the recommended range MUST span at least ${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}% of the current price (i.e. upper - lower >= ${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}% * ${currentPrice}). Do not recommend a narrower range even if volatility appears very low; widen the range as needed to meet this minimum.
 
 Respond with ONLY a single valid JSON object, no markdown fences, no commentary, in exactly this shape:

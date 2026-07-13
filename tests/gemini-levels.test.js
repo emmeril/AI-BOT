@@ -50,6 +50,48 @@ test('engine uses valid Gemini grid levels after exchange precision validation',
   assert.deepEqual(levels, [90, 96, 101, 106, 110]);
 });
 
+test('engine builds adaptive levels from Gemini range when Gemini omits custom levels', () => {
+  const engine = Object.create(SpotGridEngine.prototype);
+  engine.exchange = {
+    markets: {
+      'BTC/USDT': { precision: { price: 0.01 } },
+    },
+    priceToPrecision: (_symbol, price) => Number(price).toFixed(2),
+  };
+
+  const levels = engine.getAiGridLevels('BTC/USDT', {
+    lower: 90,
+    upper: 110,
+    levels: null,
+    confidence: 0.8,
+    marketCondition: 'RANGING',
+    reasoning: 'Range only.',
+  }, 90, 110, 100);
+
+  assert.deepEqual(levels, [90, 97.5, 100, 102.5, 110]);
+});
+
+test('engine keeps valid Gemini levels ahead of adaptive fallback', () => {
+  const engine = Object.create(SpotGridEngine.prototype);
+  engine.exchange = {
+    markets: {
+      'BTC/USDT': { precision: { price: 0.01 } },
+    },
+    priceToPrecision: (_symbol, price) => Number(price).toFixed(2),
+  };
+
+  const levels = engine.getAiGridLevels('BTC/USDT', {
+    lower: 90,
+    upper: 110,
+    levels: [90, 96, 101, 106, 110],
+    confidence: 0.8,
+    marketCondition: 'RANGING',
+    reasoning: 'Custom levels.',
+  }, 90, 110, 100);
+
+  assert.deepEqual(levels, [90, 96, 101, 106, 110]);
+});
+
 test('engine does not range-reset when Gemini levels match the effective existing grid', async () => {
   const symbolState = {
     config: { lower: 90, upper: 110 },

@@ -276,9 +276,7 @@ class SpotGridEngine {
       throw new Error(`Invalid grid range. lower=${lower}, upper=${upper}`);
     }
 
-    const aiLevels = aiSuggestion?.levels
-      ? this.getUsableCustomLevels(symbol, aiSuggestion.levels, lower, upper, 'Gemini')
-      : null;
+    const aiLevels = this.getAiGridLevels(symbol, aiSuggestion, lower, upper, currentPrice);
 
     // Unlike a trailing shift (which is a parallel translation of the same
     // grid, handled by applyTrailingRangeShift's offset-based remap), a
@@ -457,6 +455,48 @@ class SpotGridEngine {
     }
     if (symbol) this.assertLevelsAreDistinct(symbol, levels, lower, upper);
     return levels;
+  }
+
+  getAiGridLevels(symbol, aiSuggestion, lower, upper, currentPrice) {
+    if (!aiSuggestion) return null;
+    const geminiLevels = aiSuggestion.levels
+      ? this.getUsableCustomLevels(symbol, aiSuggestion.levels, lower, upper, 'Gemini')
+      : null;
+    if (geminiLevels) return geminiLevels;
+
+    const adaptiveLevels = this.buildAdaptiveGridLevels(lower, upper, currentPrice);
+    const usableAdaptiveLevels = this.getUsableCustomLevels(symbol, adaptiveLevels, lower, upper, 'adaptive-AI-range');
+    if (usableAdaptiveLevels) {
+      console.log(`[GRID] ${symbol} using adaptive levels from Gemini range around current price ${roundNumber(currentPrice)}`);
+    }
+    return usableAdaptiveLevels;
+  }
+
+  buildAdaptiveGridLevels(lower, upper, currentPrice) {
+    if (GRID_COUNT < 2) throw new Error('GRID_COUNT minimal 2.');
+    if (!(lower > 0) || !(upper > lower) || !(currentPrice > lower && currentPrice < upper)) {
+      return this.buildLevels(lower, upper);
+    }
+
+    const range = upper - lower;
+    const lowerShare = (currentPrice - lower) / range;
+    const lowerIntervals = Math.max(1, Math.min(GRID_COUNT - 1, Math.round(GRID_COUNT * lowerShare)));
+    const upperIntervals = GRID_COUNT - lowerIntervals;
+    const concentration = 2;
+    const levels = [];
+
+    for (let i = 0; i <= lowerIntervals; i++) {
+      const progress = i / lowerIntervals;
+      levels.push(currentPrice - (currentPrice - lower) * Math.pow(1 - progress, concentration));
+    }
+    for (let i = 1; i <= upperIntervals; i++) {
+      const progress = i / upperIntervals;
+      levels.push(currentPrice + (upper - currentPrice) * Math.pow(progress, concentration));
+    }
+
+    levels[0] = lower;
+    levels[levels.length - 1] = upper;
+    return levels.map(level => roundNumber(level, 8));
   }
 
   getUsableCustomLevels(symbol, levels, lower, upper, source = 'custom') {
