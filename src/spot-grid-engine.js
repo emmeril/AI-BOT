@@ -699,6 +699,15 @@ class SpotGridEngine {
     return 0;
   }
 
+  formatTradeFeeDisplay(feeQuote, feeCost, feeCurrency, baseAsset, quoteAsset) {
+    const quoteText = `${this.formatMoney(feeQuote)} ${quoteAsset}`;
+    if (!(feeCost > 0) || !feeCurrency || feeCurrency === quoteAsset) return quoteText;
+    const rawText = `${this.formatAmount(feeCost)} ${feeCurrency}`;
+    if (feeQuote > 0) return `${quoteText} (${rawText})`;
+    if (feeCurrency === baseAsset) return `${quoteText} (${rawText} deducted from sellable amount)`;
+    return `${quoteText} (${rawText}, conversion unavailable)`;
+  }
+
   /**
    * Fetch and cache the USDT (quote) price for a third-party fee token such
    * as BNB.  Called once per cycle before fill processing so that
@@ -779,7 +788,7 @@ class SpotGridEngine {
       ['Price', this.formatPrice(price)],
       ['Amount', this.formatAmount(amount)],
       ['Sellable', this.formatAmount(sellableAmount)],
-      ['Fee', `${this.formatMoney(feeQuote)} ${quote}`],
+      ['Fee', this.formatTradeFeeDisplay(feeQuote, feeCost, feeCurrency, base, quote)],
     ]));
     if (!GRID_REFILL_ON_FILLED || !this.canPlaceNewOrders() || levelIndex + 1 >= levels.length) return;
     const sellLevelIndex = levelIndex + 1;
@@ -897,7 +906,7 @@ class SpotGridEngine {
       ['Price', this.formatPrice(price)],
       ['Amount', this.formatAmount(amount)],
       ['Profit', `${this.formatMoney(profit)} ${quote}`],
-      ['Fee', `${this.formatMoney(feeQuote)} ${quote}`],
+      ['Fee', this.formatTradeFeeDisplay(feeQuote, feeCost, feeCurrency, base, quote)],
     ]));
 
     if (GRID_REFILL_ON_FILLED && this.canPlaceNewOrders() && levelIndex - 1 >= 0) {

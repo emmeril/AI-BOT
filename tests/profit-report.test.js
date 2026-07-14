@@ -14,7 +14,8 @@ function createEngine() {
   state.save = async () => {};
 
   engine.state = state;
-  engine.sendAlert = async () => {};
+  engine.alerts = [];
+  engine.sendAlert = async message => { engine.alerts.push(message); };
   engine.canPlaceNewOrders = () => false;
   return engine;
 }
@@ -47,6 +48,7 @@ test('buy fee charged in base asset is not double-counted in realized profit', a
   assert.equal(symState.lastBuyByLevel[0].sellableAmount, 0.999);
   assert.equal(symState.lastBuyByLevel[0].totalCostQuote, 100);
   assert.equal(symState.lastBuyByLevel[0].totalFeeQuote, 0);
+  assert.match(engine.alerts.at(-1), /Fee: 0 USDT \(0\.001 PEPE deducted from sellable amount\)/);
 
   await engine.handleSellFill(
     'PEPE/USDT',
@@ -96,6 +98,7 @@ test('buy fee charged in quote asset remains included in realized profit', async
 
   assert.equal(symState.lastBuyByLevel[0].sellableAmount, 1);
   assert.equal(symState.lastBuyByLevel[0].totalFeeQuote, 0.1);
+  assert.match(engine.alerts.at(-1), /Fee: 0\.1 USDT/);
 
   await engine.handleSellFill(
     'PEPE/USDT',
