@@ -120,3 +120,35 @@ test('buy fee charged in quote asset remains included in realized profit', async
   assert.ok(Math.abs(symState.realizedGridProfit - 9.79) < 1e-12);
   assert.ok(Math.abs(engine.state.data.totals.realizedGridProfit - 9.79) < 1e-12);
 });
+
+test('sell fee charged in base asset consumes inventory and cost basis', async () => {
+  const engine = createEngine();
+  const symState = engine.state.getSymbol('PEPE/USDT');
+  symState.lastBuyByLevel[0] = {
+    price: 100,
+    amount: 1,
+    sellableAmount: 1,
+    totalCostQuote: 100,
+    totalFeeQuote: 0,
+  };
+
+  await engine.handleSellFill(
+    'PEPE/USDT',
+    [100, 110],
+    symState,
+    {
+      id: 'sell-base-fee',
+      order: 'sell-order',
+      side: 'sell',
+      price: 110,
+      amount: 0.999,
+      fee: { cost: 0.001, currency: 'PEPE' },
+    },
+    { levelIndex: 1 },
+    new Set()
+  );
+
+  assert.equal(symState.lastBuyByLevel[0], undefined);
+  assert.ok(Math.abs(symState.realizedGridProfit - 9.89) < 1e-10);
+  assert.match(engine.alerts.at(-1), /Fee: 0 USDT \(0\.001 PEPE deducted from sellable amount\)/);
+});

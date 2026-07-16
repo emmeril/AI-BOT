@@ -863,7 +863,11 @@ class SpotGridEngine {
     const feeCost = this.getTradeFeeCost(trade);
     const feeCurrency = this.getTradeFeeCurrency(trade);
     const proceedsQuote = price * amount;
-    const feeQuote = this.feeToQuote(feeCost, feeCurrency, price, base, quote);
+    const baseFeeAmount = feeCurrency === base ? feeCost : 0;
+    const consumedSellable = amount + baseFeeAmount;
+    const feeQuote = baseFeeAmount > 0
+      ? 0
+      : this.feeToQuote(feeCost, feeCurrency, price, base, quote);
     const totalBuyAmount = buy.amount;
     const sellableAtBuy = buy.sellableAmount ?? totalBuyAmount;
     if (!(sellableAtBuy > 0)) {
@@ -873,7 +877,10 @@ class SpotGridEngine {
       await this.state.save();
       return;
     }
-    const proportion = Math.min(amount / sellableAtBuy, 1.0);
+    // A base-asset sell commission consumes additional tracked inventory.
+    // Its acquisition cost belongs in this fill's cost basis; treating the
+    // commission as quote expense instead would leave phantom inventory.
+    const proportion = Math.min(consumedSellable / sellableAtBuy, 1.0);
     const allocatedBuyCost = buy.totalCostQuote * proportion;
     const allocatedBuyFee = buy.totalFeeQuote * proportion;
     const profit = (proceedsQuote - feeQuote) - (allocatedBuyCost + allocatedBuyFee);
@@ -882,7 +889,7 @@ class SpotGridEngine {
     this.state.data.totals.realizedGridProfit += profit;
     this.state.data.totals.filledSells++;
     this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
-    const remainingSellable = sellableAtBuy - amount;
+    const remainingSellable = sellableAtBuy - consumedSellable;
     if (remainingSellable > 0) {
       const newProportion = remainingSellable / sellableAtBuy;
       symState.lastBuyByLevel[buyLevelIndex] = {
