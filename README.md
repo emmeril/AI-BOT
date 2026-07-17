@@ -88,6 +88,11 @@ unrealized PnL posisi aktif. Nilai `net` adalah realized trading profit ditambah
 funding dan unrealized PnL. `FUNDING_SYNC_INTERVAL_MINUTES` mengatur interval
 sinkronisasi funding dengan default 60 menit.
 
+Gemini Smart Range Advisor juga tersedia pada futures. Seluruh variabelnya ada
+di `futures-env.example`. Advisor hanya merekomendasikan batas grid berdasarkan
+OHLCV dan indikator; pengelolaan posisi tetap long-only dan exit tetap mengikuti
+batas ROI futures.
+
 Referensi resmi Binance:
 
 - https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Order
