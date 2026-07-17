@@ -1,0 +1,47 @@
+# Binance USD-M Futures grid bot
+# Copy to .env before running npm run start:futures.
+
+EXCHANGE_API_KEY=your_binance_futures_demo_key
+EXCHANGE_SECRET=your_binance_futures_demo_secret
+
+# testnet uses Binance Futures Demo Trading endpoints. Start here.
+EXCHANGE_MODE=testnet
+SYMBOLS=BTC/USDT:USDT
+
+# Binance account and symbol settings applied during startup.
+LEVERAGE=5
+MARGIN_MODE=ISOLATED
+
+INTERVAL_MINUTES=1
+# Funding income changes infrequently; sync it separately from the grid cycle.
+FUNDING_SYNC_INTERVAL_MINUTES=60
+GRID_MODE=ARITHMETIC
+GRID_COUNT=10
+GRID_LOWER_PRICE=0
+GRID_UPPER_PRICE=0
+GRID_RANGE_PCT=5
+GRID_ORDER_SIZE_USDT=20
+GRID_TOTAL_INVESTMENT_USDT=0
+
+GRID_MAX_ACTIVE_BUY_ORDERS=5
+GRID_MAX_ACTIVE_SELL_ORDERS=5
+GRID_RECREATE_ON_START=false
+GRID_CANCEL_OUT_OF_RANGE=true
+GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MINUTES=3
+GRID_REFILL_ON_FILLED=true
+GRID_POST_ONLY=true
+
+# Futures ROI thresholds (despite the legacy PRICE suffix). The complete active
+# LONG is closed at ROI <= -100% or ROI >= 100%. Set either value to 0 to disable.
+GRID_STOP_LOSS_PRICE=-100
+GRID_TAKE_PROFIT_PRICE=100
+
+GRID_STATE_FILE=grid-state-futures.json
+BOT_LOCK_FILE=grid-state-futures.json.lock
+STOP_TRADING=false
+KILL_SWITCH_ENABLED=true
+KILL_SWITCH_FILE=futures-bot-paused.flag
+
+# Keep AI and Telegram disabled until the futures grid is verified in Demo Trading.
+GEMINI_RANGE_ADVISOR_ENABLED=false
+TELEGRAM_ENABLED=false

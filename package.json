@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
+    "start:futures": "node futures-grid.js",
     "test": "node --test"
   },
   "keywords": [],

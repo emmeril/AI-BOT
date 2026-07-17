@@ -58,6 +58,44 @@ Atau langsung:
 node index.js
 ```
 
+### Versi Futures USD-M
+
+Implementasi futures terpisah tersedia di `futures-grid.js`. Bot memakai Binance
+USD-M perpetual, Hedge Mode, dan hanya mengelola sisi `LONG`. Mulai dengan
+credential Binance Futures Demo Trading dan simbol unified CCXT seperti
+`BTC/USDT:USDT`.
+
+```bash
+npm run start:futures
+```
+
+Gunakan `futures-env.example` sebagai template `.env`. Saat startup bot mengatur
+Hedge Mode, margin `ISOLATED`/`CROSSED`, dan leverage per simbol. Order grid
+selalu membawa `positionSide=LONG`; `reduceOnly` tidak dikirim karena Binance
+menolaknya pada Hedge Mode. Jika `GRID_POST_ONLY=true`, order yang akan langsung
+match ditolak dan tidak diulang sebagai taker order.
+
+Khusus versi futures, `GRID_STOP_LOSS_PRICE` dan `GRID_TAKE_PROFIT_PRICE`
+digunakan sebagai persentase ROI posisi meskipun nama variabelnya masih memakai
+akhiran `PRICE`. Default `-100` dan `100`: bot menutup seluruh LONG ketika ROI
+mencapai -100% atau +100%. Bot membatalkan semua order grid sebelum market SELL,
+lalu menghentikan simbol tersebut sampai bot direstart. Nilai `0` menonaktifkan
+batas ROI yang bersangkutan.
+
+Laporan futures memisahkan realized profit dari grid dan market exit, mencatat
+trading fee setiap fill, menyinkronkan funding income Binance, serta menampilkan
+unrealized PnL posisi aktif. Nilai `net` adalah realized trading profit ditambah
+funding dan unrealized PnL. `FUNDING_SYNC_INTERVAL_MINUTES` mengatur interval
+sinkronisasi funding dengan default 60 menit.
+
+Referensi resmi Binance:
+
+- https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Order
+- https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Change-Position-Mode
+- https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Change-Margin-Type
+- https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Change-Initial-Leverage
+- https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Exchange-Information
+
 Saat berjalan, bot akan validasi konfigurasi, membersihkan temp file state, mengambil process lock, lalu sinkronisasi order dan fill setiap `INTERVAL_MINUTES`.
 
 ## Struktur Kode
