@@ -54,6 +54,7 @@ const { GeminiRangeAdvisor } = require('./gemini-range-advisor');
 const { applyTelegramMethods } = require('./telegram-controller');
 const { applyTrailingRangeMethods } = require('./trailing-range');
 const { applyOrderExecutionMethods } = require('./order-execution');
+const { startDashboardServer } = require('./dashboard-server');
 const { sleep, retry, roundNumber, numberOrZero } = require('./utils');
 
 const symbolLockContext = new AsyncLocalStorage();
@@ -1465,6 +1466,7 @@ Smart Range Advisor (Gemini): ${GEMINI_RANGE_ADVISOR_ENABLED
       : 'OFF'}
 `);
     await this.init();
+    startDashboardServer(this);
     await this.startTelegramCommandPolling();
     this.startTelegramStatusReports();
     while (true) {

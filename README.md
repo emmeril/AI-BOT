@@ -15,6 +15,7 @@ Entrypoint runtime ada di `index.js`; implementasi utama sudah dipisah ke modul 
 - Stop trading manual, kill switch file, stop-loss, dan take-profit.
 - Smart Range Advisor opsional via Gemini untuk menyarankan range grid.
 - Notifikasi, status berkala, dan command operasional via Telegram.
+- Dashboard web live untuk chart harga, order grid aktif, fill, dan hasil profit.
 
 ## Kebutuhan
 
@@ -103,6 +104,17 @@ Referensi resmi Binance:
 
 Saat berjalan, bot akan validasi konfigurasi, membersihkan temp file state, mengambil process lock, lalu sinkronisasi order dan fill setiap `INTERVAL_MINUTES`.
 
+### Dashboard Live
+
+Dashboard berbasis Bootstrap dan Alpine.js aktif secara default. Alamat awalnya `http://127.0.0.1:3000` setelah bot selesai melakukan inisialisasi. Jika port tersebut sudah dipakai, server otomatis mencoba `3001`, `3002`, dan seterusnya sampai menemukan port kosong; alamat yang terpilih ditampilkan pada log `[DASHBOARD]`. Data chart, order, dan profit diambil langsung dari engine serta exchange, lalu diperbarui otomatis tanpa perlu refresh halaman.
+
+- `DASHBOARD_ENABLED`: aktif/nonaktifkan dashboard. Default `true`.
+- `DASHBOARD_HOST`: alamat bind server. Default `127.0.0.1`; gunakan `0.0.0.0` hanya jika dashboard perlu diakses dari jaringan dan sudah dilindungi firewall/reverse proxy.
+- `DASHBOARD_PORT`: port dashboard. Default `3000`.
+- `DASHBOARD_REFRESH_SECONDS`: interval refresh data, minimal 2 detik. Default `5`.
+- `DASHBOARD_CHART_TIMEFRAME`: timeframe candle chart CCXT, misalnya `1m`, `5m`, atau `1h`. Default `1m`.
+- `DASHBOARD_CHART_LIMIT`: jumlah candle yang ditampilkan, minimal 20. Default `120`.
+
 ## Struktur Kode
 
 - `index.js`: entrypoint, validasi runtime, process lock, dan bootstrap engine.
@@ -111,6 +123,8 @@ Saat berjalan, bot akan validasi konfigurasi, membersihkan temp file state, meng
 - `src/order-execution.js`: fetch context, recovery managed order, cancel order, dan place limit order.
 - `src/trailing-range.js`: trailing up/down, remap level index, dan helper trailing.
 - `src/telegram-controller.js`: alert, status report, dan command Telegram.
+- `src/dashboard-server.js`: server dashboard dan API snapshot live.
+- `public/dashboard.html`: antarmuka chart, order, dan profit.
 - `src/grid-state.js`: state grid lokal dan processed trade id.
 - `src/gemini-range-advisor.js`: indikator teknikal dan Smart Range Advisor Gemini.
 - `src/process-lock.js`: lock file satu proses.
