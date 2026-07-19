@@ -50,6 +50,26 @@ test('engine uses valid Gemini grid levels after exchange precision validation',
   assert.deepEqual(levels, [90, 96, 101, 106, 110]);
 });
 
+test('engine rejects Gemini levels that do not cover fees and target net profit', () => {
+  const engine = Object.create(SpotGridEngine.prototype);
+  engine.exchange = {
+    markets: {
+      'SHIB/USDT': { precision: { price: 0.00000001 } },
+    },
+    priceToPrecision: (_symbol, price) => Number(price).toFixed(8),
+  };
+
+  const levels = engine.getUsableCustomLevels(
+    'SHIB/USDT',
+    [0.00000414, 0.00000415, 0.00000416, 0.00000417, 0.00000420],
+    0.00000414,
+    0.00000420,
+    'test'
+  );
+
+  assert.equal(levels, null);
+});
+
 test('engine builds adaptive levels from Gemini range when Gemini omits custom levels', () => {
   const engine = Object.create(SpotGridEngine.prototype);
   engine.exchange = {

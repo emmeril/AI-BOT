@@ -33,6 +33,22 @@ test('tracked sell amount falls back to buy amount for legacy state', () => {
   assert.equal(engine.amountForTrackedSell('BONK/USDT', 3), 42);
 });
 
+test('actual buy cost prevents a sell below fee-adjusted break-even', () => {
+  const engine = Object.create(SpotGridEngine.prototype);
+  engine.exchange = {
+    priceToPrecision: (_symbol, price) => Number(price).toFixed(8),
+  };
+  const buy = {
+    amount: 1,
+    sellableAmount: 1,
+    totalCostQuote: 100,
+    totalFeeQuote: 0.1,
+  };
+
+  assert.equal(engine.isTrackedSellProfitable('TEST/USDT', buy, 100.2), false);
+  assert.equal(engine.isTrackedSellProfitable('TEST/USDT', buy, 100.31), true);
+});
+
 test('placeLimit skips invalid dust amounts and clears pending level', async () => {
   const engine = Object.create(SpotGridEngine.prototype);
   engine.pendingOrderLevels = new Set();

@@ -30,6 +30,8 @@ const {
   GRID_STATE_FILE,
   GRID_POST_ONLY,
   GRID_PRICE_PRECISION_MAX_DEVIATION_PCT,
+  BINANCE_SPOT_MAKER_FEE_RATE,
+  GRID_MIN_NET_PROFIT_PCT,
   GEMINI_RANGE_ADVISOR_ENABLED,
   GEMINI_MODEL,
   GEMINI_RANGE_ADVISOR_TIMEFRAME,
@@ -454,7 +456,10 @@ class SpotGridEngine {
       levels[0] = lower;
       levels[GRID_COUNT] = upper;
     }
-    if (symbol) this.assertLevelsAreDistinct(symbol, levels, lower, upper);
+    if (symbol) {
+      this.assertLevelsAreDistinct(symbol, levels, lower, upper);
+      this.assertLevelsMeetMinimumProfit(symbol, levels);
+    }
     return levels;
   }
 
@@ -527,11 +532,49 @@ class SpotGridEngine {
     normalized[normalized.length - 1] = upper;
     try {
       this.assertLevelsAreDistinct(symbol, normalized, lower, upper);
+      this.assertLevelsMeetMinimumProfit(symbol, normalized);
     } catch (err) {
       console.warn(`[GRID] ${symbol} ignoring ${source} levels: ${err.message}`);
       return null;
     }
     return normalized;
+  }
+
+  assertLevelsMeetMinimumProfit(symbol, levels) {
+    const targetNetRate = GRID_MIN_NET_PROFIT_PCT / 100;
+    const minimumRatio = (1 + targetNetRate + BINANCE_SPOT_MAKER_FEE_RATE) /
+      (1 - BINANCE_SPOT_MAKER_FEE_RATE);
+    const rounded = levels.map(level => {
+      try {
+        return Number(this.exchange.priceToPrecision(symbol, level));
+      } catch {
+        return Number(level);
+      }
+    });
+
+    for (let i = 1; i < rounded.length; i++) {
+      const actualRatio = rounded[i] / rounded[i - 1];
+      if (actualRatio + 1e-12 < minimumRatio) {
+        throw new Error(
+          `${symbol} grid step ${i - 1}->${i} (${rounded[i - 1]} -> ${rounded[i]}) ` +
+          `does not cover Binance fees plus GRID_MIN_NET_PROFIT_PCT=${GRID_MIN_NET_PROFIT_PCT}`
+        );
+      }
+    }
+  }
+
+  getMinimumProfitableSellPrice(buy) {
+    const sellableAmount = Number(buy?.sellableAmount ?? buy?.amount) || 0;
+    const totalCost = (Number(buy?.totalCostQuote) || 0) + (Number(buy?.totalFeeQuote) || 0);
+    if (!(sellableAmount > 0) || !(totalCost > 0)) return Infinity;
+    const targetNetRate = GRID_MIN_NET_PROFIT_PCT / 100;
+    return (totalCost / sellableAmount) * (1 + targetNetRate) /
+      (1 - BINANCE_SPOT_MAKER_FEE_RATE);
+  }
+
+  isTrackedSellProfitable(symbol, buy, sellPrice) {
+    const preciseSellPrice = Number(this.exchange.priceToPrecision(symbol, sellPrice));
+    return preciseSellPrice + 1e-12 >= this.getMinimumProfitableSellPrice(buy);
   }
 
   levelArraysEqual(a, b) {
@@ -794,8 +837,17 @@ class SpotGridEngine {
     if (!GRID_REFILL_ON_FILLED || !this.canPlaceNewOrders() || levelIndex + 1 >= levels.length) return;
     const sellLevelIndex = levelIndex + 1;
     const sellPrice = levels[sellLevelIndex];
+    const trackedBuy = symState.lastBuyByLevel[levelIndex];
 
-    const totalSellable = Math.max(0, Number(symState.lastBuyByLevel[levelIndex]?.sellableAmount ?? symState.lastBuyByLevel[levelIndex]?.amount) || 0);
+    if (!this.isTrackedSellProfitable(symbol, trackedBuy, sellPrice)) {
+      console.warn(
+        `[SKIP] ${symbol} SELL refill level=${sellLevelIndex} price=${sellPrice} is below ` +
+        `fee-adjusted minimum ${this.getMinimumProfitableSellPrice(trackedBuy)} for actual buy cost`
+      );
+      return;
+    }
+
+    const totalSellable = Math.max(0, Number(trackedBuy?.sellableAmount ?? trackedBuy?.amount) || 0);
     if (!(totalSellable > 0)) {
       console.warn(`[SKIP] ${symbol} SELL refill level=${sellLevelIndex} | sellable amount zero after fee`);
       return;
@@ -1245,9 +1297,24 @@ class SpotGridEngine {
       managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
     }
 
+    const symState = this.state.getSymbol(symbol);
+    for (const order of managedOrders) {
+      if (String(order.side).toLowerCase() !== 'sell') continue;
+      const orderMeta = symState.orders[String(order.id)];
+      const sellLevelIndex = Number(orderMeta?.levelIndex ?? this.getLevelIndex(levels, Number(order.price)));
+      const buy = symState.lastBuyByLevel[sellLevelIndex - 1];
+      if (!buy || this.isTrackedSellProfitable(symbol, buy, Number(order.price))) continue;
+      await this.cancelOrder(
+        symbol,
+        order,
+        `sell price below fee-adjusted cost basis (minimum ${this.getMinimumProfitableSellPrice(buy)})`
+      );
+    }
+    freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+    managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+
     const activeBuyLevels = new Set();
     const activeSellLevels = new Set();
-    const symState = this.state.getSymbol(symbol);
     for (const order of managedOrders) {
       const idx = this.getLevelIndex(levels, Number(order.price));
       if (order.side === 'buy') activeBuyLevels.add(idx);
@@ -1312,6 +1379,14 @@ class SpotGridEngine {
       if (activeSellLevels.has(level.index)) continue;
       const trackedAmount = this.amountForTrackedSell(symbol, level.index);
       if (!(trackedAmount > 0)) continue;
+      const trackedBuy = symState.lastBuyByLevel[level.index - 1];
+      if (!this.isTrackedSellProfitable(symbol, trackedBuy, level.price)) {
+        console.warn(
+          `[SKIP] ${symbol} SELL level=${level.index} price=${level.price} is below ` +
+          `fee-adjusted minimum ${this.getMinimumProfitableSellPrice(trackedBuy)} for actual buy cost`
+        );
+        continue;
+      }
       let amount = Math.min(trackedAmount, baseFree);
       if (!(amount > 0)) {
         console.warn(`[SKIP] ${symbol} SELL level=${level.index} | insufficient free base, checking farther sell levels`);
