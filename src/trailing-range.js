@@ -143,6 +143,12 @@ function shiftStoredLevelIndexes(symbol, offset) {
     shiftedBuys[Number(levelIndex) + offset] = buy;
   }
   symState.lastBuyByLevel = shiftedBuys;
+
+  const shiftedRefillCounts = {};
+  for (const [levelIndex, count] of Object.entries(symState.refillCountByLevel || {})) {
+    shiftedRefillCounts[this.clampBuyLevelIndex(Number(levelIndex) + offset)] = count;
+  }
+  symState.refillCountByLevel = shiftedRefillCounts;
 }
 
 function shiftStoredOrderIndexes(symState, offset) {
@@ -194,6 +200,10 @@ function mergeBuyRecords(existing, incoming, { aggregatedAcrossLevels = false } 
     sellableAmount,
     totalCostQuote,
     totalFeeQuote,
+    refillCount: Math.max(
+      Number(existing.refillCount) || 0,
+      Number(incoming.refillCount) || 0
+    ),
     at: Date.parse(incoming.at || 0) > Date.parse(existing.at || 0) ? incoming.at : existing.at,
     aggregated: aggregatedAcrossLevels || existing.aggregated === true || incoming.aggregated === true,
   };
@@ -283,6 +293,12 @@ async function applyTrailingRangeShift(symbol, lower, upper, shift, direction) {
     }
   }
   symState.lastBuyByLevel = cleanedBuys;
+  symState.refillCountByLevel = Object.fromEntries(
+    Object.entries(cleanedBuys).map(([levelIndex, buy]) => [
+      levelIndex,
+      Math.max(0, Number(buy.refillCount) || 0),
+    ])
+  );
   trailingState.shifts += shift.steps;
   trailingState.lastShiftAt = new Date().toISOString();
   symState.rangeTransition = null;

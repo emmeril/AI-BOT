@@ -117,6 +117,7 @@ const GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MS = Math.max(
   0
 ) * MINUTE_MS;
 const GRID_REFILL_ON_FILLED = Config.boolean('GRID_REFILL_ON_FILLED', true);
+const GRID_MAX_REFILLS = Config.number('GRID_MAX_REFILLS', 2);
 const GRID_STATE_FILE = Config.get('GRID_STATE_FILE', 'grid-state-futures.json');
 const GRID_STATE_PATH = path.resolve(process.cwd(), GRID_STATE_FILE);
 const BOT_LOCK_FILE = Config.get('BOT_LOCK_FILE', `${GRID_STATE_FILE}.lock`);
@@ -386,6 +387,7 @@ function validateRuntimeConfiguration() {
   );
   requireInteger('GRID_MAX_ACTIVE_BUY_ORDERS', GRID_MAX_ACTIVE_BUY_ORDERS);
   requireInteger('GRID_MAX_ACTIVE_SELL_ORDERS', GRID_MAX_ACTIVE_SELL_ORDERS);
+  requireInteger('GRID_MAX_REFILLS', GRID_MAX_REFILLS, 0);
   requireNonNegative('BOT_LOCK_STALE_GRACE_MS', BOT_LOCK_STALE_GRACE_MS);
   requirePositive('TELEGRAM_TIMEOUT_MS', TELEGRAM_TIMEOUT_MS);
   requirePositive('LEVERAGE', LEVERAGE);
@@ -772,6 +774,7 @@ class GridState {
         config: {},
         orders: {},
         lastBuyByLevel: {},
+        refillCountByLevel: {},
         realizedGridProfit: 0,
         realizedExitProfit: 0,
         fundingProfit: 0,
@@ -787,6 +790,7 @@ class GridState {
     sym.config = isPlainObject(sym.config) ? sym.config : {};
     sym.orders = isPlainObject(sym.orders) ? sym.orders : {};
     sym.lastBuyByLevel = isPlainObject(sym.lastBuyByLevel) ? sym.lastBuyByLevel : {};
+    sym.refillCountByLevel = isPlainObject(sym.refillCountByLevel) ? sym.refillCountByLevel : {};
     sym.realizedGridProfit = numberOrZero(sym.realizedGridProfit);
     sym.realizedExitProfit = numberOrZero(sym.realizedExitProfit);
     sym.fundingProfit = numberOrZero(sym.fundingProfit);
@@ -812,6 +816,7 @@ class GridState {
       id: String(order.id),
       side: order.side,
       levelIndex: meta.levelIndex,
+      refillCount: Number(meta.refillCount) || 0,
       price: Number(order.price),
       amount: Number(order.amount),
       createdAt: new Date().toISOString(),
@@ -1557,6 +1562,7 @@ class FuturesGridEngine {
 
     const oldEntries = Object.entries(symState.lastBuyByLevel);
     if (oldEntries.length === 0) {
+      symState.refillCountByLevel = {};
       symState.rangeTransition = null;
       await this.state.save();
       return;
@@ -1576,6 +1582,7 @@ class FuturesGridEngine {
         `during remap (${err.message}); clearing ${oldEntries.length} buy record(s) to avoid stale P&L data.`
       );
       symState.lastBuyByLevel = {};
+      symState.refillCountByLevel = {};
       symState.rangeTransition = null;
       await this.state.save();
       return;
@@ -1597,6 +1604,12 @@ class FuturesGridEngine {
       );
     }
     symState.lastBuyByLevel = remapped;
+    symState.refillCountByLevel = Object.fromEntries(
+      Object.entries(remapped).map(([levelIndex, buy]) => [
+        levelIndex,
+        Math.max(0, Number(buy.refillCount) || 0),
+      ])
+    );
     symState.rangeTransition = null;
     await this.state.save();
 
@@ -1719,6 +1732,12 @@ class FuturesGridEngine {
       shiftedBuys[Number(levelIndex) + offset] = buy;
     }
     symState.lastBuyByLevel = shiftedBuys;
+
+    const shiftedRefillCounts = {};
+    for (const [levelIndex, count] of Object.entries(symState.refillCountByLevel || {})) {
+      shiftedRefillCounts[this.clampBuyLevelIndex(Number(levelIndex) + offset)] = count;
+    }
+    symState.refillCountByLevel = shiftedRefillCounts;
   }
 
   shiftStoredOrderIndexes(symState, offset) {
@@ -1770,6 +1789,10 @@ class FuturesGridEngine {
       sellableAmount,
       totalCostQuote,
       totalFeeQuote,
+      refillCount: Math.max(
+        Number(existing.refillCount) || 0,
+        Number(incoming.refillCount) || 0
+      ),
       at: Date.parse(incoming.at || 0) > Date.parse(existing.at || 0) ? incoming.at : existing.at,
       aggregated: aggregatedAcrossLevels || existing.aggregated === true || incoming.aggregated === true,
     };
@@ -1875,6 +1898,12 @@ class FuturesGridEngine {
       }
     }
     symState.lastBuyByLevel = cleanedBuys;
+    symState.refillCountByLevel = Object.fromEntries(
+      Object.entries(cleanedBuys).map(([levelIndex, buy]) => [
+        levelIndex,
+        Math.max(0, Number(buy.refillCount) || 0),
+      ])
+    );
     trailingState.shifts += shift.steps;
     trailingState.lastShiftAt = new Date().toISOString();
     symState.rangeTransition = null;
@@ -2014,11 +2043,14 @@ class FuturesGridEngine {
     const managed = [];
     for (const order of openOrders) {
       const orderId = String(order.id);
-      const levelIndex = this.getBotOrderLevel(order);
-      if (!managedIds.has(orderId) && levelIndex !== null) {
-        await this.state.rememberOrder(symbol, order, { levelIndex });
+      const orderMeta = this.getBotOrderMeta(order);
+      if (!managedIds.has(orderId) && orderMeta) {
+        await this.state.rememberOrder(symbol, order, orderMeta);
         managedIds.add(orderId);
-        console.warn(`[RECOVER] ${symbol} adopted order ${orderId} level=${levelIndex}`);
+        console.warn(
+          `[RECOVER] ${symbol} adopted order ${orderId} level=${orderMeta.levelIndex} ` +
+          `refill=${orderMeta.refillCount}`
+        );
       }
       if (managedIds.has(orderId)) managed.push(order);
     }
@@ -2030,14 +2062,23 @@ class FuturesGridEngine {
   }
 
   getBotOrderLevel(order) {
-    const match = this.getOrderClientId(order).match(/^grid-[a-z0-9]+-[bs]-(\d+)-/);
-    return match ? Number(match[1]) : null;
+    return this.getBotOrderMeta(order)?.levelIndex ?? null;
   }
 
-  makeClientOrderId(symbol, side, levelIndex) {
+  getBotOrderMeta(order) {
+    const match = this.getOrderClientId(order).match(/^grid-[a-z0-9]+-([bs])-(\d+)-(?:r(\d+)-)?/);
+    if (!match) return null;
+    return {
+      side: match[1] === 'b' ? 'buy' : 'sell',
+      levelIndex: Number(match[2]),
+      refillCount: Number(match[3]) || 0,
+    };
+  }
+
+  makeClientOrderId(symbol, side, levelIndex, refillCount = 0) {
     const market = symbol.replace(/[^a-z0-9]/gi, '').slice(0, 10).toLowerCase();
     const nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-    return `grid-${market}-${side[0]}-${levelIndex}-${nonce}`.slice(0, 36);
+    return `grid-${market}-${side[0]}-${levelIndex}-r${refillCount}-${nonce}`.slice(0, 36);
   }
 
   async cancelGridOrders(symbol, reason) {
@@ -2066,8 +2107,8 @@ class FuturesGridEngine {
     console.log(`[CANCEL] ${symbol} ${order.side} ${order.id} | ${reason}`);
   }
 
-  async createFuturesLimitOrder(symbol, side, amount, price, levelIndex) {
-    const clientOrderId = this.makeClientOrderId(symbol, side, levelIndex);
+  async createFuturesLimitOrder(symbol, side, amount, price, levelIndex, refillCount = 0) {
+    const clientOrderId = this.makeClientOrderId(symbol, side, levelIndex, refillCount);
     // In Hedge Mode, positionSide tells Binance which side of the position
     // this order affects. Since the grid only ever trades the LONG side,
     // a BUY here opens/adds to LONG and a SELL reduces/closes LONG -
@@ -2090,7 +2131,7 @@ class FuturesGridEngine {
     );
   }
 
-  async placeLimit(symbol, side, levelIndex, price, amount) {
+  async placeLimit(symbol, side, levelIndex, price, amount, { refillCount = 0 } = {}) {
     const pendingKey = `${symbol}|${side}|${levelIndex}`;
     if (this.pendingOrderLevels.has(pendingKey)) {
       console.warn(`[SKIP] ${symbol} ${side.toUpperCase()} level=${levelIndex} | placement already in progress`);
@@ -2127,9 +2168,9 @@ class FuturesGridEngine {
         return null;
       }
 
-      const order = await this.createFuturesLimitOrder(symbol, side, preciseAmount, precisePrice, levelIndex);
-      await this.state.rememberOrder(symbol, order, { levelIndex });
-      console.log(`[GRID] ${symbol} ${side.toUpperCase()} level=${levelIndex} amount=${preciseAmount} price=${precisePrice}${GRID_POST_ONLY ? ' (postOnly)' : ''}`);
+      const order = await this.createFuturesLimitOrder(symbol, side, preciseAmount, precisePrice, levelIndex, refillCount);
+      await this.state.rememberOrder(symbol, order, { levelIndex, refillCount });
+      console.log(`[GRID] ${symbol} ${side.toUpperCase()} level=${levelIndex} refill=${refillCount} amount=${preciseAmount} price=${precisePrice}${GRID_POST_ONLY ? ' (postOnly)' : ''}`);
       return order;
     } catch (err) {
       if (this.isInsufficientFundsError(err)) {
@@ -2343,6 +2384,7 @@ class FuturesGridEngine {
     const price = Number(trade.price);
     const amount = Number(trade.amount);
     const levelIndex = Number(orderMeta.levelIndex);
+    const refillCount = Math.max(0, Number(orderMeta.refillCount) || 0);
     const feeCost = this.getTradeFeeCost(trade);
     const feeCurrency = this.getTradeFeeCurrency(trade);
     const base = this.getBaseAsset(symbol);
@@ -2350,6 +2392,7 @@ class FuturesGridEngine {
     const sellableAmount = this.amountAfterBuyFee(symbol, trade);
     const costQuote = price * amount;
     const feeQuote = this.feeToQuote(feeCost, feeCurrency, price, base, quote);
+    symState.refillCountByLevel ||= {};
 
     symState.lastBuyByLevel[levelIndex] = this.mergeBuyRecords(
       symState.lastBuyByLevel[levelIndex],
@@ -2359,9 +2402,11 @@ class FuturesGridEngine {
         sellableAmount,
         totalCostQuote: costQuote,
         totalFeeQuote: feeQuote,
+        refillCount,
         at: trade.datetime,
       }
     );
+    symState.refillCountByLevel[levelIndex] = refillCount;
     this.state.data.totals.filledBuys++;
     symState.tradingFees += feeQuote;
     this.state.data.totals.tradingFees += feeQuote;
@@ -2413,7 +2458,7 @@ class FuturesGridEngine {
         );
         try {
           await this.cancelOrder(symbol, existingOrder, `sell amount update level=${sellLevelIndex}`);
-          await this.placeLimit(symbol, 'sell', sellLevelIndex, sellPrice, totalSellable);
+          await this.placeLimit(symbol, 'sell', sellLevelIndex, sellPrice, totalSellable, { refillCount });
         } catch (err) {
           console.warn(`[UPDATE] ${symbol} SELL level=${sellLevelIndex} cancel+replace failed: ${err.message}`);
         }
@@ -2428,7 +2473,7 @@ class FuturesGridEngine {
       return;
     }
 
-    await this.placeLimit(symbol, 'sell', sellLevelIndex, sellPrice, totalSellable);
+    await this.placeLimit(symbol, 'sell', sellLevelIndex, sellPrice, totalSellable, { refillCount });
   }
 
   async handleSellFill(symbol, levels, symState, trade, orderMeta, openOrderIds) {
@@ -2447,6 +2492,7 @@ class FuturesGridEngine {
 
     const base = this.getBaseAsset(symbol);
     const quote = this.getQuoteAsset(symbol);
+    symState.refillCountByLevel ||= {};
     const feeCost = this.getTradeFeeCost(trade);
     const feeCurrency = this.getTradeFeeCurrency(trade);
     const proceedsQuote = price * amount;
@@ -2464,12 +2510,14 @@ class FuturesGridEngine {
     const allocatedBuyCost = buy.totalCostQuote * proportion;
     const allocatedBuyFee = buy.totalFeeQuote * proportion;
     const profit = (proceedsQuote - feeQuote) - (allocatedBuyCost + allocatedBuyFee);
+    const refillCount = Math.max(0, Number(orderMeta.refillCount ?? buy.refillCount) || 0);
 
     symState.realizedGridProfit += profit;
     this.state.data.totals.realizedGridProfit += profit;
     symState.tradingFees += feeQuote;
     this.state.data.totals.tradingFees += feeQuote;
     this.state.data.totals.filledSells++;
+    symState.refillCountByLevel[buyLevelIndex] = refillCount;
     this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
     const remainingSellable = sellableAtBuy - amount;
     if (remainingSellable > 0) {
@@ -2492,6 +2540,13 @@ class FuturesGridEngine {
     await this.sendAlert(`[GRID SELL] ${symbol} amount=${amount} @ ${price} | profit=${profit.toFixed(4)} ${quote} | fee=${feeQuote.toFixed(4)} ${quote}`);
 
     if (GRID_REFILL_ON_FILLED && levelIndex - 1 >= 0) {
+      const nextRefillCount = refillCount + 1;
+      if (nextRefillCount > GRID_MAX_REFILLS) {
+        console.warn(
+          `[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | max refill ${GRID_MAX_REFILLS} reached`
+        );
+        return;
+      }
       const buyPrice = levels[levelIndex - 1];
       if (this.hasActiveOrderAtLevel(symState, 'buy', levelIndex - 1)) {
         console.warn(`[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | buy order already active`);
@@ -2524,7 +2579,9 @@ class FuturesGridEngine {
         );
         return;
       }
-      await this.placeLimit(symbol, 'buy', levelIndex - 1, buyPrice, amountToBuy);
+      await this.placeLimit(symbol, 'buy', levelIndex - 1, buyPrice, amountToBuy, {
+        refillCount: nextRefillCount,
+      });
     }
   }
 
@@ -2706,21 +2763,20 @@ class FuturesGridEngine {
       // embedded in the trade so fills are never lost across restarts.
       let orderMeta = symState.orders[String(trade.order)];
       if (!orderMeta) {
-        // clientOrderId format: grid-<market>-<s|b>-<levelIndex>-<nonce>
+        // clientOrderId format: grid-<market>-<s|b>-<levelIndex>-r<refillCount>-<nonce>
         const clientId = String(
           trade.info?.clientOrderId ||
           trade.info?.origClientOrderId ||
           trade.clientOrderId ||
           ''
         );
-        const match = clientId.match(/^grid-[a-z0-9]+-([bs])-(\d+)-/);
-        if (match) {
-          const side = match[1] === 'b' ? 'buy' : 'sell';
-          const levelIndex = Number(match[2]);
-          orderMeta = { levelIndex, side };
+        const recoveredMeta = this.getBotOrderMeta({ clientOrderId: clientId });
+        if (recoveredMeta) {
+          orderMeta = recoveredMeta;
           console.warn(
             `[RECOVER] ${symbol} reconstructed orderMeta for trade ${id} ` +
-            `from clientOrderId="${clientId}" (level=${levelIndex}, side=${side})`
+            `from clientOrderId="${clientId}" (level=${orderMeta.levelIndex}, ` +
+            `side=${orderMeta.side}, refill=${orderMeta.refillCount})`
           );
         } else if (/^grid-[a-z0-9]+-s-exit-/.test(clientId)) {
           orderMeta = { side: 'sell', isPositionExit: true };
@@ -2918,6 +2974,13 @@ class FuturesGridEngine {
         break;
       }
       if (activeBuyLevels.has(level.index)) continue;
+      if (symState.lastBuyByLevel[level.index]) continue;
+      const previousRefillCount = symState.refillCountByLevel[level.index];
+      if (previousRefillCount !== undefined && !GRID_REFILL_ON_FILLED) continue;
+      const refillCount = previousRefillCount === undefined
+        ? 0
+        : Math.max(0, Number(previousRefillCount) || 0) + 1;
+      if (refillCount > GRID_MAX_REFILLS) continue;
       let amount = this.amountForBuy(symbol, level.price, remainingInvestmentUsdt);
       let cost = amount * level.price;
       if (!(amount > 0)) {
@@ -2949,7 +3012,7 @@ class FuturesGridEngine {
       // that notional only requires notional / LEVERAGE of free margin.
       const marginRequired = cost / LEVERAGE;
       if (quoteFree < marginRequired) break;
-      const order = await this.placeLimit(symbol, 'buy', level.index, level.price, amount);
+      const order = await this.placeLimit(symbol, 'buy', level.index, level.price, amount, { refillCount });
       if (!order) break;
       quoteFree -= marginRequired;
       remainingInvestmentUsdt = Math.max(0, remainingInvestmentUsdt - cost);
@@ -2963,6 +3026,7 @@ class FuturesGridEngine {
       if (activeSellLevels.has(level.index)) continue;
       const trackedAmount = this.amountForTrackedSell(symbol, level.index);
       if (!(trackedAmount > 0)) continue;
+      const trackedBuy = symState.lastBuyByLevel[level.index - 1];
       let amount = Math.min(trackedAmount, baseFree);
       if (!(amount > 0)) {
         console.warn(`[SKIP] ${symbol} SELL level=${level.index} | insufficient free base, checking farther sell levels`);
@@ -2976,7 +3040,8 @@ class FuturesGridEngine {
         continue;
       }
 
-      const order = await this.placeLimit(symbol, 'sell', level.index, level.price, amount);
+      const refillCount = Math.max(0, Number(trackedBuy?.refillCount) || 0);
+      const order = await this.placeLimit(symbol, 'sell', level.index, level.price, amount, { refillCount });
       if (!order) continue;
       baseFree -= amount;
     }
@@ -3159,6 +3224,7 @@ Trailing Range: ${GRID_TRAILING_RANGE_ENABLED ? 'ON (auto up/down)' : 'OFF'}
 Trailing Up: ${GRID_TRAILING_UP_ENABLED ? `ON (range-follow trigger, cooldown=${GRID_TRAILING_UP_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
 Trailing Down: ${GRID_TRAILING_DOWN_ENABLED ? `ON (range-follow trigger, cooldown=${GRID_TRAILING_DOWN_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
 Max Active Orders: buy=${GRID_MAX_ACTIVE_BUY_ORDERS}, sell=${GRID_MAX_ACTIVE_SELL_ORDERS}
+Max Refills Per Level: ${GRID_MAX_REFILLS}
 Recreate On Start: ${GRID_RECREATE_ON_START ? 'ON' : 'OFF'}
 Post Only (Maker): ${GRID_POST_ONLY ? 'ON' : 'OFF'}
 Smart Range Advisor (Gemini): ${GEMINI_RANGE_ADVISOR_ENABLED

@@ -25,6 +25,7 @@ class GridState {
       config: {},
       orders: {},
       lastBuyByLevel: {},
+      refillCountByLevel: {},
       realizedGridProfit: 0,
       lastTradeTimestamp: 0,
       trailingUp: { shifts: 0, lastShiftAt: null },
@@ -38,6 +39,7 @@ class GridState {
     sym.config = isPlainObject(sym.config) ? sym.config : {};
     sym.orders = isPlainObject(sym.orders) ? sym.orders : {};
     sym.lastBuyByLevel = isPlainObject(sym.lastBuyByLevel) ? sym.lastBuyByLevel : {};
+    sym.refillCountByLevel = isPlainObject(sym.refillCountByLevel) ? sym.refillCountByLevel : {};
     sym.realizedGridProfit = numberOrZero(sym.realizedGridProfit);
     sym.lastTradeTimestamp = numberOrZero(sym.lastTradeTimestamp);
     if (!isPlainObject(sym.trailingUp)) sym.trailingUp = { shifts: 0, lastShiftAt: null };
@@ -109,6 +111,7 @@ class GridState {
       id: String(order.id),
       side: order.side,
       levelIndex: meta.levelIndex,
+      refillCount: Number(meta.refillCount) || 0,
       price: Number(order.price),
       amount: Number(order.amount),
       createdAt: new Date().toISOString(),

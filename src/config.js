@@ -88,6 +88,7 @@ const GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MS = Math.max(
   0
 ) * MINUTE_MS;
 const GRID_REFILL_ON_FILLED = Config.boolean('GRID_REFILL_ON_FILLED', true);
+const GRID_MAX_REFILLS = Config.number('GRID_MAX_REFILLS', 2);
 const GRID_STATE_FILE = Config.get('GRID_STATE_FILE', 'grid-state-spot.json');
 const GRID_STATE_PATH = path.resolve(process.cwd(), GRID_STATE_FILE);
 const BOT_LOCK_FILE = Config.get('BOT_LOCK_FILE', `${GRID_STATE_FILE}.lock`);
@@ -249,6 +250,7 @@ function validateRuntimeConfiguration() {
   );
   requireInteger('GRID_MAX_ACTIVE_BUY_ORDERS', GRID_MAX_ACTIVE_BUY_ORDERS);
   requireInteger('GRID_MAX_ACTIVE_SELL_ORDERS', GRID_MAX_ACTIVE_SELL_ORDERS);
+  requireInteger('GRID_MAX_REFILLS', GRID_MAX_REFILLS, 0);
   requireNonNegative('BOT_LOCK_STALE_GRACE_MS', BOT_LOCK_STALE_GRACE_MS);
   requirePositive('TELEGRAM_TIMEOUT_MS', TELEGRAM_TIMEOUT_MS);
   requirePositive('TELEGRAM_STATUS_REPORT_INTERVAL_MS', TELEGRAM_STATUS_REPORT_INTERVAL_MS);
@@ -339,6 +341,7 @@ module.exports = {
   GRID_CANCEL_OUT_OF_RANGE,
   GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MS,
   GRID_REFILL_ON_FILLED,
+  GRID_MAX_REFILLS,
   GRID_STATE_FILE,
   GRID_STATE_PATH,
   BOT_LOCK_FILE,

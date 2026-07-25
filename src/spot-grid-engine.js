@@ -27,6 +27,7 @@ const {
   GRID_CANCEL_OUT_OF_RANGE,
   GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MS,
   GRID_REFILL_ON_FILLED,
+  GRID_MAX_REFILLS,
   GRID_STATE_FILE,
   GRID_POST_ONLY,
   GRID_PRICE_PRECISION_MAX_DEVIATION_PCT,
@@ -385,6 +386,7 @@ class SpotGridEngine {
 
     const oldEntries = Object.entries(symState.lastBuyByLevel);
     if (oldEntries.length === 0) {
+      symState.refillCountByLevel = {};
       symState.rangeTransition = null;
       await this.state.save();
       return;
@@ -404,6 +406,7 @@ class SpotGridEngine {
         `during remap (${err.message}); clearing ${oldEntries.length} buy record(s) to avoid stale P&L data.`
       );
       symState.lastBuyByLevel = {};
+      symState.refillCountByLevel = {};
       symState.rangeTransition = null;
       await this.state.save();
       return;
@@ -425,6 +428,12 @@ class SpotGridEngine {
       );
     }
     symState.lastBuyByLevel = remapped;
+    symState.refillCountByLevel = Object.fromEntries(
+      Object.entries(remapped).map(([levelIndex, buy]) => [
+        levelIndex,
+        Math.max(0, Number(buy.refillCount) || 0),
+      ])
+    );
     symState.rangeTransition = null;
     await this.state.save();
 
@@ -792,12 +801,14 @@ class SpotGridEngine {
     const price = Number(trade.price);
     const amount = Number(trade.amount);
     const levelIndex = Number(orderMeta.levelIndex);
+    const refillCount = Math.max(0, Number(orderMeta.refillCount) || 0);
     const feeCost = this.getTradeFeeCost(trade);
     const feeCurrency = this.getTradeFeeCurrency(trade);
     const base = this.getBaseAsset(symbol);
     const quote = this.getQuoteAsset(symbol);
     const sellableAmount = this.amountAfterBuyFee(symbol, trade);
     const costQuote = price * amount;
+    symState.refillCountByLevel ||= {};
     // If the buy fee is charged in base asset, it already reduces the
     // sellable inventory below. Counting it again as quote cost would double
     // charge the fee in realized P&L.
@@ -811,9 +822,11 @@ class SpotGridEngine {
         sellableAmount,
         totalCostQuote: costQuote,
         totalFeeQuote: feeQuote,
+        refillCount,
         at: trade.datetime,
       }
     );
+    symState.refillCountByLevel[levelIndex] = refillCount;
     this.state.data.totals.filledBuys++;
     this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
     // All mutations for this fill are applied in-memory first and persisted
@@ -879,7 +892,7 @@ class SpotGridEngine {
         );
         try {
           await this.cancelOrder(symbol, existingOrder, `sell amount update level=${sellLevelIndex}`);
-          await this.placeLimit(symbol, 'sell', sellLevelIndex, sellPrice, totalSellable);
+          await this.placeLimit(symbol, 'sell', sellLevelIndex, sellPrice, totalSellable, { refillCount });
         } catch (err) {
           console.warn(`[UPDATE] ${symbol} SELL level=${sellLevelIndex} cancel+replace failed: ${err.message}`);
         }
@@ -894,7 +907,7 @@ class SpotGridEngine {
       return;
     }
 
-    await this.placeLimit(symbol, 'sell', sellLevelIndex, sellPrice, totalSellable);
+    await this.placeLimit(symbol, 'sell', sellLevelIndex, sellPrice, totalSellable, { refillCount });
   }
 
   async handleSellFill(symbol, levels, symState, trade, orderMeta, openOrderIds) {
@@ -913,6 +926,7 @@ class SpotGridEngine {
 
     const base = this.getBaseAsset(symbol);
     const quote = this.getQuoteAsset(symbol);
+    symState.refillCountByLevel ||= {};
     const feeCost = this.getTradeFeeCost(trade);
     const feeCurrency = this.getTradeFeeCurrency(trade);
     const proceedsQuote = price * amount;
@@ -937,10 +951,12 @@ class SpotGridEngine {
     const allocatedBuyCost = buy.totalCostQuote * proportion;
     const allocatedBuyFee = buy.totalFeeQuote * proportion;
     const profit = (proceedsQuote - feeQuote) - (allocatedBuyCost + allocatedBuyFee);
+    const refillCount = Math.max(0, Number(orderMeta.refillCount ?? buy.refillCount) || 0);
 
     symState.realizedGridProfit += profit;
     this.state.data.totals.realizedGridProfit += profit;
     this.state.data.totals.filledSells++;
+    symState.refillCountByLevel[buyLevelIndex] = refillCount;
     this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
     const remainingSellable = sellableAtBuy - consumedSellable;
     if (remainingSellable > 0) {
@@ -970,6 +986,13 @@ class SpotGridEngine {
     ]));
 
     if (GRID_REFILL_ON_FILLED && this.canPlaceNewOrders() && levelIndex - 1 >= 0) {
+      const nextRefillCount = refillCount + 1;
+      if (nextRefillCount > GRID_MAX_REFILLS) {
+        console.warn(
+          `[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | max refill ${GRID_MAX_REFILLS} reached`
+        );
+        return;
+      }
       const buyPrice = levels[levelIndex - 1];
       if (this.hasActiveOrderAtLevel(symState, 'buy', levelIndex - 1)) {
         console.warn(`[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | buy order already active`);
@@ -1002,7 +1025,9 @@ class SpotGridEngine {
         );
         return;
       }
-      await this.placeLimit(symbol, 'buy', levelIndex - 1, buyPrice, amountToBuy);
+      await this.placeLimit(symbol, 'buy', levelIndex - 1, buyPrice, amountToBuy, {
+        refillCount: nextRefillCount,
+      });
     }
   }
 
@@ -1115,21 +1140,20 @@ class SpotGridEngine {
       // embedded in the trade so fills are never lost across restarts.
       let orderMeta = symState.orders[String(trade.order)];
       if (!orderMeta) {
-        // clientOrderId format: grid-<market>-<s|b>-<levelIndex>-<nonce>
+        // clientOrderId format: grid-<market>-<s|b>-<levelIndex>-r<refillCount>-<nonce>
         const clientId = String(
           trade.info?.clientOrderId ||
           trade.info?.origClientOrderId ||
           trade.clientOrderId ||
           ''
         );
-        const match = clientId.match(/^grid-[a-z0-9]+-([bs])-(\d+)-/);
-        if (match) {
-          const side = match[1] === 'b' ? 'buy' : 'sell';
-          const levelIndex = Number(match[2]);
-          orderMeta = { levelIndex, side };
+        const recoveredMeta = this.getBotOrderMeta({ clientOrderId: clientId });
+        if (recoveredMeta) {
+          orderMeta = recoveredMeta;
           console.warn(
             `[RECOVER] ${symbol} reconstructed orderMeta for trade ${id} ` +
-            `from clientOrderId="${clientId}" (level=${levelIndex}, side=${side})`
+            `from clientOrderId="${clientId}" (level=${orderMeta.levelIndex}, ` +
+            `side=${orderMeta.side}, refill=${orderMeta.refillCount})`
           );
         } else {
           // Cannot determine which grid level this fill belongs to; skip it
@@ -1338,6 +1362,13 @@ class SpotGridEngine {
         break;
       }
       if (activeBuyLevels.has(level.index)) continue;
+      if (symState.lastBuyByLevel[level.index]) continue;
+      const previousRefillCount = symState.refillCountByLevel[level.index];
+      if (previousRefillCount !== undefined && !GRID_REFILL_ON_FILLED) continue;
+      const refillCount = previousRefillCount === undefined
+        ? 0
+        : Math.max(0, Number(previousRefillCount) || 0) + 1;
+      if (refillCount > GRID_MAX_REFILLS) continue;
       let amount = this.amountForBuy(symbol, level.price, remainingInvestmentUsdt);
       let cost = amount * level.price;
       if (!(amount > 0)) {
@@ -1365,7 +1396,7 @@ class SpotGridEngine {
         break;
       }
       if (quoteFree < cost) break;
-      const order = await this.placeLimit(symbol, 'buy', level.index, level.price, amount);
+      const order = await this.placeLimit(symbol, 'buy', level.index, level.price, amount, { refillCount });
       if (!order) break;
       quoteFree -= cost;
       remainingInvestmentUsdt = Math.max(0, remainingInvestmentUsdt - cost);
@@ -1400,7 +1431,8 @@ class SpotGridEngine {
         continue;
       }
 
-      const order = await this.placeLimit(symbol, 'sell', level.index, level.price, amount);
+      const refillCount = Math.max(0, Number(trackedBuy.refillCount) || 0);
+      const order = await this.placeLimit(symbol, 'sell', level.index, level.price, amount, { refillCount });
       if (!order) continue;
       baseFree -= amount;
     }
@@ -1534,6 +1566,7 @@ Trailing Range: ${GRID_TRAILING_RANGE_ENABLED ? 'ON (auto up/down)' : 'OFF'}
 Trailing Up: ${GRID_TRAILING_UP_ENABLED ? `ON (range-follow trigger, cooldown=${GRID_TRAILING_UP_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
 Trailing Down: ${GRID_TRAILING_DOWN_ENABLED ? `ON (range-follow trigger, cooldown=${GRID_TRAILING_DOWN_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
 Max Active Orders: buy=${GRID_MAX_ACTIVE_BUY_ORDERS}, sell=${GRID_MAX_ACTIVE_SELL_ORDERS}
+Max Refills Per Level: ${GRID_MAX_REFILLS}
 Recreate On Start: ${GRID_RECREATE_ON_START ? 'ON' : 'OFF'}
 Post Only (Maker): ${GRID_POST_ONLY ? 'ON' : 'OFF'}
 Smart Range Advisor (Gemini): ${GEMINI_RANGE_ADVISOR_ENABLED

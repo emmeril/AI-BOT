@@ -74,6 +74,7 @@ test('GridState.getSymbol repairs an incomplete symbol state', () => {
   assert.deepEqual(symbol.config, {});
   assert.deepEqual(symbol.orders, {});
   assert.deepEqual(symbol.lastBuyByLevel, {});
+  assert.deepEqual(symbol.refillCountByLevel, {});
   assert.equal(symbol.realizedGridProfit, 1.25);
 });
 

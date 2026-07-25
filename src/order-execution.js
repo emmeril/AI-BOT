@@ -37,11 +37,14 @@ async function getManagedOpenOrders(symbol, openOrders) {
   const managed = [];
   for (const order of openOrders) {
     const orderId = String(order.id);
-    const levelIndex = this.getBotOrderLevel(order);
-    if (!managedIds.has(orderId) && levelIndex !== null) {
-      await this.state.rememberOrder(symbol, order, { levelIndex });
+    const orderMeta = this.getBotOrderMeta(order);
+    if (!managedIds.has(orderId) && orderMeta) {
+      await this.state.rememberOrder(symbol, order, orderMeta);
       managedIds.add(orderId);
-      console.warn(`[RECOVER] ${symbol} adopted order ${orderId} level=${levelIndex}`);
+      console.warn(
+        `[RECOVER] ${symbol} adopted order ${orderId} level=${orderMeta.levelIndex} ` +
+        `refill=${orderMeta.refillCount}`
+      );
     }
     if (managedIds.has(orderId)) managed.push(order);
   }
@@ -53,14 +56,23 @@ function getOrderClientId(order) {
 }
 
 function getBotOrderLevel(order) {
-  const match = this.getOrderClientId(order).match(/^grid-[a-z0-9]+-[bs]-(\d+)-/);
-  return match ? Number(match[1]) : null;
+  return this.getBotOrderMeta(order)?.levelIndex ?? null;
 }
 
-function makeClientOrderId(symbol, side, levelIndex) {
+function getBotOrderMeta(order) {
+  const match = this.getOrderClientId(order).match(/^grid-[a-z0-9]+-([bs])-(\d+)-(?:r(\d+)-)?/);
+  if (!match) return null;
+  return {
+    side: match[1] === 'b' ? 'buy' : 'sell',
+    levelIndex: Number(match[2]),
+    refillCount: Number(match[3]) || 0,
+  };
+}
+
+function makeClientOrderId(symbol, side, levelIndex, refillCount = 0) {
   const market = symbol.replace(/[^a-z0-9]/gi, '').slice(0, 10).toLowerCase();
   const nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-  return `grid-${market}-${side[0]}-${levelIndex}-${nonce}`.slice(0, 36);
+  return `grid-${market}-${side[0]}-${levelIndex}-r${refillCount}-${nonce}`.slice(0, 36);
 }
 
 async function cancelGridOrders(symbol, reason) {
@@ -89,8 +101,8 @@ async function cancelOrder(symbol, order, reason) {
   console.log(`[CANCEL] ${symbol} ${order.side} ${order.id} | ${reason}`);
 }
 
-async function createOrder(symbol, side, amount, price, levelIndex) {
-  const clientOrderId = this.makeClientOrderId(symbol, side, levelIndex);
+async function createOrder(symbol, side, amount, price, levelIndex, refillCount = 0) {
+  const clientOrderId = this.makeClientOrderId(symbol, side, levelIndex, refillCount);
   const orderParams = { newClientOrderId: clientOrderId };
   if (GRID_POST_ONLY) {
     orderParams.postOnly = true;
@@ -104,7 +116,7 @@ async function createOrder(symbol, side, amount, price, levelIndex) {
   );
 }
 
-async function placeLimit(symbol, side, levelIndex, price, amount) {
+async function placeLimit(symbol, side, levelIndex, price, amount, { refillCount = 0 } = {}) {
   const pendingKey = `${symbol}|${side}|${levelIndex}`;
   if (this.pendingOrderLevels.has(pendingKey)) {
     console.warn(`[SKIP] ${symbol} ${side.toUpperCase()} level=${levelIndex} | placement already in progress`);
@@ -141,9 +153,9 @@ async function placeLimit(symbol, side, levelIndex, price, amount) {
       return null;
     }
 
-    const order = await this.createOrder(symbol, side, preciseAmount, precisePrice, levelIndex);
-    await this.state.rememberOrder(symbol, order, { levelIndex });
-    console.log(`[GRID] ${symbol} ${side.toUpperCase()} level=${levelIndex} amount=${preciseAmount} price=${precisePrice}${GRID_POST_ONLY ? ' (postOnly)' : ''}`);
+    const order = await this.createOrder(symbol, side, preciseAmount, precisePrice, levelIndex, refillCount);
+    await this.state.rememberOrder(symbol, order, { levelIndex, refillCount });
+    console.log(`[GRID] ${symbol} ${side.toUpperCase()} level=${levelIndex} refill=${refillCount} amount=${preciseAmount} price=${precisePrice}${GRID_POST_ONLY ? ' (postOnly)' : ''}`);
     return order;
   } catch (err) {
     if (this.isInsufficientFundsError(err)) {
@@ -190,6 +202,7 @@ const orderExecutionMethods = {
   getManagedOpenOrders,
   getOrderClientId,
   getBotOrderLevel,
+  getBotOrderMeta,
   makeClientOrderId,
   cancelGridOrders,
   cancelOrder,

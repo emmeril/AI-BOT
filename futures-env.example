@@ -29,6 +29,7 @@ GRID_RECREATE_ON_START=false
 GRID_CANCEL_OUT_OF_RANGE=true
 GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MINUTES=3
 GRID_REFILL_ON_FILLED=true
+GRID_MAX_REFILLS=2
 GRID_POST_ONLY=true
 
 # Futures ROI thresholds (despite the legacy PRICE suffix). The complete active
