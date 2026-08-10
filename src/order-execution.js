@@ -60,19 +60,27 @@ function getBotOrderLevel(order) {
 }
 
 function getBotOrderMeta(order) {
-  const match = this.getOrderClientId(order).match(/^grid-[a-z0-9]+-([bs])-(\d+)-(?:r(\d+)-)?/);
+  const match = this.getOrderClientId(order).match(
+    /^grid-[a-z0-9]+-([bs])-(\d+)(?:-b(\d+))?-(?:r(\d+)-)?/
+  );
   if (!match) return null;
-  return {
+  const meta = {
     side: match[1] === 'b' ? 'buy' : 'sell',
     levelIndex: Number(match[2]),
-    refillCount: Number(match[3]) || 0,
+    refillCount: Number(match[4]) || 0,
   };
+  if (match[3] !== undefined) meta.sourceBuyLevelIndex = Number(match[3]);
+  return meta;
 }
 
-function makeClientOrderId(symbol, side, levelIndex, refillCount = 0) {
+function makeClientOrderId(symbol, side, levelIndex, refillCount = 0, sourceBuyLevelIndex = null) {
   const market = symbol.replace(/[^a-z0-9]/gi, '').slice(0, 10).toLowerCase();
   const nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-  return `grid-${market}-${side[0]}-${levelIndex}-r${refillCount}-${nonce}`.slice(0, 36);
+  const source = side === 'sell' && sourceBuyLevelIndex !== null &&
+    sourceBuyLevelIndex !== undefined && Number.isInteger(Number(sourceBuyLevelIndex))
+    ? `-b${Number(sourceBuyLevelIndex)}`
+    : '';
+  return `grid-${market}-${side[0]}-${levelIndex}${source}-r${refillCount}-${nonce}`.slice(0, 36);
 }
 
 async function cancelGridOrders(symbol, reason) {
@@ -101,8 +109,22 @@ async function cancelOrder(symbol, order, reason) {
   console.log(`[CANCEL] ${symbol} ${order.side} ${order.id} | ${reason}`);
 }
 
-async function createOrder(symbol, side, amount, price, levelIndex, refillCount = 0) {
-  const clientOrderId = this.makeClientOrderId(symbol, side, levelIndex, refillCount);
+async function createOrder(
+  symbol,
+  side,
+  amount,
+  price,
+  levelIndex,
+  refillCount = 0,
+  sourceBuyLevelIndex = null
+) {
+  const clientOrderId = this.makeClientOrderId(
+    symbol,
+    side,
+    levelIndex,
+    refillCount,
+    sourceBuyLevelIndex
+  );
   const orderParams = { newClientOrderId: clientOrderId };
   if (GRID_POST_ONLY) {
     orderParams.postOnly = true;
@@ -116,8 +138,18 @@ async function createOrder(symbol, side, amount, price, levelIndex, refillCount 
   );
 }
 
-async function placeLimit(symbol, side, levelIndex, price, amount, { refillCount = 0 } = {}) {
-  const pendingKey = `${symbol}|${side}|${levelIndex}`;
+async function placeLimit(
+  symbol,
+  side,
+  levelIndex,
+  price,
+  amount,
+  { refillCount = 0, sourceBuyLevelIndex = null } = {}
+) {
+  const sourceKey = side === 'sell' && sourceBuyLevelIndex !== null
+    ? `|buy=${sourceBuyLevelIndex}`
+    : '';
+  const pendingKey = `${symbol}|${side}|${levelIndex}${sourceKey}`;
   if (this.pendingOrderLevels.has(pendingKey)) {
     console.warn(`[SKIP] ${symbol} ${side.toUpperCase()} level=${levelIndex} | placement already in progress`);
     return null;
@@ -153,9 +185,20 @@ async function placeLimit(symbol, side, levelIndex, price, amount, { refillCount
       return null;
     }
 
-    const order = await this.createOrder(symbol, side, preciseAmount, precisePrice, levelIndex, refillCount);
-    await this.state.rememberOrder(symbol, order, { levelIndex, refillCount });
-    console.log(`[GRID] ${symbol} ${side.toUpperCase()} level=${levelIndex} refill=${refillCount} amount=${preciseAmount} price=${precisePrice}${GRID_POST_ONLY ? ' (postOnly)' : ''}`);
+    const order = await this.createOrder(
+      symbol,
+      side,
+      preciseAmount,
+      precisePrice,
+      levelIndex,
+      refillCount,
+      sourceBuyLevelIndex
+    );
+    await this.state.rememberOrder(symbol, order, { levelIndex, refillCount, sourceBuyLevelIndex });
+    const sourceLabel = side === 'sell' && sourceBuyLevelIndex !== null
+      ? ` sourceBuy=${sourceBuyLevelIndex}`
+      : '';
+    console.log(`[GRID] ${symbol} ${side.toUpperCase()} level=${levelIndex}${sourceLabel} refill=${refillCount} amount=${preciseAmount} price=${precisePrice}${GRID_POST_ONLY ? ' (postOnly)' : ''}`);
     return order;
   } catch (err) {
     if (this.isInsufficientFundsError(err)) {

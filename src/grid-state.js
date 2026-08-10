@@ -111,6 +111,10 @@ class GridState {
       id: String(order.id),
       side: order.side,
       levelIndex: meta.levelIndex,
+      ...(meta.sourceBuyLevelIndex !== null && meta.sourceBuyLevelIndex !== undefined &&
+        Number.isInteger(Number(meta.sourceBuyLevelIndex))
+        ? { sourceBuyLevelIndex: Number(meta.sourceBuyLevelIndex) }
+        : {}),
       refillCount: Number(meta.refillCount) || 0,
       price: Number(order.price),
       amount: Number(order.amount),

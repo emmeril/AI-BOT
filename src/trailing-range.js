@@ -161,8 +161,9 @@ function shiftStoredOrderIndexes(symState, offset) {
       // [0, GRID_COUNT-1]. That breaks every lookup keyed on levelIndex:
       // reconcileSymbolUnlocked's activeBuyLevels/activeSellLevels
       // wouldn't recognize the order (risking a duplicate placed at the
-      // same price), handleSellFill's `levelIndex - 1` buy lookup could
-      // go negative and silently skip profit accounting, and
+      // same price), handleSellFill's source buy lookup (including the legacy
+      // `levelIndex - 1` fallback) could go negative and silently skip profit
+      // accounting, and
       // handleBuyFill's `levelIndex + 1` sell-refill lookup could target
       // a non-existent level. Clamping keeps the index valid; this order
       // is pinned to the boundary grid level, so its bookkeeping stays
@@ -176,6 +177,10 @@ function shiftStoredOrderIndexes(symState, offset) {
     shiftedOrders[orderId] = {
       ...order,
       levelIndex: clampedIndex,
+      ...(order.sourceBuyLevelIndex !== null && order.sourceBuyLevelIndex !== undefined &&
+        Number.isInteger(Number(order.sourceBuyLevelIndex))
+        ? { sourceBuyLevelIndex: this.clampBuyLevelIndex(Number(order.sourceBuyLevelIndex) + offset) }
+        : {}),
     };
   }
   symState.orders = shiftedOrders;

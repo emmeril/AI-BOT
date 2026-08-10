@@ -73,7 +73,7 @@ test('a buy at the refill limit still gets a sell exit, then stops refilling', a
 
   assert.equal(engine.placements.length, 1);
   assert.equal(engine.placements[0][1], 'sell');
-  assert.deepEqual(engine.placements[0][5], { refillCount: 2 });
+  assert.deepEqual(engine.placements[0][5], { refillCount: 2, sourceBuyLevelIndex: 0 });
 
   await engine.handleSellFill(
     'BTC/USDT',
@@ -110,6 +110,7 @@ test('a completed sell creates the second and final buy refill', async () => {
   );
 
   assert.deepEqual(engine.placements.map(args => args[1]), ['sell', 'buy']);
+  assert.deepEqual(engine.placements[0][5], { refillCount: 1, sourceBuyLevelIndex: 0 });
   assert.deepEqual(engine.placements[1][5], { refillCount: 2 });
 });
 
@@ -121,6 +122,13 @@ test('client order IDs preserve refill count and remain backward compatible', ()
     side: 'buy',
     levelIndex: 3,
     refillCount: 2,
+  });
+  const skippedSellId = engine.makeClientOrderId('BTC/USDT', 'sell', 12, 1, 10);
+  assert.deepEqual(engine.getBotOrderMeta({ clientOrderId: skippedSellId }), {
+    side: 'sell',
+    levelIndex: 12,
+    sourceBuyLevelIndex: 10,
+    refillCount: 1,
   });
   assert.deepEqual(engine.getBotOrderMeta({ clientOrderId: 'grid-btcusdt-s-4-legacy' }), {
     side: 'sell',

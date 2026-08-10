@@ -106,6 +106,7 @@ class SpotGridEngine {
     this.telegramStatusTimer = null;
     // for stuck investment warning deduplication
     this.stuckInvestmentWarned = new Set();
+    this.sellTargetWarnings = new Set();
     this.rangeAdvisor = new GeminiRangeAdvisor(this.exchange);
     const targetNetRate = GRID_MIN_NET_PROFIT_PCT / 100;
     const minimumStepRatio = (1 + targetNetRate + BINANCE_SPOT_MAKER_FEE_RATE) /
@@ -397,8 +398,8 @@ class SpotGridEngine {
    *      level index to whichever NEW level its actual average fill price
    *      lands closest to, merging records that collapse onto the same new
    *      level (same weighted-average merge used by applyTrailingRangeShift)
-   *      so a future sell fill still finds the correct cost basis at
-   *      levelIndex - 1 on the NEW grid.
+   *      so future sell orders can store the remapped level as their explicit
+   *      source buy level and still find the correct cost basis.
    */
   async remapStateAfterRangeReset(symbol, oldLower, oldUpper, newLower, newUpper, newLevelsOverride = null) {
     const symState = this.state.getSymbol(symbol);
@@ -903,76 +904,89 @@ class SpotGridEngine {
       ['Fee', this.formatTradeFeeDisplay(feeQuote, feeCost, feeCurrency, base, quote)],
     ]));
     if (!GRID_REFILL_ON_FILLED || !this.canPlaceNewOrders() || levelIndex + 1 >= levels.length) return;
-    const sellLevelIndex = levelIndex + 1;
-    const sellPrice = levels[sellLevelIndex];
     const trackedBuy = symState.lastBuyByLevel[levelIndex];
-
-    if (!this.isTrackedSellProfitable(symbol, trackedBuy, sellPrice)) {
-      console.warn(
-        `[SKIP] ${symbol} SELL refill level=${sellLevelIndex} price=${sellPrice} is below ` +
-        `fee-adjusted minimum ${this.getMinimumProfitableSellPrice(trackedBuy)} for actual buy cost`
-      );
-      return;
-    }
-
     const totalSellable = Math.max(0, Number(trackedBuy?.sellableAmount ?? trackedBuy?.amount) || 0);
     if (!(totalSellable > 0)) {
-      console.warn(`[SKIP] ${symbol} SELL refill level=${sellLevelIndex} | sellable amount zero after fee`);
-      return;
-    }
-
-    const minCost = this.getMinCost(symbol);
-    const { notional } = this.getPreciseOrderNumbers(symbol, sellPrice, totalSellable);
-    if (minCost > 0 && notional < minCost - 1e-8) {
-      console.warn(
-        `[SKIP] ${symbol} SELL refill level=${sellLevelIndex} | notional ${notional.toFixed(8)} below min ${minCost}, keeping buy record for later retry`
-      );
+      console.warn(`[SKIP] ${symbol} SELL sourceBuy=${levelIndex} | sellable amount zero after fee`);
       return;
     }
 
     await this.syncManagedOrdersWithExchange(symbol, symState, openOrderIds);
+    const existingOrder = this.getActiveSellOrderForBuyLevel(symState, levelIndex);
+    const reservedSellLevels = this.getReservedSellLevels(symState, existingOrder?.id);
+    const target = this.findSellTargetForBuy(symbol, levels, levelIndex, trackedBuy, {
+      amount: totalSellable,
+      reservedSellLevels,
+    });
+    if (!target) {
+      this.warnNoSellTarget(symbol, levelIndex, levels, trackedBuy, totalSellable);
+      return;
+    }
+    this.clearSellTargetWarning(symbol, levelIndex);
 
-    if (this.hasActiveOrderAtLevel(symState, 'sell', sellLevelIndex)) {
-      const existingOrder = Object.values(symState.orders).find(o =>
-        String(o.side).toLowerCase() === 'sell' && Number(o.levelIndex) === sellLevelIndex
-      );
+    if (existingOrder) {
       const existingAmount = Number(existingOrder?.amount || 0);
-
-      const { preciseAmount: preciseTotalSellable } = this.getPreciseOrderNumbers(symbol, sellPrice, totalSellable);
+      const { preciseAmount: preciseTotalSellable } = this.getPreciseOrderNumbers(
+        symbol,
+        target.sellPrice,
+        totalSellable
+      );
       const preciseTotalNum = Number(preciseTotalSellable);
+      const targetChanged = Number(existingOrder.levelIndex) !== target.sellLevelIndex;
 
-      if (existingOrder && preciseTotalNum > existingAmount + 1e-8) {
+      if (targetChanged || preciseTotalNum > existingAmount + 1e-8) {
         console.log(
-          `[UPDATE] ${symbol} SELL level=${sellLevelIndex} | amount update ${existingAmount} -> ${preciseTotalNum} (buy accumulated)`
+          `[UPDATE] ${symbol} SELL sourceBuy=${levelIndex} level=${existingOrder.levelIndex}->${target.sellLevelIndex} ` +
+          `amount=${existingAmount}->${preciseTotalNum}`
         );
         try {
-          await this.cancelOrder(symbol, existingOrder, `sell amount update level=${sellLevelIndex}`);
-          await this.placeLimit(symbol, 'sell', sellLevelIndex, sellPrice, totalSellable, { refillCount });
+          await this.cancelOrder(symbol, existingOrder, `sell target update sourceBuy=${levelIndex}`);
+          await this.placeLimit(
+            symbol,
+            'sell',
+            target.sellLevelIndex,
+            target.sellPrice,
+            totalSellable,
+            { refillCount, sourceBuyLevelIndex: levelIndex }
+          );
         } catch (err) {
-          console.warn(`[UPDATE] ${symbol} SELL level=${sellLevelIndex} cancel+replace failed: ${err.message}`);
+          console.warn(`[UPDATE] ${symbol} SELL sourceBuy=${levelIndex} cancel+replace failed: ${err.message}`);
         }
       } else {
-        console.warn(`[SKIP] ${symbol} SELL refill level=${sellLevelIndex} | sell order already active with sufficient amount`);
+        console.warn(
+          `[SKIP] ${symbol} SELL sourceBuy=${levelIndex} level=${target.sellLevelIndex} | ` +
+          `sell order already active with sufficient amount`
+        );
       }
       return;
     }
 
     if (this.countActiveOrders(symState, 'sell') >= GRID_MAX_ACTIVE_SELL_ORDERS) {
-      console.warn(`[SKIP] ${symbol} SELL refill level=${sellLevelIndex} | active sell order limit reached`);
+      console.warn(`[SKIP] ${symbol} SELL sourceBuy=${levelIndex} | active sell order limit reached`);
       return;
     }
 
-    await this.placeLimit(symbol, 'sell', sellLevelIndex, sellPrice, totalSellable, { refillCount });
+    await this.placeLimit(
+      symbol,
+      'sell',
+      target.sellLevelIndex,
+      target.sellPrice,
+      totalSellable,
+      { refillCount, sourceBuyLevelIndex: levelIndex }
+    );
   }
 
   async handleSellFill(symbol, levels, symState, trade, orderMeta, openOrderIds) {
     const price = Number(trade.price);
     const amount = Number(trade.amount);
     const levelIndex = Number(orderMeta.levelIndex);
-    const buyLevelIndex = levelIndex - 1;
+    const buyLevelIndex = this.getSellSourceBuyLevelIndex(orderMeta);
     const buy = symState.lastBuyByLevel[buyLevelIndex];
     if (!buy) {
-      console.warn(`[SELL] ${symbol} level ${levelIndex} has no corresponding buy record. Skipping profit calculation.`);
+      console.warn(
+        `[SELL] ${symbol} level ${levelIndex} sourceBuy=${buyLevelIndex} has no corresponding buy record. ` +
+        `Skipping profit calculation.`
+      );
       this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
       this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
       await this.state.save();
@@ -1034,33 +1048,38 @@ class SpotGridEngine {
     await this.sendAlert(this.formatTelegramMessage('Sell Filled', [
       ['Symbol', symbol],
       ['Level', levelIndex],
+      ['Source Buy Level', buyLevelIndex],
       ['Price', this.formatPrice(price)],
       ['Amount', this.formatAmount(amount)],
       ['Profit', `${this.formatMoney(profit)} ${quote}`],
       ['Fee', this.formatTradeFeeDisplay(feeQuote, feeCost, feeCurrency, base, quote)],
     ]));
 
-    if (GRID_REFILL_ON_FILLED && this.canPlaceNewOrders() && levelIndex - 1 >= 0) {
+    if (GRID_REFILL_ON_FILLED && this.canPlaceNewOrders() && buyLevelIndex >= 0) {
       const nextRefillCount = refillCount + 1;
       if (nextRefillCount > GRID_MAX_REFILLS) {
         console.warn(
-          `[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | max refill ${GRID_MAX_REFILLS} reached`
+          `[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | max refill ${GRID_MAX_REFILLS} reached`
         );
         return;
       }
-      const buyPrice = levels[levelIndex - 1];
-      if (this.hasActiveOrderAtLevel(symState, 'buy', levelIndex - 1)) {
-        console.warn(`[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | buy order already active`);
+      const buyPrice = levels[buyLevelIndex];
+      if (!(buyPrice > 0)) {
+        console.warn(`[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | level no longer exists`);
+        return;
+      }
+      if (this.hasActiveOrderAtLevel(symState, 'buy', buyLevelIndex)) {
+        console.warn(`[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | buy order already active`);
         return;
       }
       if (this.countActiveOrders(symState, 'buy') >= GRID_MAX_ACTIVE_BUY_ORDERS) {
-        console.warn(`[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | active buy order limit reached`);
+        console.warn(`[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | active buy order limit reached`);
         return;
       }
       let amountToBuy = this.amountForBuy(symbol, buyPrice);
       let cost = amountToBuy * buyPrice;
       if (!(amountToBuy > 0)) {
-        console.warn(`[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | investment cap reached`);
+        console.warn(`[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | investment cap reached`);
         return;
       }
       const minCost = this.getMinCost(symbol);
@@ -1068,7 +1087,7 @@ class SpotGridEngine {
         amountToBuy = minCost / buyPrice;
         cost = amountToBuy * buyPrice;
         if (cost < minCost - 1e-8) {
-          console.warn(`[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | cannot meet min notional ${minCost}`);
+          console.warn(`[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | cannot meet min notional ${minCost}`);
           return;
         }
       }
@@ -1076,11 +1095,11 @@ class SpotGridEngine {
       const precise = this.getPreciseOrderNumbers(symbol, buyPrice, amountToBuy);
       if (precise.notional > remainingInvestmentUsdt + 1e-8) {
         console.warn(
-          `[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | rounded cost ${precise.notional.toFixed(8)} exceeds remaining investment ${roundNumber(remainingInvestmentUsdt, 8)}`
+          `[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | rounded cost ${precise.notional.toFixed(8)} exceeds remaining investment ${roundNumber(remainingInvestmentUsdt, 8)}`
         );
         return;
       }
-      await this.placeLimit(symbol, 'buy', levelIndex - 1, buyPrice, amountToBuy, {
+      await this.placeLimit(symbol, 'buy', buyLevelIndex, buyPrice, amountToBuy, {
         refillCount: nextRefillCount,
       });
     }
@@ -1195,7 +1214,8 @@ class SpotGridEngine {
       // embedded in the trade so fills are never lost across restarts.
       let orderMeta = symState.orders[String(trade.order)];
       if (!orderMeta) {
-        // clientOrderId format: grid-<market>-<s|b>-<levelIndex>-r<refillCount>-<nonce>
+        // clientOrderId format:
+        // grid-<market>-<s|b>-<levelIndex>[-b<sourceBuyLevel>]-r<refillCount>-<nonce>
         const clientId = String(
           trade.info?.clientOrderId ||
           trade.info?.origClientOrderId ||
@@ -1381,14 +1401,19 @@ class SpotGridEngine {
     const symState = this.state.getSymbol(symbol);
     for (const order of managedOrders) {
       if (String(order.side).toLowerCase() !== 'sell') continue;
-      const orderMeta = symState.orders[String(order.id)];
+      const orderMeta = symState.orders[String(order.id)] || this.getBotOrderMeta(order);
       const sellLevelIndex = Number(orderMeta?.levelIndex ?? this.getLevelIndex(levels, Number(order.price)));
-      const buy = symState.lastBuyByLevel[sellLevelIndex - 1];
+      const buyLevelIndex = this.getSellSourceBuyLevelIndex({
+        ...orderMeta,
+        levelIndex: sellLevelIndex,
+      });
+      const buy = symState.lastBuyByLevel[buyLevelIndex];
       if (!buy || this.isTrackedSellProfitable(symbol, buy, Number(order.price))) continue;
       await this.cancelOrder(
         symbol,
         order,
-        `sell price below fee-adjusted cost basis (minimum ${this.getMinimumProfitableSellPrice(buy)})`
+        `sell sourceBuy=${buyLevelIndex} below fee-adjusted cost basis ` +
+        `(minimum ${this.getMinimumProfitableSellPrice(buy)})`
       );
     }
     freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
@@ -1407,8 +1432,6 @@ class SpotGridEngine {
     }
 
     const below = this.getNearestLevels(levels, currentPrice, 'buy', GRID_MAX_ACTIVE_BUY_ORDERS);
-    const above = this.getNearestLevels(levels, currentPrice, 'sell', GRID_MAX_ACTIVE_SELL_ORDERS);
-
     let quoteFree = this.getQuoteFree(balance, symbol);
     let baseFree = this.getBaseFree(balance, symbol);
     let remainingInvestmentUsdt = this.getRemainingInvestmentUsdt(symbol);
@@ -1459,38 +1482,53 @@ class SpotGridEngine {
       remainingInvestmentUsdt = Math.max(0, remainingInvestmentUsdt - cost);
     }
 
-    for (const level of above) {
+    const reservedSellLevels = new Set(activeSellLevels);
+    const trackedBuys = Object.entries(symState.lastBuyByLevel)
+      .map(([buyLevelIndex, buy]) => ({ buyLevelIndex: Number(buyLevelIndex), buy }))
+      .filter(item => Number.isInteger(item.buyLevelIndex) && item.buy)
+      .sort((a, b) => b.buyLevelIndex - a.buyLevelIndex);
+
+    for (const { buyLevelIndex, buy: trackedBuy } of trackedBuys) {
       if (this.countActiveOrders(symState, 'sell') >= GRID_MAX_ACTIVE_SELL_ORDERS) {
-        console.warn(`[SKIP] ${symbol} SELL level=${level.index} | active sell order limit (${GRID_MAX_ACTIVE_SELL_ORDERS}) reached`);
+        console.warn(
+          `[SKIP] ${symbol} SELL sourceBuy=${buyLevelIndex} | ` +
+          `active sell order limit (${GRID_MAX_ACTIVE_SELL_ORDERS}) reached`
+        );
         break;
       }
-      if (activeSellLevels.has(level.index)) continue;
-      const trackedAmount = this.amountForTrackedSell(symbol, level.index);
+      if (this.getActiveSellOrderForBuyLevel(symState, buyLevelIndex)) continue;
+      const trackedAmount = Math.max(
+        0,
+        Number(trackedBuy.sellableAmount ?? trackedBuy.amount) || 0
+      );
       if (!(trackedAmount > 0)) continue;
-      const trackedBuy = symState.lastBuyByLevel[level.index - 1];
-      if (!this.isTrackedSellProfitable(symbol, trackedBuy, level.price)) {
-        console.warn(
-          `[SKIP] ${symbol} SELL level=${level.index} price=${level.price} is below ` +
-          `fee-adjusted minimum ${this.getMinimumProfitableSellPrice(trackedBuy)} for actual buy cost`
-        );
-        continue;
-      }
       let amount = Math.min(trackedAmount, baseFree);
       if (!(amount > 0)) {
-        console.warn(`[SKIP] ${symbol} SELL level=${level.index} | insufficient free base, checking farther sell levels`);
+        console.warn(`[SKIP] ${symbol} SELL sourceBuy=${buyLevelIndex} | insufficient free base`);
         continue;
       }
-
-      const minCost = this.getMinCost(symbol);
-      const notional = amount * level.price;
-      if (minCost > 0 && notional < minCost - 1e-8) {
-        console.warn(`[SKIP] ${symbol} SELL level=${level.index} | notional too low (dust), keeping buy record for later retry`);
+      const target = this.findSellTargetForBuy(symbol, levels, buyLevelIndex, trackedBuy, {
+        amount,
+        minimumPrice: currentPrice,
+        reservedSellLevels,
+      });
+      if (!target) {
+        this.warnNoSellTarget(symbol, buyLevelIndex, levels, trackedBuy, amount);
         continue;
       }
+      this.clearSellTargetWarning(symbol, buyLevelIndex);
 
       const refillCount = Math.max(0, Number(trackedBuy.refillCount) || 0);
-      const order = await this.placeLimit(symbol, 'sell', level.index, level.price, amount, { refillCount });
+      const order = await this.placeLimit(
+        symbol,
+        'sell',
+        target.sellLevelIndex,
+        target.sellPrice,
+        amount,
+        { refillCount, sourceBuyLevelIndex: buyLevelIndex }
+      );
       if (!order) continue;
+      reservedSellLevels.add(target.sellLevelIndex);
       baseFree -= amount;
     }
 
@@ -1505,6 +1543,99 @@ class SpotGridEngine {
     const buy = symState.lastBuyByLevel[sellLevelIndex - 1];
     if (!buy) return 0;
     return Math.max(0, Number(buy.sellableAmount ?? buy.amount) || 0);
+  }
+
+  getSellSourceBuyLevelIndex(orderMeta) {
+    const explicit = Number(orderMeta?.sourceBuyLevelIndex);
+    if (orderMeta?.sourceBuyLevelIndex !== null && orderMeta?.sourceBuyLevelIndex !== undefined &&
+        Number.isInteger(explicit)) {
+      return explicit;
+    }
+    return Number(orderMeta?.levelIndex) - 1;
+  }
+
+  getActiveSellOrderForBuyLevel(symState, buyLevelIndex) {
+    return Object.values(symState.orders || {}).find(order =>
+      String(order.side).toLowerCase() === 'sell' &&
+      this.getSellSourceBuyLevelIndex(order) === Number(buyLevelIndex)
+    ) || null;
+  }
+
+  getReservedSellLevels(symState, excludeOrderId = null) {
+    return new Set(Object.values(symState.orders || {})
+      .filter(order =>
+        String(order.side).toLowerCase() === 'sell' &&
+        String(order.id) !== String(excludeOrderId)
+      )
+      .map(order => Number(order.levelIndex))
+      .filter(Number.isInteger));
+  }
+
+  findSellTargetForBuy(
+    symbol,
+    levels,
+    buyLevelIndex,
+    trackedBuy,
+    { amount = null, minimumPrice = -Infinity, reservedSellLevels = new Set() } = {}
+  ) {
+    const sourceLevel = Number(buyLevelIndex);
+    if (!Number.isInteger(sourceLevel) || sourceLevel < 0 || sourceLevel + 1 >= levels.length) return null;
+    const sellableAmount = Math.max(
+      0,
+      Number(amount ?? trackedBuy?.sellableAmount ?? trackedBuy?.amount) || 0
+    );
+    if (!(sellableAmount > 0)) return null;
+    const minCost = this.getMinCost(symbol);
+
+    for (let sellLevelIndex = sourceLevel + 1; sellLevelIndex < levels.length; sellLevelIndex++) {
+      if (reservedSellLevels.has(sellLevelIndex)) continue;
+      const sellPrice = Number(levels[sellLevelIndex]);
+      if (!(sellPrice > minimumPrice)) continue;
+      if (!this.isTrackedSellProfitable(symbol, trackedBuy, sellPrice)) continue;
+      let precise;
+      try {
+        precise = this.getPreciseOrderNumbers(symbol, sellPrice, sellableAmount);
+      } catch {
+        continue;
+      }
+      const amountNum = Number(precise.amountNum ?? precise.preciseAmount);
+      const priceNum = Number(precise.priceNum ?? precise.precisePrice ?? sellPrice);
+      if (!(amountNum > 0) || !(priceNum > 0)) continue;
+      if (minCost > 0 && precise.notional < minCost - 1e-8) continue;
+      return {
+        buyLevelIndex: sourceLevel,
+        sellLevelIndex,
+        sellPrice,
+        amount: amountNum,
+        notional: precise.notional,
+      };
+    }
+    return null;
+  }
+
+  warnNoSellTarget(symbol, buyLevelIndex, levels, trackedBuy, amount) {
+    if (!this.sellTargetWarnings) this.sellTargetWarnings = new Set();
+    const key = `${symbol}|${buyLevelIndex}`;
+    if (this.sellTargetWarnings.has(key)) return;
+    this.sellTargetWarnings.add(key);
+    const highestPrice = Number(levels[levels.length - 1]) || 0;
+    const minimumProfitPrice = this.getMinimumProfitableSellPrice(trackedBuy);
+    const minCost = this.getMinCost(symbol);
+    let highestNotional = 0;
+    try {
+      highestNotional = this.getPreciseOrderNumbers(symbol, highestPrice, amount).notional;
+    } catch {
+      // Leave at zero; the warning still explains that no valid target exists.
+    }
+    console.warn(
+      `[SKIP] ${symbol} SELL sourceBuy=${buyLevelIndex} | no higher grid level satisfies ` +
+      `profit/min-notional constraints (minPrice=${minimumProfitPrice}, highestLevel=${highestPrice}, ` +
+      `highestNotional=${roundNumber(highestNotional, 8)}, minNotional=${minCost}); keeping buy record`
+    );
+  }
+
+  clearSellTargetWarning(symbol, buyLevelIndex) {
+    this.sellTargetWarnings?.delete(`${symbol}|${buyLevelIndex}`);
   }
 
   getAllocatedInvestmentUsdt(symbol) {
