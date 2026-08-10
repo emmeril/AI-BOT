@@ -33,6 +33,19 @@ const {
   GRID_PRICE_PRECISION_MAX_DEVIATION_PCT,
   BINANCE_SPOT_MAKER_FEE_RATE,
   GRID_MIN_NET_PROFIT_PCT,
+  FIBONACCI_RANGE_ADVISOR_ENABLED,
+  FIBONACCI_RANGE_ADVISOR_TIMEFRAMES,
+  FIBONACCI_RANGE_ADVISOR_RATIOS,
+  FIBONACCI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS,
+  FIBONACCI_RANGE_ADVISOR_CLUSTER_TOLERANCE_PCT,
+  FIBONACCI_RANGE_ADVISOR_MIN_CLUSTER_SCORE,
+  FIBONACCI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT,
+  FIBONACCI_RANGE_ADVISOR_MAX_DISTANCE_PCT,
+  FIBONACCI_RANGE_ADVISOR_REBUILD_THRESHOLD_PCT,
+  FIBONACCI_RANGE_ADVISOR_REBUILD_COOLDOWN_MS,
+  FIBONACCI_RANGE_ADVISOR_APPLY_ON,
+  FIBONACCI_RANGE_ADVISOR_ALLOW_TRAILING,
+  FIBONACCI_RANGE_ADVISOR_STATE_PATH,
   GEMINI_RANGE_ADVISOR_ENABLED,
   GEMINI_MODEL,
   GEMINI_RANGE_ADVISOR_TIMEFRAME,
@@ -54,6 +67,7 @@ const {
 const { ExchangeManager } = require('./exchange-manager');
 const { GridState } = require('./grid-state');
 const { GeminiRangeAdvisor } = require('./gemini-range-advisor');
+const { FibonacciRangeAdvisor } = require('./fibonacci-range-advisor');
 const { applyTelegramMethods } = require('./telegram-controller');
 const { applyTrailingRangeMethods } = require('./trailing-range');
 const { applyOrderExecutionMethods } = require('./order-execution');
@@ -93,6 +107,24 @@ class SpotGridEngine {
     // for stuck investment warning deduplication
     this.stuckInvestmentWarned = new Set();
     this.rangeAdvisor = new GeminiRangeAdvisor(this.exchange);
+    const targetNetRate = GRID_MIN_NET_PROFIT_PCT / 100;
+    const minimumStepRatio = (1 + targetNetRate + BINANCE_SPOT_MAKER_FEE_RATE) /
+      (1 - BINANCE_SPOT_MAKER_FEE_RATE);
+    this.fibonacciRangeAdvisor = new FibonacciRangeAdvisor(this.exchange, {
+      enabled: FIBONACCI_RANGE_ADVISOR_ENABLED,
+      timeframes: FIBONACCI_RANGE_ADVISOR_TIMEFRAMES,
+      ratios: FIBONACCI_RANGE_ADVISOR_RATIOS,
+      candleCloseBufferMs: FIBONACCI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS,
+      clusterTolerancePct: FIBONACCI_RANGE_ADVISOR_CLUSTER_TOLERANCE_PCT,
+      minClusterScore: FIBONACCI_RANGE_ADVISOR_MIN_CLUSTER_SCORE,
+      minRangeWidthPct: FIBONACCI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT,
+      maxDistancePct: FIBONACCI_RANGE_ADVISOR_MAX_DISTANCE_PCT,
+      rebuildThresholdPct: FIBONACCI_RANGE_ADVISOR_REBUILD_THRESHOLD_PCT,
+      rebuildCooldownMs: FIBONACCI_RANGE_ADVISOR_REBUILD_COOLDOWN_MS,
+      levelCount: GRID_COUNT + 1,
+      minimumStepRatio,
+      statePath: FIBONACCI_RANGE_ADVISOR_STATE_PATH,
+    });
   }
 
   async init() {
@@ -226,8 +258,9 @@ class SpotGridEngine {
     // still know what the previous range was if a reset happens.
     const previousLower = storedLower;
     const previousUpper = storedUpper;
-    const previousLevels = Array.isArray(symState.config.aiAdvisor?.levels)
-      ? symState.config.aiAdvisor.levels.map(Number)
+    const storedAdvisorLevels = symState.config.rangeAdvisor?.levels || symState.config.aiAdvisor?.levels;
+    const previousLevels = Array.isArray(storedAdvisorLevels)
+      ? storedAdvisorLevels.map(Number)
       : null;
 
     if (!manualRange && storedLower > 0 && storedUpper > 0) {
@@ -251,36 +284,50 @@ class SpotGridEngine {
       GRID_RESET_RANGE_ON_START &&
       !(this.rangeResetSymbols && this.rangeResetSymbols.has(symbol));
 
-    // Smart Grid Range Advisor: ask Gemini for a recommended range. Only
-    // considered when it's allowed to influence this symbol's range mode
-    // (AUTO_RANGE_ONLY = never override a manual GRID_LOWER/UPPER_PRICE range;
-    // ALWAYS = also override manual ranges) and when confidence clears the bar.
-    const advisorAllowed = GEMINI_RANGE_ADVISOR_APPLY_ON === 'ALWAYS' || !manualRange;
-    let aiSuggestion = null;
-    if (advisorAllowed) {
-      aiSuggestion = await this.rangeAdvisor.getSuggestion(symbol, currentPrice);
-      if (aiSuggestion && aiSuggestion.confidence < GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE) {
+    // Fibonacci owns the range when enabled. Gemini remains a fallback so an
+    // exchange/OHLCV problem does not prevent the bot from building a grid.
+    const fibonacciAllowed = FIBONACCI_RANGE_ADVISOR_ENABLED &&
+      typeof this.fibonacciRangeAdvisor?.getSuggestion === 'function' &&
+      (FIBONACCI_RANGE_ADVISOR_APPLY_ON === 'ALWAYS' || !manualRange);
+    let rangeSuggestion = fibonacciAllowed
+      ? await this.fibonacciRangeAdvisor.getSuggestion(symbol, currentPrice)
+      : null;
+    let suggestionSource = rangeSuggestion ? 'FIBONACCI' : null;
+
+    const geminiAllowed = GEMINI_RANGE_ADVISOR_APPLY_ON === 'ALWAYS' || !manualRange;
+    if (!rangeSuggestion && geminiAllowed) {
+      rangeSuggestion = await this.rangeAdvisor.getSuggestion(symbol, currentPrice);
+      suggestionSource = rangeSuggestion ? 'GEMINI' : null;
+      if (rangeSuggestion && rangeSuggestion.confidence < GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE) {
         console.log(
-          `[GEMINI] ${symbol} suggestion confidence ${aiSuggestion.confidence} below threshold ` +
+          `[GEMINI] ${symbol} suggestion confidence ${rangeSuggestion.confidence} below threshold ` +
           `${GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE}; ignoring for this cycle.`
         );
-        aiSuggestion = null;
+        rangeSuggestion = null;
+        suggestionSource = null;
       }
     }
 
     const fallbackLower = (resetAutoRange ? 0 : storedLower) || currentPrice * (1 - GRID_RANGE_PCT / 100);
     const fallbackUpper = (resetAutoRange ? 0 : storedUpper) || currentPrice * (1 + GRID_RANGE_PCT / 100);
     const lower = manualRange
-      ? (aiSuggestion ? aiSuggestion.lower : GRID_LOWER_PRICE)
-      : (aiSuggestion ? aiSuggestion.lower : fallbackLower);
+      ? (rangeSuggestion ? rangeSuggestion.lower : GRID_LOWER_PRICE)
+      : (rangeSuggestion ? rangeSuggestion.lower : fallbackLower);
     const upper = manualRange
-      ? (aiSuggestion ? aiSuggestion.upper : GRID_UPPER_PRICE)
-      : (aiSuggestion ? aiSuggestion.upper : fallbackUpper);
+      ? (rangeSuggestion ? rangeSuggestion.upper : GRID_UPPER_PRICE)
+      : (rangeSuggestion ? rangeSuggestion.upper : fallbackUpper);
     if (lower <= 0 || upper <= 0 || lower >= upper) {
       throw new Error(`Invalid grid range. lower=${lower}, upper=${upper}`);
     }
 
-    const aiLevels = this.getAiGridLevels(symbol, aiSuggestion, lower, upper, currentPrice);
+    const advisorLevels = this.getAiGridLevels(
+      symbol,
+      rangeSuggestion,
+      lower,
+      upper,
+      currentPrice,
+      suggestionSource
+    );
 
     // Unlike a trailing shift (which is a parallel translation of the same
     // grid, handled by applyTrailingRangeShift's offset-based remap), a
@@ -296,10 +343,21 @@ class SpotGridEngine {
     // cause) needs the same remap, since the level-index-to-price mapping
     // has no guaranteed relationship to the previous cycle's mapping.
     const effectiveGridChanged = previousLower > 0 && previousUpper > 0 &&
-      !this.effectiveGridLevelsEqual(symbol, previousLower, previousUpper, previousLevels, lower, upper, aiLevels);
+      !this.effectiveGridLevelsEqual(symbol, previousLower, previousUpper, previousLevels, lower, upper, advisorLevels);
     if (effectiveGridChanged) {
-      await this.remapStateAfterRangeReset(symbol, previousLower, previousUpper, lower, upper, aiLevels);
+      await this.remapStateAfterRangeReset(symbol, previousLower, previousUpper, lower, upper, advisorLevels);
     }
+
+    const advisorState = rangeSuggestion ? {
+      source: suggestionSource,
+      confidence: rangeSuggestion.confidence,
+      confluenceScore: rangeSuggestion.confluenceScore,
+      timeframeCount: rangeSuggestion.timeframeCount,
+      marketCondition: rangeSuggestion.marketCondition,
+      reasoning: rangeSuggestion.reasoning,
+      levels: advisorLevels || undefined,
+      appliedAt: new Date().toISOString(),
+    } : undefined;
 
     symState.config = {
       mode: GRID_MODE,
@@ -308,20 +366,16 @@ class SpotGridEngine {
       upper,
       autoRange: !manualRange,
       orderSizeUsdt: this.getOrderSizeUsdt(),
-      aiAdvisor: aiSuggestion ? {
-        confidence: aiSuggestion.confidence,
-        marketCondition: aiSuggestion.marketCondition,
-        reasoning: aiSuggestion.reasoning,
-        levels: aiLevels || undefined,
-        appliedAt: new Date().toISOString(),
-      } : undefined,
+      rangeAdvisor: advisorState,
+      // Keep the legacy field for state compatibility with existing Gemini users.
+      aiAdvisor: suggestionSource === 'GEMINI' ? advisorState : undefined,
     };
     if (resetAutoRange) {
       if (!this.rangeResetSymbols) this.rangeResetSymbols = new Set();
       this.rangeResetSymbols.add(symbol);
     }
     await this.state.save();
-    return { lower, upper, levels: aiLevels };
+    return { lower, upper, levels: advisorLevels };
   }
 
   /**
@@ -472,17 +526,18 @@ class SpotGridEngine {
     return levels;
   }
 
-  getAiGridLevels(symbol, aiSuggestion, lower, upper, currentPrice) {
+  getAiGridLevels(symbol, aiSuggestion, lower, upper, currentPrice, source = 'Gemini') {
     if (!aiSuggestion) return null;
+    const sourceLabel = source === 'FIBONACCI' ? 'multi-timeframe Fibonacci' : 'Gemini';
     const geminiLevels = aiSuggestion.levels
-      ? this.getUsableCustomLevels(symbol, aiSuggestion.levels, lower, upper, 'Gemini')
+      ? this.getUsableCustomLevels(symbol, aiSuggestion.levels, lower, upper, sourceLabel)
       : null;
     if (geminiLevels) return geminiLevels;
 
     const adaptiveLevels = this.buildAdaptiveGridLevels(lower, upper, currentPrice);
     const usableAdaptiveLevels = this.getUsableCustomLevels(symbol, adaptiveLevels, lower, upper, 'adaptive-AI-range');
     if (usableAdaptiveLevels) {
-      console.log(`[GRID] ${symbol} using adaptive levels from Gemini range around current price ${roundNumber(currentPrice)}`);
+      console.log(`[GRID] ${symbol} using adaptive levels from ${sourceLabel} range around current price ${roundNumber(currentPrice)}`);
     }
     return usableAdaptiveLevels;
   }
@@ -1269,7 +1324,9 @@ class SpotGridEngine {
     let trailedUp = null;
     let trailedDown = null;
     let newContext = null;
-    if (canContinue && this.canPlaceNewOrders()) {
+    const fibonacciOwnsRange = this.state.getSymbol(symbol).config.rangeAdvisor?.source === 'FIBONACCI';
+    const trailingAllowed = !fibonacciOwnsRange || FIBONACCI_RANGE_ADVISOR_ALLOW_TRAILING;
+    if (canContinue && this.canPlaceNewOrders() && trailingAllowed) {
       trailedUp = await this.maybeTrailUpRange(symbol, currentPrice, lower, upper);
       if (trailedUp) {
         newContext = await this.fetchContext(symbol);
@@ -1571,6 +1628,9 @@ Recreate On Start: ${GRID_RECREATE_ON_START ? 'ON' : 'OFF'}
 Post Only (Maker): ${GRID_POST_ONLY ? 'ON' : 'OFF'}
 Smart Range Advisor (Gemini): ${GEMINI_RANGE_ADVISOR_ENABLED
       ? `ON (model=${GEMINI_MODEL}, timeframe=${GEMINI_RANGE_ADVISOR_TIMEFRAME} [candle-close aligned], min-range-width=${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}%, applies-to=${GEMINI_RANGE_ADVISOR_APPLY_ON})`
+      : 'OFF'}
+Multi-timeframe Fibonacci: ${FIBONACCI_RANGE_ADVISOR_ENABLED
+      ? `ON (timeframes=${FIBONACCI_RANGE_ADVISOR_TIMEFRAMES.join(',')}, ratios=${FIBONACCI_RANGE_ADVISOR_RATIOS.join(',')}, min-range-width=${FIBONACCI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}%, trailing=${FIBONACCI_RANGE_ADVISOR_ALLOW_TRAILING ? 'allowed' : 'paused while active'})`
       : 'OFF'}
 `);
     await this.init();

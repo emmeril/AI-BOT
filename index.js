@@ -2,12 +2,14 @@ const {
   Config,
   GRID_STATE_PATH,
   BOT_LOCK_PATH,
+  FIBONACCI_RANGE_ADVISOR_STATE_PATH,
   validateRuntimeConfiguration
 } = require('./src/config');
 const { AtomicFileWriter } = require('./src/atomic-file-writer');
 const { ProcessLock } = require('./src/process-lock');
 const { GridState } = require('./src/grid-state');
 const { GeminiRangeAdvisor, AIGridValidator, TechnicalIndicators } = require('./src/gemini-range-advisor');
+const { FibonacciRangeAdvisor } = require('./src/fibonacci-range-advisor');
 const { SpotGridEngine } = require('./src/spot-grid-engine');
 
 async function bootstrap() {
@@ -16,6 +18,7 @@ async function bootstrap() {
   // Remove any *.tmp files left behind by a previous crashed process before
   // acquiring the lock so they don't interfere with new atomic writes.
   await AtomicFileWriter.cleanupStaleTempFiles(GRID_STATE_PATH);
+  await AtomicFileWriter.cleanupStaleTempFiles(FIBONACCI_RANGE_ADVISOR_STATE_PATH);
 
   const lock = new ProcessLock(BOT_LOCK_PATH);
   lock.acquire();
@@ -49,6 +52,7 @@ module.exports = {
   ProcessLock,
   SpotGridEngine,
   GeminiRangeAdvisor,
+  FibonacciRangeAdvisor,
   AIGridValidator,
   TechnicalIndicators,
   bootstrap,

@@ -14,6 +14,7 @@ Entrypoint runtime ada di `index.js`; implementasi utama sudah dipisah ke modul 
 - Refill order setelah fill, cancel order out-of-range, post-only maker order, dan recovery order dari `clientOrderId`.
 - Stop trading manual, kill switch file, stop-loss, dan take-profit.
 - Smart Range Advisor opsional via Gemini untuk menyarankan range grid.
+- Multi-timeframe Fibonacci opsional untuk membangun support/resistance dan level grid dari candle yang sudah close.
 - Notifikasi, status berkala, dan command operasional via Telegram.
 - Dashboard web live untuk chart harga, order grid aktif, fill, dan hasil profit.
 
@@ -126,6 +127,7 @@ Dashboard berbasis Bootstrap dan Alpine.js aktif secara default. Alamat awalnya 
 - `src/dashboard-server.js`: server dashboard dan API snapshot live.
 - `public/dashboard.html`: antarmuka chart, order, dan profit.
 - `src/grid-state.js`: state grid lokal dan processed trade id.
+- `src/fibonacci-range-advisor.js`: confluence Fibonacci multi-timeframe dari candle yang sudah close.
 - `src/gemini-range-advisor.js`: indikator teknikal dan Smart Range Advisor Gemini.
 - `src/process-lock.js`: lock file satu proses.
 - `src/atomic-file-writer.js`: penulisan state/cache atomik.
@@ -199,6 +201,7 @@ Default file runtime:
 - `grid-state-spot.json`
 - `grid-state-spot.json.lock`
 - `gemini-range-advisor-state.json`
+- `fibonacci-range-advisor-state.json`
 - `bot-paused.flag`
 
 File runtime tersebut diabaikan lewat `.gitignore`.
@@ -210,6 +213,33 @@ File runtime tersebut diabaikan lewat `.gitignore`.
 - `KILL_SWITCH_FILE`: nama file pause lokal.
 - `GRID_STOP_LOSS_PRICE`: cancel grid dan stop order baru jika harga <= nilai ini. `0` berarti nonaktif.
 - `GRID_TAKE_PROFIT_PRICE`: cancel grid dan stop order baru jika harga >= nilai ini. `0` berarti nonaktif.
+
+## Multi-timeframe Fibonacci Range Advisor
+
+Advisor Fibonacci membangun level deterministik dari high/low candle terakhir yang sudah close pada banyak timeframe. Setiap candle menghasilkan retracement `0` sampai `1` serta extension di atas dan di bawah candle. Harga Fibonacci yang berdekatan digabung menjadi zona confluence berbobot; timeframe besar dan rasio golden ratio `0.618`/`1.618` mendapat bobot lebih tinggi.
+
+Aktifkan dengan:
+
+```env
+FIBONACCI_RANGE_ADVISOR_ENABLED=true
+FIBONACCI_RANGE_ADVISOR_TIMEFRAMES=all
+```
+
+Nilai `all` memakai seluruh timeframe OHLCV yang dilaporkan Binance. Untuk mengurangi request atau noise timeframe sangat kecil, isi daftar eksplisit seperti `5m,15m,1h,4h,1d,1w`. Advisor mengambil ulang setiap timeframe hanya setelah candle timeframe tersebut close, kemudian menyimpan hasilnya di cache lokal.
+
+- `FIBONACCI_RANGE_ADVISOR_RATIOS`: retracement dan extension yang dihitung. Default `0,0.236,0.382,0.5,0.618,0.786,1,1.272,1.618,2,2.618`.
+- `FIBONACCI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_SECONDS`: jeda setelah boundary close agar candle exchange sudah final.
+- `FIBONACCI_RANGE_ADVISOR_CLUSTER_TOLERANCE_PCT`: jarak maksimum dua harga untuk digabung menjadi satu zona confluence.
+- `FIBONACCI_RANGE_ADVISOR_MIN_CLUSTER_SCORE`: skor minimum zona yang boleh menjadi level grid.
+- `FIBONACCI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT`: lebar minimum range terhadap harga saat ini. Range tetap harus cukup lebar untuk `GRID_COUNT`, fee, dan target profit.
+- `FIBONACCI_RANGE_ADVISOR_MAX_DISTANCE_PCT`: batas jarak level dari harga saat ini agar extension timeframe besar tidak membuat range tidak terkendali.
+- `FIBONACCI_RANGE_ADVISOR_REBUILD_THRESHOLD_PCT`: perubahan minimum pada level sebelum grid lama boleh diganti.
+- `FIBONACCI_RANGE_ADVISOR_REBUILD_COOLDOWN_MINUTES`: cooldown cancel/remap/rebuild order setelah rekomendasi diterapkan.
+- `FIBONACCI_RANGE_ADVISOR_APPLY_ON`: `AUTO_RANGE_ONLY` atau `ALWAYS`, sama seperti advisor Gemini.
+- `FIBONACCI_RANGE_ADVISOR_ALLOW_TRAILING`: default `false`. Trailing dijeda ketika Fibonacci menguasai range agar level tidak bergeser dari zona candle lalu dibangun ulang pada siklus berikutnya.
+- `FIBONACCI_RANGE_ADVISOR_STATE_FILE`: cache candle dan rekomendasi terakhir.
+
+Advisor selalu meminta tepat `GRID_COUNT + 1` level yang mengelilingi harga saat ini dan memenuhi jarak profit minimum sebelum precision exchange. Mesin grid melakukan validasi tick size dan fee sekali lagi. Jika level Fibonacci tidak dapat dipakai, bot fallback ke Gemini (jika aktif), lalu ke range/level lokal yang sudah ada. Jika Fibonacci dan Gemini sama-sama aktif, Fibonacci memiliki prioritas.
 
 ## Smart Range Advisor Gemini
 
