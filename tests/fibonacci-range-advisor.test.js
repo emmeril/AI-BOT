@@ -105,6 +105,21 @@ test('advisor rebuild guard honors cooldown and material level movement', () => 
   assert.equal(advisor.shouldAdoptSuggestion(previous, largeMove, 120, now - 1000, now), true);
 });
 
+test('advisor rebuild guard ignores a single noisy Fibonacci level', () => {
+  const advisor = new FibonacciRangeAdvisor({}, {
+    rebuildCooldownMs: 15 * 60 * 1000,
+    rebuildThresholdPct: 0.5,
+  });
+  const previous = { lower: 90, upper: 110, levels: [90, 95, 100, 105, 110] };
+  const singleLevelOutlier = { lower: 90, upper: 120, levels: [90, 95, 100, 105, 120] };
+  const majorityMove = { lower: 90, upper: 112, levels: [90, 96, 101, 106, 112] };
+  const now = 60 * 60 * 1000;
+
+  assert.equal(advisor.shouldAdoptSuggestion(previous, singleLevelOutlier, 100, 0, now), false);
+  assert.equal(advisor.shouldAdoptSuggestion(previous, majorityMove, 100, 0, now), true);
+  assert.equal(advisor.shouldAdoptSuggestion(previous, singleLevelOutlier, 121, now - 1000, now), true);
+});
+
 test('all selects every timeframe advertised by the exchange', () => {
   const advisor = new FibonacciRangeAdvisor({
     timeframes: { '1m': '1m', '1h': '1h', '1d': '1d' },

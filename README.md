@@ -233,7 +233,7 @@ Nilai `all` memakai seluruh timeframe OHLCV yang dilaporkan Binance. Untuk mengu
 - `FIBONACCI_RANGE_ADVISOR_MIN_CLUSTER_SCORE`: skor minimum zona yang boleh menjadi level grid.
 - `FIBONACCI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT`: lebar minimum range terhadap harga saat ini. Range tetap harus cukup lebar untuk `GRID_COUNT`, fee, dan target profit.
 - `FIBONACCI_RANGE_ADVISOR_MAX_DISTANCE_PCT`: batas jarak level dari harga saat ini agar extension timeframe besar tidak membuat range tidak terkendali.
-- `FIBONACCI_RANGE_ADVISOR_REBUILD_THRESHOLD_PCT`: perubahan minimum pada level sebelum grid lama boleh diganti.
+- `FIBONACCI_RANGE_ADVISOR_REBUILD_THRESHOLD_PCT`: perubahan median minimum pada seluruh level sebelum grid lama boleh diganti. Satu level ekstrem tidak cukup untuk memicu cancel/rebuild seluruh grid.
 - `FIBONACCI_RANGE_ADVISOR_REBUILD_COOLDOWN_MINUTES`: cooldown cancel/remap/rebuild order setelah rekomendasi diterapkan.
 - `FIBONACCI_RANGE_ADVISOR_APPLY_ON`: `AUTO_RANGE_ONLY` atau `ALWAYS`, sama seperti advisor Gemini.
 - `FIBONACCI_RANGE_ADVISOR_ALLOW_TRAILING`: default `false`. Trailing dijeda ketika Fibonacci menguasai range agar level tidak bergeser dari zona candle lalu dibangun ulang pada siklus berikutnya.

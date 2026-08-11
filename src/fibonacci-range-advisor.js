@@ -205,14 +205,19 @@ class FibonacciRangeAdvisor {
     const previousLevels = Array.isArray(previous.levels) ? previous.levels : [previous.lower, previous.upper];
     const nextLevels = Array.isArray(next.levels) ? next.levels : [next.lower, next.upper];
     if (previousLevels.length !== nextLevels.length) return true;
-    let maximumShiftPct = 0;
+    const levelShiftPcts = [];
     for (let i = 0; i < previousLevels.length; i++) {
       const oldPrice = Number(previousLevels[i]);
       const newPrice = Number(nextLevels[i]);
       if (!(oldPrice > 0) || !(newPrice > 0)) return true;
-      maximumShiftPct = Math.max(maximumShiftPct, Math.abs(newPrice - oldPrice) / oldPrice * 100);
+      levelShiftPcts.push(Math.abs(newPrice - oldPrice) / oldPrice * 100);
     }
-    return maximumShiftPct >= this.options.rebuildThresholdPct;
+
+    // A single noisy Fibonacci level must not churn the entire live grid.
+    // The median requires at least half of the grid to move materially.
+    levelShiftPcts.sort((a, b) => a - b);
+    const representativeShiftPct = levelShiftPcts[Math.floor(levelShiftPcts.length / 2)];
+    return representativeShiftPct >= this.options.rebuildThresholdPct;
   }
 
   buildSuggestion(symbol, currentPrice, candles) {
