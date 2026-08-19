@@ -77,3 +77,36 @@ test('paused symbol reconciliation handles fills without fetching range context'
 
   assert.equal(handled, true);
 });
+
+test('multiple fills from one closed spot order retain order metadata for the full batch', async () => {
+  const symState = {
+    orders: { order1: { side: 'buy', levelIndex: 2, refillCount: 1 } },
+    lastTradeTimestamp: 0,
+  };
+  const seenLevels = [];
+  const engine = Object.create(SpotGridEngine.prototype);
+  engine.exchange = {
+    fetchMyTrades: async () => [
+      { id: 't1', order: 'order1', timestamp: 1, side: 'buy' },
+      { id: 't2', order: 'order1', timestamp: 2, side: 'buy' },
+    ],
+    fetchOpenOrders: async () => [],
+  };
+  engine.state = {
+    getSymbol: () => symState,
+    processedTrade: () => false,
+    save: async () => {},
+  };
+  engine.getQuoteAsset = () => 'USDT';
+  engine.getBaseAsset = () => 'BTC';
+  engine.cacheFeeTokenPrice = async () => {};
+  engine.handleBuyFill = async (_symbol, _levels, state, trade, meta) => {
+    seenLevels.push(meta.levelIndex);
+    delete state.orders[String(trade.order)];
+  };
+  engine.syncManagedOrdersWithExchange = async () => {};
+
+  await engine.handleFilledTrades('BTC/USDT', [90, 100, 110]);
+
+  assert.deepEqual(seenLevels, [2, 2]);
+});

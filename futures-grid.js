@@ -243,9 +243,6 @@ class AtomicFileWriter {
           throw err;
         }
       })
-      .catch(err => {
-        console.warn(`[FILE] Failed to persist ${filePath}:`, err.message);
-      })
       .finally(() => {
         if (AtomicFileWriter.queues.get(filePath) === current) {
           AtomicFileWriter.queues.delete(filePath);
@@ -333,6 +330,10 @@ function killSwitchActive() {
   } catch {
     return false;
   }
+}
+
+function tradeFetchResult(trades, holdWatermark = false) {
+  return { trades, holdWatermark };
 }
 
 function roundNumber(value, digits = 8) {
@@ -1338,6 +1339,10 @@ class FuturesGridEngine {
     this.circuitBreaker.errors = 0;
   }
 
+  canPlaceNewOrders() {
+    return !killSwitchActive();
+  }
+
   getOrderSizeUsdt() {
     if (GRID_TOTAL_INVESTMENT_USDT > 0) {
       return GRID_TOTAL_INVESTMENT_USDT / Math.max(GRID_COUNT, 1);
@@ -1532,6 +1537,24 @@ class FuturesGridEngine {
   async remapStateAfterRangeReset(symbol, oldLower, oldUpper, newLower, newUpper) {
     const symState = this.state.getSymbol(symbol);
 
+    // Validate the target grid before cancelling live orders. If precision
+    // collapses the new range, keep both the current orders and the tracked
+    // LONG cost basis intact so the position remains manageable.
+    let newLevels;
+    try {
+      newLevels = this.buildLevels(newLower, newUpper, symbol);
+    } catch (err) {
+      if (symState.rangeTransition?.kind === 'reset' &&
+          symState.rangeTransition.newLower === newLower &&
+          symState.rangeTransition.newUpper === newUpper) {
+        symState.rangeTransition = null;
+        await this.state.save();
+      }
+      throw new Error(
+        `[RANGE] ${symbol} range-reset rejected before order cancellation: ${err.message}`
+      );
+    }
+
     // Persist the transition BEFORE the irreversible step (cancelling live
     // orders on the exchange). If the process dies anywhere after this point
     // and before the marker is cleared below, resumeInterruptedRangeTransition()
@@ -1569,26 +1592,6 @@ class FuturesGridEngine {
 
     const oldEntries = Object.entries(symState.lastBuyByLevel);
     if (oldEntries.length === 0) {
-      symState.refillCountByLevel = {};
-      symState.rangeTransition = null;
-      await this.state.save();
-      return;
-    }
-
-    let newLevels;
-    try {
-      newLevels = this.buildLevels(newLower, newUpper, symbol);
-    } catch (err) {
-      // New range can't even produce distinct levels for this symbol/tick
-      // size — there is no sane new level to attribute old buys to. Clear
-      // them rather than keep stale data that would corrupt P&L; buildRange
-      // will throw separately on the next call if the range itself stays
-      // invalid, which surfaces the problem to the operator.
-      console.warn(
-        `[RANGE] ${symbol} could not build levels for new range ${roundNumber(newLower)}-${roundNumber(newUpper)} ` +
-        `during remap (${err.message}); clearing ${oldEntries.length} buy record(s) to avoid stale P&L data.`
-      );
-      symState.lastBuyByLevel = {};
       symState.refillCountByLevel = {};
       symState.rangeTransition = null;
       await this.state.save();
@@ -2429,7 +2432,7 @@ class FuturesGridEngine {
     this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
     await this.sendAlert(`[GRID BUY] ${symbol} amount=${amount} @ ${price} | sellable=${sellableAmount} | fee=${feeQuote.toFixed(4)} ${quote}`);
-    if (!GRID_REFILL_ON_FILLED || levelIndex + 1 >= levels.length) return;
+    if (!GRID_REFILL_ON_FILLED || !this.canPlaceNewOrders() || levelIndex + 1 >= levels.length) return;
     const sellLevelIndex = levelIndex + 1;
     const sellPrice = levels[sellLevelIndex];
 
@@ -2546,7 +2549,7 @@ class FuturesGridEngine {
     await this.state.save();
     await this.sendAlert(`[GRID SELL] ${symbol} amount=${amount} @ ${price} | profit=${profit.toFixed(4)} ${quote} | fee=${feeQuote.toFixed(4)} ${quote}`);
 
-    if (GRID_REFILL_ON_FILLED && levelIndex - 1 >= 0) {
+    if (GRID_REFILL_ON_FILLED && this.canPlaceNewOrders() && levelIndex - 1 >= 0) {
       const nextRefillCount = refillCount + 1;
       if (nextRefillCount > GRID_MAX_REFILLS) {
         console.warn(
@@ -2718,7 +2721,7 @@ class FuturesGridEngine {
           `in this timestamp bucket are picked up on the next cycle.`
         );
         // Return what we have but DO NOT update lastTradeTimestamp.
-        return allTrades;
+        return tradeFetchResult(allTrades, true);
       }
       from = lastTimestamp + 1;
       iteration++;
@@ -2729,7 +2732,7 @@ class FuturesGridEngine {
       symState.lastTradeTimestamp = maxTs;
       await this.state.save();
     }
-    return allTrades;
+    return tradeFetchResult(allTrades);
   }
 
   async handleFilledTrades(symbol, levels, preloadedOpenOrders = null) {
@@ -2755,20 +2758,26 @@ class FuturesGridEngine {
     // We only do that below, after every trade below has been processed
     // without throwing — otherwise a failure partway through this batch
     // would permanently skip the unprocessed trades on the next cycle.
-    const [trades, openOrders] = await Promise.all([
+    const [tradeFetch, openOrders] = await Promise.all([
       this.fetchNewTrades(symbol, symState, { updateTimestamp: false }),
       preloadedOpenOrders
         ? Promise.resolve(preloadedOpenOrders)
         : retry(() => this.exchange.fetchOpenOrders(symbol)),
     ]);
+    const { trades, holdWatermark } = tradeFetch;
     const openOrderIds = new Set(openOrders.map(order => String(order.id)));
+    // A single closed Binance order can be represented by several trade
+    // fills. Preserve its metadata for the whole batch even after the first
+    // fill removes the closed order from persistent state.
+    const orderMetadataById = new Map(Object.entries(symState.orders));
     for (const trade of trades.sort((a, b) => a.timestamp - b.timestamp)) {
       const id = this.getTradeId(trade);
       if (this.state.processedTrade(symbol, id)) continue;
 
       // Attempt to get order metadata from state, falling back to clientOrderId
       // embedded in the trade so fills are never lost across restarts.
-      let orderMeta = symState.orders[String(trade.order)];
+      const tradeOrderId = String(trade.order);
+      let orderMeta = orderMetadataById.get(tradeOrderId) || symState.orders[tradeOrderId];
       if (!orderMeta) {
         // clientOrderId format: grid-<market>-<s|b>-<levelIndex>-r<refillCount>-<nonce>
         const clientId = String(
@@ -2780,6 +2789,7 @@ class FuturesGridEngine {
         const recoveredMeta = this.getBotOrderMeta({ clientOrderId: clientId });
         if (recoveredMeta) {
           orderMeta = recoveredMeta;
+          orderMetadataById.set(tradeOrderId, recoveredMeta);
           console.warn(
             `[RECOVER] ${symbol} reconstructed orderMeta for trade ${id} ` +
             `from clientOrderId="${clientId}" (level=${orderMeta.levelIndex}, ` +
@@ -2818,7 +2828,7 @@ class FuturesGridEngine {
     // lastTradeTimestamp stays put and the same trades (including the
     // failed one) are retried next cycle; already-processed ones among them
     // are skipped via processedTrade() deduplication.
-    if (trades.length) {
+    if (trades.length && !holdWatermark) {
       const maxTs = Math.max(...trades.map(t => t.timestamp));
       if (maxTs > (symState.lastTradeTimestamp || 0)) {
         symState.lastTradeTimestamp = maxTs;
@@ -2891,6 +2901,14 @@ class FuturesGridEngine {
   }
 
   async reconcileSymbolUnlocked(symbol) {
+    if (!this.canPlaceNewOrders()) {
+      const freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+      await this.handleFilledTrades(symbol, [], freshOpenOrders);
+      await this.syncFundingHistory(symbol);
+      console.log(`[SYNC] ${symbol} trading paused; fills and funding reconciled but no new orders will be placed`);
+      return;
+    }
+
     let context = await this.fetchContext(symbol);
     let { currentPrice, balance, positions, lower, upper, levels } = context;
 
@@ -3161,7 +3179,7 @@ class FuturesGridEngine {
     this.isRunning = true;
     let hadError = false;
     try {
-      if (!this.circuitAllows() || killSwitchActive()) return;
+      if (!this.circuitAllows()) return;
       for (const symbol of SYMBOLS) {
         try {
           await this.reconcileSymbol(symbol);

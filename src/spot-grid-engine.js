@@ -404,6 +404,25 @@ class SpotGridEngine {
   async remapStateAfterRangeReset(symbol, oldLower, oldUpper, newLower, newUpper, newLevelsOverride = null) {
     const symState = this.state.getSymbol(symbol);
 
+    // Validate the target grid before cancelling live orders. An unusable
+    // range must never erase the only local cost-basis record for real
+    // inventory that is still held on the exchange.
+    let newLevels;
+    try {
+      newLevels = newLevelsOverride || this.buildLevels(newLower, newUpper, symbol);
+      this.assertLevelsAreDistinct(symbol, newLevels, newLower, newUpper);
+    } catch (err) {
+      if (symState.rangeTransition?.kind === 'reset' &&
+          symState.rangeTransition.newLower === newLower &&
+          symState.rangeTransition.newUpper === newUpper) {
+        symState.rangeTransition = null;
+        await this.state.save();
+      }
+      throw new Error(
+        `[RANGE] ${symbol} range-reset rejected before order cancellation: ${err.message}`
+      );
+    }
+
     // Persist the transition BEFORE the irreversible step (cancelling live
     // orders on the exchange). If the process dies anywhere after this point
     // and before the marker is cleared below, resumeInterruptedRangeTransition()
@@ -441,26 +460,6 @@ class SpotGridEngine {
 
     const oldEntries = Object.entries(symState.lastBuyByLevel);
     if (oldEntries.length === 0) {
-      symState.refillCountByLevel = {};
-      symState.rangeTransition = null;
-      await this.state.save();
-      return;
-    }
-
-    let newLevels;
-    try {
-      newLevels = newLevelsOverride || this.buildLevels(newLower, newUpper, symbol);
-    } catch (err) {
-      // New range can't even produce distinct levels for this symbol/tick
-      // size - there is no sane new level to attribute old buys to. Clear
-      // them rather than keep stale data that would corrupt P&L; buildRange
-      // will throw separately on the next call if the range itself stays
-      // invalid, which surfaces the problem to the operator.
-      console.warn(
-        `[RANGE] ${symbol} could not build levels for new range ${roundNumber(newLower)}-${roundNumber(newUpper)} ` +
-        `during remap (${err.message}); clearing ${oldEntries.length} buy record(s) to avoid stale P&L data.`
-      );
-      symState.lastBuyByLevel = {};
       symState.refillCountByLevel = {};
       symState.rangeTransition = null;
       await this.state.save();
@@ -1206,13 +1205,18 @@ class SpotGridEngine {
     ]);
     const { trades, holdWatermark } = tradeFetch;
     const openOrderIds = new Set(openOrders.map(order => String(order.id)));
+    // Keep a batch-local snapshot because the first fill of a fully closed
+    // order removes its persistent metadata. Binance can return multiple
+    // trade fills for that same order in one response.
+    const orderMetadataById = new Map(Object.entries(symState.orders));
     for (const trade of trades.sort((a, b) => a.timestamp - b.timestamp)) {
       const id = this.getTradeId(trade);
       if (this.state.processedTrade(symbol, id)) continue;
 
       // Attempt to get order metadata from state, falling back to clientOrderId
       // embedded in the trade so fills are never lost across restarts.
-      let orderMeta = symState.orders[String(trade.order)];
+      const tradeOrderId = String(trade.order);
+      let orderMeta = orderMetadataById.get(tradeOrderId) || symState.orders[tradeOrderId];
       if (!orderMeta) {
         // clientOrderId format:
         // grid-<market>-<s|b>-<levelIndex>[-b<sourceBuyLevel>]-r<refillCount>-<nonce>
@@ -1225,6 +1229,7 @@ class SpotGridEngine {
         const recoveredMeta = this.getBotOrderMeta({ clientOrderId: clientId });
         if (recoveredMeta) {
           orderMeta = recoveredMeta;
+          orderMetadataById.set(tradeOrderId, recoveredMeta);
           console.warn(
             `[RECOVER] ${symbol} reconstructed orderMeta for trade ${id} ` +
             `from clientOrderId="${clientId}" (level=${orderMeta.levelIndex}, ` +

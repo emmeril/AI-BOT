@@ -194,3 +194,44 @@ test('range remap alert distinguishes unchanged bounds from rebuilt levels', asy
   assert.match(alerts[0], /Bounds Changed: No/);
   assert.doesNotMatch(alerts[0], /^\[Range Reset\]/);
 });
+
+test('invalid target range preserves tracked inventory and does not cancel live orders', async () => {
+  const trackedBuy = {
+    price: 100,
+    amount: 1,
+    sellableAmount: 1,
+    totalCostQuote: 100,
+    totalFeeQuote: 0,
+  };
+  const symbolState = {
+    config: { lower: 90, upper: 110 },
+    orders: { 'buy-1': { id: 'buy-1', side: 'buy', levelIndex: 1 } },
+    lastBuyByLevel: { 1: trackedBuy },
+    refillCountByLevel: { 1: 0 },
+    rangeTransition: null,
+  };
+  const engine = Object.create(SpotGridEngine.prototype);
+  engine.exchange = {
+    markets: { 'BTC/USDT': { precision: { price: 1 } } },
+    priceToPrecision: () => '100',
+  };
+  engine.state = {
+    getSymbol: () => symbolState,
+    save: async () => {},
+  };
+  let cancelled = false;
+  engine.cancelGridOrders = async () => {
+    cancelled = true;
+    return { failed: [] };
+  };
+
+  await assert.rejects(
+    engine.remapStateAfterRangeReset('BTC/USDT', 90, 110, 99, 101),
+    /range-reset rejected before order cancellation/
+  );
+
+  assert.equal(cancelled, false);
+  assert.strictEqual(symbolState.lastBuyByLevel[1], trackedBuy);
+  assert.ok(symbolState.orders['buy-1']);
+  assert.equal(symbolState.rangeTransition, null);
+});
