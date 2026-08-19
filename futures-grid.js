@@ -502,7 +502,7 @@ class ProcessLock {
 
   removeStaleLock(owner) {
     if (!owner || owner.malformed || this.processIsAlive(owner.pid)) return false;
-    console.warn(`[LOCK] Found stale lock for PID ${owner.pid}; waiting ${BOT_LOCK_STALE_GRACE_MS}ms before failing closed`);
+    console.warn(`[LOCK] Found stale lock for PID ${owner.pid}; waiting ${BOT_LOCK_STALE_GRACE_MS}ms before cleanup`);
     sleepSync(BOT_LOCK_STALE_GRACE_MS);
 
     let latest;
@@ -515,7 +515,14 @@ class ProcessLock {
 
     const sameOwner = latest.pid === owner.pid && latest.token === owner.token;
     if (!sameOwner || this.processIsAlive(latest.pid)) return false;
-    throw new Error(`Stale bot lock found for PID ${owner.pid}. Remove ${this.lockPath} manually after confirming no bot is running.`);
+    try {
+      fs.unlinkSync(this.lockPath);
+      console.warn(`[LOCK] Removed stale lock for inactive PID ${owner.pid}: ${this.lockPath}`);
+      return true;
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+      return true;
+    }
   }
 
   ownsLock() {

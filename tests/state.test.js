@@ -139,7 +139,7 @@ test('ProcessLock release does not delete a replacement lock owned by the same P
   }
 });
 
-test('ProcessLock fails closed instead of deleting a stale lock', () => {
+test('ProcessLock replaces a stale lock after confirming its PID is inactive', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'grid-lock-'));
   const lockPath = path.join(directory, 'bot.lock');
   fs.writeFileSync(lockPath, JSON.stringify({ pid: 100, token: 'stale' }));
@@ -147,8 +147,34 @@ test('ProcessLock fails closed instead of deleting a stale lock', () => {
   lock.processIsAlive = () => false;
 
   try {
-    assert.throws(() => lock.acquire(), /Stale bot lock found for PID 100/);
-    assert.equal(fs.existsSync(lockPath), true);
+    lock.acquire();
+
+    const owner = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    assert.equal(owner.pid, process.pid);
+    assert.notEqual(owner.token, 'stale');
+  } finally {
+    lock.release();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('ProcessLock does not remove a stale lock if its ownership changes during grace period', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'grid-lock-'));
+  const lockPath = path.join(directory, 'bot.lock');
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: 100, token: 'stale' }));
+  const lock = new ProcessLock(lockPath);
+  lock.processIsAlive = () => false;
+  lock.readOwner = () => {
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: 200, token: 'replacement' }));
+    return { pid: 200, token: 'replacement' };
+  };
+
+  try {
+    assert.equal(lock.removeStaleLock({ pid: 100, token: 'stale' }), false);
+    assert.deepEqual(JSON.parse(fs.readFileSync(lockPath, 'utf8')), {
+      pid: 200,
+      token: 'replacement',
+    });
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
