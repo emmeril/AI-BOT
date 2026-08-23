@@ -22,6 +22,26 @@ test('spot Telegram messages separate their title from details', () => {
   ].join('\n'));
 });
 
+test('futures command forwarding does not send an acknowledgement message', async () => {
+  const calls = [];
+  const fs = require('fs');
+  const target = require('path').resolve(process.cwd(), 'futures-telegram-command.json');
+  const hadExisting = fs.existsSync(target);
+  const previousContents = hadExisting ? fs.readFileSync(target) : null;
+  try {
+    const engine = {
+      sendAlert: async message => calls.push(message),
+    };
+    await telegramMethods.handleTelegramCommand.call(engine, '/futures_status');
+    assert.equal(calls.length, 0);
+  } finally {
+    if (hadExisting) fs.writeFileSync(target, previousContents);
+    else {
+      try { fs.unlinkSync(target); } catch {}
+    }
+  }
+});
+
 test('futures dashboard uses position margin and excludes open-order margin from ROI', () => {
   const result = positionMetrics({
     contracts: 2982,

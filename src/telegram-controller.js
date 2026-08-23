@@ -28,12 +28,6 @@ async function queueFuturesTelegramCommand(text, chatId) {
   const tempPath = `${futuresCommandQueuePath}.${process.pid}.tmp`;
   await fs.promises.writeFile(tempPath, JSON.stringify({ command, chatId: String(chatId), queuedAt: new Date().toISOString() }));
   await fs.promises.rename(tempPath, futuresCommandQueuePath);
-  await this.sendAlert([
-    '[FUTURES COMMAND]',
-    '',
-    `Command: ${command}`,
-    'Status: diterima, sedang diproses bot futures',
-  ].join('\n'));
   return true;
 }
 
