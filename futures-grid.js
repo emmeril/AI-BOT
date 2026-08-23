@@ -125,6 +125,10 @@ const BOT_LOCK_PATH = path.resolve(process.cwd(), BOT_LOCK_FILE);
 const BOT_LOCK_STALE_GRACE_MS = Math.max(Config.number('BOT_LOCK_STALE_GRACE_MS', 2000), 0);
 const GRID_POST_ONLY = Config.boolean('GRID_POST_ONLY', true);
 const GRID_PRICE_PRECISION_MAX_DEVIATION_PCT = Config.number('GRID_PRICE_PRECISION_MAX_DEVIATION_PCT', 0.05);
+// Futures maker fee is charged on both entry and exit. Keep the spacing guard
+// configurable so it can match the account's Binance VIP/BNB fee tier.
+const BINANCE_FUTURES_MAKER_FEE_RATE = Config.number('BINANCE_FUTURES_MAKER_FEE_RATE', 0.0002);
+const GRID_MIN_NET_PROFIT_PCT = Config.number('GRID_MIN_NET_PROFIT_PCT', 0.05);
 
 // ------------------------------
 //  Smart Grid Range Advisor (Gemini AI)
@@ -825,6 +829,7 @@ class GridState {
       side: order.side,
       levelIndex: meta.levelIndex,
       refillCount: Number(meta.refillCount) || 0,
+      sourceBuyLevelIndex: meta.sourceBuyLevelIndex ?? null,
       price: Number(order.price),
       amount: Number(order.amount),
       createdAt: new Date().toISOString(),
@@ -1223,6 +1228,7 @@ class FuturesGridEngine {
     this.circuitBreaker = { errors: 0, pausedUntil: 0 };
     // for stuck investment warning deduplication
     this.stuckInvestmentWarned = new Set();
+    this.sellTargetWarnings = new Set();
     this.rangeAdvisor = new GeminiRangeAdvisor(this.exchange);
   }
 
@@ -1775,6 +1781,10 @@ class FuturesGridEngine {
       shiftedOrders[orderId] = {
         ...order,
         levelIndex: clampedIndex,
+        ...(order.sourceBuyLevelIndex !== null && order.sourceBuyLevelIndex !== undefined &&
+          Number.isInteger(Number(order.sourceBuyLevelIndex))
+          ? { sourceBuyLevelIndex: this.clampBuyLevelIndex(Number(order.sourceBuyLevelIndex) + offset) }
+          : {}),
       };
     }
     symState.orders = shiftedOrders;
@@ -1975,8 +1985,42 @@ class FuturesGridEngine {
       levels[0] = lower;
       levels[GRID_COUNT] = upper;
     }
-    if (symbol) this.assertLevelsAreDistinct(symbol, levels, lower, upper);
+    if (symbol) {
+      this.assertLevelsAreDistinct(symbol, levels, lower, upper);
+      this.assertLevelsMeetMinimumProfit(symbol, levels);
+    }
     return levels;
+  }
+
+  assertLevelsMeetMinimumProfit(symbol, levels) {
+    const targetNetRate = GRID_MIN_NET_PROFIT_PCT / 100;
+    const minimumRatio = (1 + targetNetRate + BINANCE_FUTURES_MAKER_FEE_RATE) /
+      (1 - BINANCE_FUTURES_MAKER_FEE_RATE);
+    const rounded = levels.map(level => {
+      try { return Number(this.exchange.priceToPrecision(symbol, level)); } catch { return Number(level); }
+    });
+    for (let i = 1; i < rounded.length; i++) {
+      if (rounded[i] / rounded[i - 1] + 1e-12 < minimumRatio) {
+        throw new Error(
+          `${symbol} grid step ${i - 1}->${i} does not cover futures fees plus ` +
+          `GRID_MIN_NET_PROFIT_PCT=${GRID_MIN_NET_PROFIT_PCT}`
+        );
+      }
+    }
+  }
+
+  getMinimumProfitableSellPrice(buy) {
+    const amount = Number(buy?.sellableAmount ?? buy?.amount) || 0;
+    const cost = (Number(buy?.totalCostQuote) || 0) + (Number(buy?.totalFeeQuote) || 0);
+    if (!(amount > 0) || !(cost > 0)) return Infinity;
+    return (cost / amount) * (1 + GRID_MIN_NET_PROFIT_PCT / 100) /
+      (1 - BINANCE_FUTURES_MAKER_FEE_RATE);
+  }
+
+  isTrackedSellProfitable(symbol, buy, sellPrice) {
+    let precise = Number(sellPrice);
+    try { precise = Number(this.exchange.priceToPrecision(symbol, sellPrice)); } catch {}
+    return precise + 1e-12 >= this.getMinimumProfitableSellPrice(buy);
   }
 
   // Guards against grid levels collapsing onto the same exchange-rounded price.
@@ -2076,19 +2120,27 @@ class FuturesGridEngine {
   }
 
   getBotOrderMeta(order) {
-    const match = this.getOrderClientId(order).match(/^grid-[a-z0-9]+-([bs])-(\d+)-(?:r(\d+)-)?/);
+    const match = this.getOrderClientId(order).match(
+      /^grid-[a-z0-9]+-([bs])-(\d+)(?:-b(\d+))?-(?:r(\d+)-)?/
+    );
     if (!match) return null;
-    return {
+    const meta = {
       side: match[1] === 'b' ? 'buy' : 'sell',
       levelIndex: Number(match[2]),
-      refillCount: Number(match[3]) || 0,
+      refillCount: Number(match[4]) || 0,
     };
+    if (match[3] !== undefined) meta.sourceBuyLevelIndex = Number(match[3]);
+    return meta;
   }
 
-  makeClientOrderId(symbol, side, levelIndex, refillCount = 0) {
+  makeClientOrderId(symbol, side, levelIndex, refillCount = 0, sourceBuyLevelIndex = null) {
     const market = symbol.replace(/[^a-z0-9]/gi, '').slice(0, 10).toLowerCase();
     const nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-    return `grid-${market}-${side[0]}-${levelIndex}-r${refillCount}-${nonce}`.slice(0, 36);
+    const source = side === 'sell' && sourceBuyLevelIndex !== null &&
+      sourceBuyLevelIndex !== undefined && Number.isInteger(Number(sourceBuyLevelIndex))
+      ? `-b${Number(sourceBuyLevelIndex)}`
+      : '';
+    return `grid-${market}-${side[0]}-${levelIndex}${source}-r${refillCount}-${nonce}`.slice(0, 36);
   }
 
   async cancelGridOrders(symbol, reason) {
@@ -2117,8 +2169,12 @@ class FuturesGridEngine {
     console.log(`[CANCEL] ${symbol} ${order.side} ${order.id} | ${reason}`);
   }
 
-  async createFuturesLimitOrder(symbol, side, amount, price, levelIndex, refillCount = 0) {
-    const clientOrderId = this.makeClientOrderId(symbol, side, levelIndex, refillCount);
+  async createFuturesLimitOrder(
+    symbol, side, amount, price, levelIndex, refillCount = 0, sourceBuyLevelIndex = null
+  ) {
+    const clientOrderId = this.makeClientOrderId(
+      symbol, side, levelIndex, refillCount, sourceBuyLevelIndex
+    );
     // In Hedge Mode, positionSide tells Binance which side of the position
     // this order affects. Since the grid only ever trades the LONG side,
     // a BUY here opens/adds to LONG and a SELL reduces/closes LONG -
@@ -2141,8 +2197,11 @@ class FuturesGridEngine {
     );
   }
 
-  async placeLimit(symbol, side, levelIndex, price, amount, { refillCount = 0 } = {}) {
-    const pendingKey = `${symbol}|${side}|${levelIndex}`;
+  async placeLimit(
+    symbol, side, levelIndex, price, amount,
+    { refillCount = 0, sourceBuyLevelIndex = null } = {}
+  ) {
+    const pendingKey = `${symbol}|${side}|${levelIndex}|${sourceBuyLevelIndex ?? ''}`;
     if (this.pendingOrderLevels.has(pendingKey)) {
       console.warn(`[SKIP] ${symbol} ${side.toUpperCase()} level=${levelIndex} | placement already in progress`);
       return null;
@@ -2178,9 +2237,14 @@ class FuturesGridEngine {
         return null;
       }
 
-      const order = await this.createFuturesLimitOrder(symbol, side, preciseAmount, precisePrice, levelIndex, refillCount);
-      await this.state.rememberOrder(symbol, order, { levelIndex, refillCount });
-      console.log(`[GRID] ${symbol} ${side.toUpperCase()} level=${levelIndex} refill=${refillCount} amount=${preciseAmount} price=${precisePrice}${GRID_POST_ONLY ? ' (postOnly)' : ''}`);
+      const order = await this.createFuturesLimitOrder(
+        symbol, side, preciseAmount, precisePrice, levelIndex, refillCount, sourceBuyLevelIndex
+      );
+      await this.state.rememberOrder(symbol, order, { levelIndex, refillCount, sourceBuyLevelIndex });
+      const sourceLabel = side === 'sell' && sourceBuyLevelIndex !== null
+        ? ` sourceBuy=${sourceBuyLevelIndex}`
+        : '';
+      console.log(`[GRID] ${symbol} ${side.toUpperCase()} level=${levelIndex}${sourceLabel} refill=${refillCount} amount=${preciseAmount} price=${precisePrice}${GRID_POST_ONLY ? ' (postOnly)' : ''}`);
       return order;
     } catch (err) {
       if (this.isInsufficientFundsError(err)) {
@@ -2433,64 +2497,64 @@ class FuturesGridEngine {
     await this.state.save();
     await this.sendAlert(`[GRID BUY] ${symbol} amount=${amount} @ ${price} | sellable=${sellableAmount} | fee=${feeQuote.toFixed(4)} ${quote}`);
     if (!GRID_REFILL_ON_FILLED || !this.canPlaceNewOrders() || levelIndex + 1 >= levels.length) return;
-    const sellLevelIndex = levelIndex + 1;
-    const sellPrice = levels[sellLevelIndex];
-
-    const totalSellable = Math.max(0, Number(symState.lastBuyByLevel[levelIndex]?.sellableAmount ?? symState.lastBuyByLevel[levelIndex]?.amount) || 0);
+    const trackedBuy = symState.lastBuyByLevel[levelIndex];
+    const totalSellable = Math.max(0, Number(trackedBuy?.sellableAmount ?? trackedBuy?.amount) || 0);
     if (!(totalSellable > 0)) {
-      console.warn(`[SKIP] ${symbol} SELL refill level=${sellLevelIndex} | sellable amount zero after fee`);
-      return;
-    }
-
-    const minCost = this.getMinCost(symbol);
-    const { notional } = this.getPreciseOrderNumbers(symbol, sellPrice, totalSellable);
-    if (minCost > 0 && notional < minCost - 1e-8) {
-      console.warn(
-        `[SKIP] ${symbol} SELL refill level=${sellLevelIndex} | notional ${notional.toFixed(8)} below min ${minCost}, keeping buy record for later retry`
-      );
+      console.warn(`[SKIP] ${symbol} SELL sourceBuy=${levelIndex} | sellable amount zero after fee`);
       return;
     }
 
     await this.syncManagedOrdersWithExchange(symbol, symState, openOrderIds);
+    const existingOrder = this.getActiveSellOrderForBuyLevel(symState, levelIndex);
+    const target = this.findSellTargetForBuy(symbol, levels, levelIndex, trackedBuy, {
+      amount: totalSellable,
+      reservedSellLevels: this.getReservedSellLevels(symState, existingOrder?.id),
+    });
+    if (!target) {
+      this.warnNoSellTarget(symbol, levelIndex, levels, trackedBuy, totalSellable);
+      return;
+    }
+    this.clearSellTargetWarning(symbol, levelIndex);
 
-    if (this.hasActiveOrderAtLevel(symState, 'sell', sellLevelIndex)) {
-      const existingOrder = Object.values(symState.orders).find(o =>
-        String(o.side).toLowerCase() === 'sell' && Number(o.levelIndex) === sellLevelIndex
-      );
+    if (existingOrder) {
       const existingAmount = Number(existingOrder?.amount || 0);
-
-      const { preciseAmount: preciseTotalSellable } = this.getPreciseOrderNumbers(symbol, sellPrice, totalSellable);
+      const { preciseAmount: preciseTotalSellable } = this.getPreciseOrderNumbers(
+        symbol, target.sellPrice, totalSellable
+      );
       const preciseTotalNum = Number(preciseTotalSellable);
-
-      if (existingOrder && preciseTotalNum > existingAmount + 1e-8) {
+      if (Number(existingOrder.levelIndex) !== target.sellLevelIndex || preciseTotalNum > existingAmount + 1e-8) {
         console.log(
-          `[UPDATE] ${symbol} SELL level=${sellLevelIndex} | amount update ${existingAmount} -> ${preciseTotalNum} (buy accumulated)`
+          `[UPDATE] ${symbol} SELL sourceBuy=${levelIndex} level=${existingOrder.levelIndex}->${target.sellLevelIndex} ` +
+          `amount=${existingAmount}->${preciseTotalNum}`
         );
         try {
-          await this.cancelOrder(symbol, existingOrder, `sell amount update level=${sellLevelIndex}`);
-          await this.placeLimit(symbol, 'sell', sellLevelIndex, sellPrice, totalSellable, { refillCount });
+          await this.cancelOrder(symbol, existingOrder, `sell target update sourceBuy=${levelIndex}`);
+          await this.placeLimit(symbol, 'sell', target.sellLevelIndex, target.sellPrice, totalSellable, {
+            refillCount, sourceBuyLevelIndex: levelIndex,
+          });
         } catch (err) {
-          console.warn(`[UPDATE] ${symbol} SELL level=${sellLevelIndex} cancel+replace failed: ${err.message}`);
+          console.warn(`[UPDATE] ${symbol} SELL sourceBuy=${levelIndex} cancel+replace failed: ${err.message}`);
         }
       } else {
-        console.warn(`[SKIP] ${symbol} SELL refill level=${sellLevelIndex} | sell order already active with sufficient amount`);
+        console.warn(`[SKIP] ${symbol} SELL sourceBuy=${levelIndex} | sell order already active with sufficient amount`);
       }
       return;
     }
 
     if (this.countActiveOrders(symState, 'sell') >= GRID_MAX_ACTIVE_SELL_ORDERS) {
-      console.warn(`[SKIP] ${symbol} SELL refill level=${sellLevelIndex} | active sell order limit reached`);
+      console.warn(`[SKIP] ${symbol} SELL sourceBuy=${levelIndex} | active sell order limit reached`);
       return;
     }
-
-    await this.placeLimit(symbol, 'sell', sellLevelIndex, sellPrice, totalSellable, { refillCount });
+    await this.placeLimit(symbol, 'sell', target.sellLevelIndex, target.sellPrice, totalSellable, {
+      refillCount, sourceBuyLevelIndex: levelIndex,
+    });
   }
 
   async handleSellFill(symbol, levels, symState, trade, orderMeta, openOrderIds) {
     const price = Number(trade.price);
     const amount = Number(trade.amount);
     const levelIndex = Number(orderMeta.levelIndex);
-    const buyLevelIndex = levelIndex - 1;
+    const buyLevelIndex = this.getSellSourceBuyLevelIndex(orderMeta);
     const buy = symState.lastBuyByLevel[buyLevelIndex];
     if (!buy) {
       console.warn(`[SELL] ${symbol} level ${levelIndex} has no corresponding buy record. Skipping profit calculation.`);
@@ -2549,27 +2613,28 @@ class FuturesGridEngine {
     await this.state.save();
     await this.sendAlert(`[GRID SELL] ${symbol} amount=${amount} @ ${price} | profit=${profit.toFixed(4)} ${quote} | fee=${feeQuote.toFixed(4)} ${quote}`);
 
-    if (GRID_REFILL_ON_FILLED && this.canPlaceNewOrders() && levelIndex - 1 >= 0) {
+    if (GRID_REFILL_ON_FILLED && this.canPlaceNewOrders() && buyLevelIndex >= 0) {
       const nextRefillCount = refillCount + 1;
       if (nextRefillCount > GRID_MAX_REFILLS) {
         console.warn(
-          `[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | max refill ${GRID_MAX_REFILLS} reached`
+          `[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | max refill ${GRID_MAX_REFILLS} reached`
         );
         return;
       }
-      const buyPrice = levels[levelIndex - 1];
-      if (this.hasActiveOrderAtLevel(symState, 'buy', levelIndex - 1)) {
-        console.warn(`[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | buy order already active`);
+      const buyPrice = levels[buyLevelIndex];
+      if (!(buyPrice > 0)) return;
+      if (this.hasActiveOrderAtLevel(symState, 'buy', buyLevelIndex)) {
+        console.warn(`[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | buy order already active`);
         return;
       }
       if (this.countActiveOrders(symState, 'buy') >= GRID_MAX_ACTIVE_BUY_ORDERS) {
-        console.warn(`[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | active buy order limit reached`);
+        console.warn(`[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | active buy order limit reached`);
         return;
       }
       let amountToBuy = this.amountForBuy(symbol, buyPrice);
       let cost = amountToBuy * buyPrice;
       if (!(amountToBuy > 0)) {
-        console.warn(`[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | investment cap reached`);
+        console.warn(`[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | investment cap reached`);
         return;
       }
       const minCost = this.getMinCost(symbol);
@@ -2577,7 +2642,7 @@ class FuturesGridEngine {
         amountToBuy = minCost / buyPrice;
         cost = amountToBuy * buyPrice;
         if (cost < minCost - 1e-8) {
-          console.warn(`[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | cannot meet min notional ${minCost}`);
+          console.warn(`[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | cannot meet min notional ${minCost}`);
           return;
         }
       }
@@ -2585,11 +2650,11 @@ class FuturesGridEngine {
       const precise = this.getPreciseOrderNumbers(symbol, buyPrice, amountToBuy);
       if (precise.notional > remainingInvestmentUsdt + 1e-8) {
         console.warn(
-          `[SKIP] ${symbol} BUY refill level=${levelIndex - 1} | rounded cost ${precise.notional.toFixed(8)} exceeds remaining investment ${roundNumber(remainingInvestmentUsdt, 8)}`
+          `[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | rounded cost ${precise.notional.toFixed(8)} exceeds remaining investment ${roundNumber(remainingInvestmentUsdt, 8)}`
         );
         return;
       }
-      await this.placeLimit(symbol, 'buy', levelIndex - 1, buyPrice, amountToBuy, {
+      await this.placeLimit(symbol, 'buy', buyLevelIndex, buyPrice, amountToBuy, {
         refillCount: nextRefillCount,
       });
     }
@@ -3043,31 +3108,42 @@ class FuturesGridEngine {
       remainingInvestmentUsdt = Math.max(0, remainingInvestmentUsdt - cost);
     }
 
-    for (const level of above) {
+    const reservedSellLevels = new Set(activeSellLevels);
+    const trackedBuys = Object.entries(symState.lastBuyByLevel)
+      .map(([buyLevelIndex, buy]) => ({ buyLevelIndex: Number(buyLevelIndex), buy }))
+      .filter(item => Number.isInteger(item.buyLevelIndex) && item.buy)
+      .sort((a, b) => b.buyLevelIndex - a.buyLevelIndex);
+
+    for (const { buyLevelIndex, buy: trackedBuy } of trackedBuys) {
       if (this.countActiveOrders(symState, 'sell') >= GRID_MAX_ACTIVE_SELL_ORDERS) {
-        console.warn(`[SKIP] ${symbol} SELL level=${level.index} | active sell order limit (${GRID_MAX_ACTIVE_SELL_ORDERS}) reached`);
+        console.warn(`[SKIP] ${symbol} SELL sourceBuy=${buyLevelIndex} | active sell order limit (${GRID_MAX_ACTIVE_SELL_ORDERS}) reached`);
         break;
       }
-      if (activeSellLevels.has(level.index)) continue;
-      const trackedAmount = this.amountForTrackedSell(symbol, level.index);
+      if (this.getActiveSellOrderForBuyLevel(symState, buyLevelIndex)) continue;
+      const trackedAmount = Math.max(0, Number(trackedBuy.sellableAmount ?? trackedBuy.amount) || 0);
       if (!(trackedAmount > 0)) continue;
-      const trackedBuy = symState.lastBuyByLevel[level.index - 1];
       let amount = Math.min(trackedAmount, baseFree);
       if (!(amount > 0)) {
-        console.warn(`[SKIP] ${symbol} SELL level=${level.index} | insufficient free base, checking farther sell levels`);
+        console.warn(`[SKIP] ${symbol} SELL sourceBuy=${buyLevelIndex} | insufficient free position`);
         continue;
       }
-
-      const minCost = this.getMinCost(symbol);
-      const notional = amount * level.price;
-      if (minCost > 0 && notional < minCost - 1e-8) {
-        console.warn(`[SKIP] ${symbol} SELL level=${level.index} | notional too low (dust), keeping buy record for later retry`);
+      const target = this.findSellTargetForBuy(symbol, levels, buyLevelIndex, trackedBuy, {
+        amount,
+        minimumPrice: currentPrice,
+        reservedSellLevels,
+      });
+      if (!target) {
+        this.warnNoSellTarget(symbol, buyLevelIndex, levels, trackedBuy, amount);
         continue;
       }
-
+      this.clearSellTargetWarning(symbol, buyLevelIndex);
       const refillCount = Math.max(0, Number(trackedBuy?.refillCount) || 0);
-      const order = await this.placeLimit(symbol, 'sell', level.index, level.price, amount, { refillCount });
+      const order = await this.placeLimit(
+        symbol, 'sell', target.sellLevelIndex, target.sellPrice, amount,
+        { refillCount, sourceBuyLevelIndex: buyLevelIndex }
+      );
       if (!order) continue;
+      reservedSellLevels.add(target.sellLevelIndex);
       baseFree -= amount;
     }
 
@@ -3093,6 +3169,75 @@ class FuturesGridEngine {
     const buy = symState.lastBuyByLevel[sellLevelIndex - 1];
     if (!buy) return 0;
     return Math.max(0, Number(buy.sellableAmount ?? buy.amount) || 0);
+  }
+
+  getSellSourceBuyLevelIndex(orderMeta) {
+    const explicit = Number(orderMeta?.sourceBuyLevelIndex);
+    if (orderMeta?.sourceBuyLevelIndex !== null && orderMeta?.sourceBuyLevelIndex !== undefined &&
+        Number.isInteger(explicit)) return explicit;
+    return Number(orderMeta?.levelIndex) - 1;
+  }
+
+  getActiveSellOrderForBuyLevel(symState, buyLevelIndex) {
+    return Object.values(symState.orders || {}).find(order =>
+      String(order.side).toLowerCase() === 'sell' &&
+      this.getSellSourceBuyLevelIndex(order) === Number(buyLevelIndex)
+    ) || null;
+  }
+
+  getReservedSellLevels(symState, excludeOrderId = null) {
+    return new Set(Object.values(symState.orders || {})
+      .filter(order => String(order.side).toLowerCase() === 'sell' &&
+        String(order.id) !== String(excludeOrderId))
+      .map(order => Number(order.levelIndex))
+      .filter(Number.isInteger));
+  }
+
+  findSellTargetForBuy(
+    symbol, levels, buyLevelIndex, trackedBuy,
+    { amount = null, minimumPrice = -Infinity, reservedSellLevels = new Set() } = {}
+  ) {
+    const sourceLevel = Number(buyLevelIndex);
+    if (!Number.isInteger(sourceLevel) || sourceLevel < 0 || sourceLevel + 1 >= levels.length) return null;
+    const sellableAmount = Math.max(0, Number(amount ?? trackedBuy?.sellableAmount ?? trackedBuy?.amount) || 0);
+    if (!(sellableAmount > 0)) return null;
+    const minCost = this.getMinCost(symbol);
+    for (let sellLevelIndex = sourceLevel + 1; sellLevelIndex < levels.length; sellLevelIndex++) {
+      if (reservedSellLevels.has(sellLevelIndex)) continue;
+      const sellPrice = Number(levels[sellLevelIndex]);
+      if (!(sellPrice > minimumPrice) || !this.isTrackedSellProfitable(symbol, trackedBuy, sellPrice)) continue;
+      let precise;
+      try { precise = this.getPreciseOrderNumbers(symbol, sellPrice, sellableAmount); } catch { continue; }
+      if (!(Number(precise.amountNum ?? precise.preciseAmount) > 0)) continue;
+      if (minCost > 0 && precise.notional < minCost - 1e-8) continue;
+      return {
+        buyLevelIndex: sourceLevel,
+        sellLevelIndex,
+        sellPrice,
+        amount: Number(precise.amountNum ?? precise.preciseAmount),
+        notional: precise.notional,
+      };
+    }
+    return null;
+  }
+
+  warnNoSellTarget(symbol, buyLevelIndex, levels, trackedBuy, amount) {
+    const key = `${symbol}|${buyLevelIndex}`;
+    if (this.sellTargetWarnings.has(key)) return;
+    this.sellTargetWarnings.add(key);
+    const highestPrice = Number(levels[levels.length - 1]) || 0;
+    let highestNotional = 0;
+    try { highestNotional = this.getPreciseOrderNumbers(symbol, highestPrice, amount).notional; } catch {}
+    console.warn(
+      `[SKIP] ${symbol} SELL sourceBuy=${buyLevelIndex} | no higher grid level satisfies ` +
+      `profit/min-notional constraints (minPrice=${this.getMinimumProfitableSellPrice(trackedBuy)}, ` +
+      `highestLevel=${highestPrice}, highestNotional=${roundNumber(highestNotional, 8)}, ` +
+      `minNotional=${this.getMinCost(symbol)}); keeping buy record`
+    );
+  }
+
+  clearSellTargetWarning(symbol, buyLevelIndex) {
+    this.sellTargetWarnings.delete(`${symbol}|${buyLevelIndex}`);
   }
 
   getAllocatedInvestmentUsdt(symbol) {

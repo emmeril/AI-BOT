@@ -31,6 +31,9 @@ GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MINUTES=3
 GRID_REFILL_ON_FILLED=true
 GRID_MAX_REFILLS=2
 GRID_POST_ONLY=true
+# Maker fee used by the fee-aware grid spacing/profit guard.
+BINANCE_FUTURES_MAKER_FEE_RATE=0.0002
+GRID_MIN_NET_PROFIT_PCT=0.05
 
 # Futures ROI thresholds (despite the legacy PRICE suffix). The complete active
 # LONG is closed at ROI <= -100% or ROI >= 100%. Set either value to 0 to disable.

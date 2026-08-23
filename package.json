@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node index.js",
     "start:futures": "node futures-grid.js",
+    "start:futures:live": "DOTENV_CONFIG_PATH=.env.futures node -r dotenv/config futures-grid.js",
     "reconcile:inventory": "node scripts/reconcile-spot-inventory.js",
     "test": "node --test"
   },
