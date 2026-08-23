@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Login - {{DASHBOARD_NAME}}</title>
+  <style>
+    :root{--ink:#14251f;--paper:#ece8dc;--card:#fffdf5;--line:#b9b5a8;--green:#087f5b;--amber:#efa935;--red:#a33d2b}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;color:var(--ink);background:var(--paper);font-family:Georgia,"Times New Roman",serif;display:grid;place-items:center;padding:24px;overflow:hidden}
+    body:before{content:"";position:fixed;inset:-20%;background:radial-gradient(circle at 20% 20%,#efa93555 0 9%,transparent 10%),radial-gradient(circle at 80% 75%,#087f5b33 0 13%,transparent 14%),repeating-linear-gradient(115deg,transparent 0 18px,#14251f0b 19px 20px);transform:rotate(-3deg);pointer-events:none}
+    .shell{position:relative;width:min(940px,100%);display:grid;grid-template-columns:1.05fr .95fr;border:1px solid var(--ink);background:var(--card);box-shadow:14px 14px 0 var(--ink)}
+    .story{padding:56px;background:var(--ink);color:#f8f3e6;display:flex;flex-direction:column;justify-content:space-between;min-height:560px}
+    .mark{width:54px;height:54px;border-radius:50%;display:grid;place-items:center;background:var(--amber);color:var(--ink);font:700 18px "Courier New",monospace;box-shadow:4px 4px 0 #f8f3e6}
+    .eyebrow,.field label{font:700 10px "Courier New",monospace;text-transform:uppercase;letter-spacing:1.7px}.eyebrow{color:#b7cbc2}
+    h1{font-size:clamp(38px,6vw,67px);line-height:.93;letter-spacing:-3px;margin:18px 0}.story p{max-width:390px;color:#c8d3ce;line-height:1.7;margin:0}
+    .security{font:12px "Courier New",monospace;color:#9fb4ab;border-top:1px solid #ffffff2b;padding-top:18px}
+    .panel{padding:56px 48px;display:flex;flex-direction:column;justify-content:center}.panel h2{font-size:30px;margin:0 0 8px}.panel>p{color:#69766f;margin:0 0 34px;line-height:1.6}
+    .field{margin-bottom:20px}.field label{display:block;margin-bottom:9px;color:#59665f}.field input{width:100%;border:1px solid var(--line);background:#f7f3e8;color:var(--ink);font:600 16px "Courier New",monospace;padding:15px 16px;outline:none;transition:.2s}
+    .field input:focus{border-color:var(--green);box-shadow:4px 4px 0 #087f5b33;background:#fff}
+    button{width:100%;border:1px solid var(--ink);background:var(--amber);color:var(--ink);font:700 13px "Courier New",monospace;text-transform:uppercase;letter-spacing:1px;padding:16px;cursor:pointer;box-shadow:5px 5px 0 var(--ink);transition:transform .15s,box-shadow .15s}
+    button:hover{transform:translate(2px,2px);box-shadow:3px 3px 0 var(--ink)}.error{background:#fff0ed;border:1px solid #d68b7e;color:var(--red);padding:12px 14px;margin-bottom:20px;font:12px "Courier New",monospace;line-height:1.5}.visually-hidden{display:none}
+    @media(max-width:760px){body{overflow:auto}.shell{grid-template-columns:1fr;box-shadow:8px 8px 0 var(--ink)}.story{min-height:290px;padding:32px}.story h1{font-size:44px}.security{display:none}.panel{padding:38px 30px 44px}}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="story">
+      <div class="mark">GC</div>
+      <div><div class="eyebrow">Private Trading Desk</div><h1>Grid<br>Control</h1><p>Akses privat untuk memantau order, performa, dan posisi trading secara live.</p></div>
+      <div class="security">SESSION PROTECTED / HTTPONLY / SAME-SITE</div>
+    </section>
+    <section class="panel">
+      <h2>{{DASHBOARD_NAME}}</h2>
+      <p>Masuk untuk membuka dashboard trading.</p>
+      <div class="error {{ERROR_CLASS}}" role="alert">{{ERROR}}</div>
+      <form method="post" action="/login">
+        <div class="field"><label for="username">Username</label><input id="username" name="username" type="text" autocomplete="username" required autofocus></div>
+        <div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required></div>
+        <button type="submit">Masuk Dashboard</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

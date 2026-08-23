@@ -115,6 +115,13 @@ Dashboard berbasis Bootstrap dan Alpine.js aktif secara default. Alamat awalnya 
 - `DASHBOARD_REFRESH_SECONDS`: interval refresh data, minimal 2 detik. Default `5`.
 - `DASHBOARD_CHART_TIMEFRAME`: timeframe candle chart CCXT, misalnya `1m`, `5m`, atau `1h`. Default `1m`.
 - `DASHBOARD_CHART_LIMIT`: jumlah candle yang ditampilkan, minimal 20. Default `120`.
+- `DASHBOARD_AUTH_ENABLED`: aktifkan halaman login dashboard. Default `false`.
+- `DASHBOARD_USERNAME` dan `DASHBOARD_PASSWORD`: kredensial login saat autentikasi aktif; password minimal 12 karakter.
+- `DASHBOARD_SESSION_HOURS`: masa berlaku session login. Default `12` jam.
+
+Futures dapat memakai kredensial yang sama melalui `DASHBOARD_*`, atau override khusus dengan
+`FUTURES_DASHBOARD_AUTH_ENABLED`, `FUTURES_DASHBOARD_USERNAME`,
+`FUTURES_DASHBOARD_PASSWORD`, dan `FUTURES_DASHBOARD_SESSION_HOURS`.
 
 ## Struktur Kode
 

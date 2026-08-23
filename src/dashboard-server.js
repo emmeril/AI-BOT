@@ -8,9 +8,14 @@ const {
   DASHBOARD_REFRESH_SECONDS,
   DASHBOARD_CHART_TIMEFRAME,
   DASHBOARD_CHART_LIMIT,
+  DASHBOARD_AUTH_ENABLED,
+  DASHBOARD_USERNAME,
+  DASHBOARD_PASSWORD,
+  DASHBOARD_SESSION_HOURS,
   EXCHANGE_MODE,
   SYMBOLS,
 } = require('./config');
+const { createDashboardAuth } = require('./dashboard-auth');
 const { retry, numberOrZero } = require('./utils');
 
 const dashboardFile = path.join(__dirname, '..', 'public', 'dashboard.html');
@@ -86,6 +91,7 @@ async function buildDashboardSnapshot(engine, requestedSymbol) {
   return {
     generatedAt: new Date().toISOString(),
     refreshSeconds: DASHBOARD_REFRESH_SECONDS,
+    dashboardAuthEnabled: DASHBOARD_AUTH_ENABLED,
     source: 'Binance Spot',
     mode: EXCHANGE_MODE,
     running: engine.circuitAllows(),
@@ -142,9 +148,19 @@ function sendJson(response, status, payload) {
 
 function startDashboardServer(engine) {
   if (!DASHBOARD_ENABLED || engine.dashboardServer) return null;
+  const auth = createDashboardAuth({
+    enabled: DASHBOARD_AUTH_ENABLED,
+    username: DASHBOARD_USERNAME,
+    password: DASHBOARD_PASSWORD,
+    sessionHours: DASHBOARD_SESSION_HOURS,
+    cookieName: 'grid_spot_session',
+    dashboardName: 'Dashboard Spot',
+  });
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
     try {
+      if (await auth.handleRoute(request, response, url)) return;
+      if (!auth.requireAuthentication(request, response, url)) return;
       if (request.method === 'GET' && url.pathname === '/api/dashboard') {
         sendJson(response, 200, await buildDashboardSnapshot(engine, url.searchParams.get('symbol')));
         return;
@@ -175,7 +191,7 @@ function startDashboardServer(engine) {
       server.removeListener('error', onError);
       server.on('error', err => console.error('[DASHBOARD]', err.message));
       engine.dashboardPort = port;
-      console.log(`[DASHBOARD] http://${DASHBOARD_HOST}:${port}`);
+      console.log(`[DASHBOARD] http://${DASHBOARD_HOST}:${port} auth=${auth.enabled ? 'ON' : 'OFF'}`);
     });
   };
   listen(DASHBOARD_PORT);

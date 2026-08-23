@@ -2,6 +2,7 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const { retry, numberOrZero } = require('./utils');
+const { createDashboardAuth } = require('./dashboard-auth');
 const {
   marketPrice,
   marketPriceText,
@@ -17,6 +18,14 @@ const port = Math.max(Number(process.env.FUTURES_DASHBOARD_PORT || 3988), 1);
 const refreshSeconds = Math.max(Number(process.env.FUTURES_DASHBOARD_REFRESH_SECONDS || 5), 2);
 const timeframe = process.env.FUTURES_DASHBOARD_CHART_TIMEFRAME || '1m';
 const chartLimit = Math.max(Number(process.env.FUTURES_DASHBOARD_CHART_LIMIT || 120), 20);
+const authEnabled = String(
+  process.env.FUTURES_DASHBOARD_AUTH_ENABLED ?? process.env.DASHBOARD_AUTH_ENABLED ?? 'false'
+).toLowerCase() === 'true';
+const authUsername = process.env.FUTURES_DASHBOARD_USERNAME || process.env.DASHBOARD_USERNAME || '';
+const authPassword = process.env.FUTURES_DASHBOARD_PASSWORD || process.env.DASHBOARD_PASSWORD || '';
+const authSessionHours = Math.max(Number(
+  process.env.FUTURES_DASHBOARD_SESSION_HOURS || process.env.DASHBOARD_SESSION_HOURS || 12
+), 1);
 
 function positionMetrics(position, leverage, openPositionFees = 0) {
   if (!position) return null;
@@ -74,7 +83,8 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
   const usedMargin = numberOrZero(walletInfo.totalInitialMargin ?? balance?.used?.USDT);
   const net = realized + funding + unrealizedPnl - openPositionFees;
   return {
-    generatedAt: new Date().toISOString(), refreshSeconds, source: 'Binance USDⓈ-M Futures',
+    generatedAt: new Date().toISOString(), refreshSeconds, dashboardAuthEnabled: authEnabled,
+    source: 'Binance USDⓈ-M Futures',
     mode: process.env.EXCHANGE_MODE || 'testnet', running: engine.circuitAllows(),
     tradingEnabled: engine.canPlaceNewOrders(), symbols, selectedSymbol: symbol,
     market: {
@@ -112,9 +122,19 @@ function sendJson(response, status, payload) {
 
 function startFuturesDashboardServer(engine) {
   if (!enabled || engine.futuresDashboardServer) return null;
+  const auth = createDashboardAuth({
+    enabled: authEnabled,
+    username: authUsername,
+    password: authPassword,
+    sessionHours: authSessionHours,
+    cookieName: 'grid_futures_session',
+    dashboardName: 'Dashboard Futures',
+  });
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
     try {
+      if (await auth.handleRoute(request, response, url)) return;
+      if (!auth.requireAuthentication(request, response, url)) return;
       if (request.method === 'GET' && url.pathname === '/api/dashboard') {
         sendJson(response, 200, await buildFuturesDashboardSnapshot(engine, url.searchParams.get('symbol')));
         return;
@@ -130,7 +150,9 @@ function startFuturesDashboardServer(engine) {
     }
   });
   server.on('error', err => console.error('[FUTURES DASHBOARD]', err.message));
-  server.listen(port, host, () => console.log(`[FUTURES DASHBOARD] http://${host}:${port}`));
+  server.listen(port, host, () => {
+    console.log(`[FUTURES DASHBOARD] http://${host}:${port} auth=${auth.enabled ? 'ON' : 'OFF'}`);
+  });
   engine.futuresDashboardServer = server;
   return server;
 }
