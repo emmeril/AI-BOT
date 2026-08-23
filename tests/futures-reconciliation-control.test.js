@@ -27,6 +27,57 @@ test('STOP_TRADING still allows futures executeCycle to reconcile symbols', asyn
   assert.equal(engine.isRunning, false);
 });
 
+test('initial futures trade reconciliation omits zero since watermark', async () => {
+  const engine = Object.create(FuturesGridEngine.prototype);
+  const calls = [];
+  engine.exchange = {
+    fetchMyTrades: async (_symbol, since) => {
+      calls.push(since);
+      return since === undefined ? [{ id: 'fill-1', timestamp: 12345 }] : [];
+    },
+  };
+
+  const result = await engine.fetchNewTrades('BTC/USDT:USDT', { lastTradeTimestamp: 0 });
+
+  assert.deepEqual(calls, [undefined]);
+  assert.equal(result.trades.length, 1);
+});
+
+test('futures fill recovery fetches the closed order when trade metadata lacks client order id', async () => {
+  const symState = { orders: {}, lastTradeTimestamp: 0 };
+  const engine = Object.create(FuturesGridEngine.prototype);
+  let recoveredLevel = null;
+  engine.exchange = {
+    fetchOpenOrders: async () => [],
+    fetchOrder: async (orderId, symbol) => {
+      assert.equal(orderId, 'closed-order-1');
+      assert.equal(symbol, 'BTC/USDT:USDT');
+      return { clientOrderId: 'grid-btcusdt-b-9-r0-recovery' };
+    },
+  };
+  engine.state = {
+    getSymbol: () => symState,
+    processedTrade: () => false,
+    save: async () => {},
+  };
+  engine.fetchNewTrades = async () => ({
+    trades: [{ id: 'fill-1', order: 'closed-order-1', timestamp: 12345, side: 'buy', info: {} }],
+    holdWatermark: false,
+  });
+  engine.getQuoteAsset = () => 'USDT';
+  engine.getBaseAsset = () => 'BTC';
+  engine.cacheFeeTokenPrice = async () => {};
+  engine.handleBuyFill = async (_symbol, _levels, _state, _trade, orderMeta) => {
+    recoveredLevel = orderMeta.levelIndex;
+  };
+  engine.syncManagedOrdersWithExchange = async () => {};
+
+  await engine.handleFilledTrades('BTC/USDT:USDT', [90, 100, 110], []);
+
+  assert.equal(recoveredLevel, 9);
+  assert.equal(symState.lastTradeTimestamp, 12345);
+});
+
 test('paused futures reconciliation syncs fills and funding without fetching range context', async () => {
   const engine = Object.create(FuturesGridEngine.prototype);
   let handledFills = false;

@@ -2923,7 +2923,11 @@ class FuturesGridEngine {
   // { updateTimestamp: true } to opt back into the old fetch-and-advance
   // behavior for callers that don't need this guarantee.
   async fetchNewTrades(symbol, symState, { updateTimestamp = false } = {}) {
-    const since = symState.lastTradeTimestamp || 0;
+    // Binance Futures treats `since=0` as an empty query. Omit the since
+    // parameter on the first reconciliation so fills from before the bot
+    // started can be recovered and attributed to their grid orders.
+    const lastTradeTimestamp = Number(symState.lastTradeTimestamp) || 0;
+    const since = lastTradeTimestamp > 0 ? lastTradeTimestamp : undefined;
     let allTrades = [];
     let from = since;
     let maxIterations = 10;
@@ -3013,16 +3017,36 @@ class FuturesGridEngine {
           trade.clientOrderId ||
           ''
         );
-        const recoveredMeta = this.getBotOrderMeta({ clientOrderId: clientId });
+        if (!clientId && this.exchange.fetchOrder) {
+          try {
+            const closedOrder = await retry(() => this.exchange.fetchOrder(tradeOrderId, symbol));
+            const recoveredClientId = String(
+              closedOrder?.clientOrderId ||
+              closedOrder?.info?.clientOrderId ||
+              closedOrder?.info?.origClientOrderId ||
+              ''
+            );
+            if (recoveredClientId) {
+              trade.clientOrderId = recoveredClientId;
+              trade.info = { ...(trade.info || {}), clientOrderId: recoveredClientId };
+            }
+          } catch (err) {
+            console.warn(`[RECOVER] ${symbol} could not fetch filled order ${tradeOrderId}: ${err.message}`);
+          }
+        }
+        const resolvedClientId = String(
+          trade.info?.clientOrderId || trade.clientOrderId || clientId
+        );
+        const recoveredMeta = this.getBotOrderMeta({ clientOrderId: resolvedClientId });
         if (recoveredMeta) {
           orderMeta = recoveredMeta;
           orderMetadataById.set(tradeOrderId, recoveredMeta);
           console.warn(
             `[RECOVER] ${symbol} reconstructed orderMeta for trade ${id} ` +
-            `from clientOrderId="${clientId}" (level=${orderMeta.levelIndex}, ` +
+            `from clientOrderId="${resolvedClientId}" (level=${orderMeta.levelIndex}, ` +
             `side=${orderMeta.side}, refill=${orderMeta.refillCount})`
           );
-        } else if (/^grid-[a-z0-9]+-s-exit-/.test(clientId)) {
+        } else if (/^grid-[a-z0-9]+-s-exit-/.test(resolvedClientId)) {
           orderMeta = { side: 'sell', isPositionExit: true };
         } else {
           // Cannot determine which grid level this fill belongs to; skip it
