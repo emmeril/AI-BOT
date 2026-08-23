@@ -235,6 +235,11 @@ async function handleTelegramCommand(text) {
       '/orders - active grid orders',
       '/pause - create kill-switch file',
       '/resume - remove kill-switch file',
+      '/futures_status - futures summary',
+      '/futures_orders - futures active orders',
+      '/futures_pause - pause new futures orders',
+      '/futures_resume - resume futures orders',
+      '/futures_help - futures command list',
     ].join('\n'));
   }
 }
@@ -264,6 +269,11 @@ async function pollTelegramCommands() {
 
 async function startTelegramCommandPolling() {
   if (!TELEGRAM_COMMANDS_ENABLED || !this.telegramReady() || this.telegramCommandTimer) return;
+  try {
+    await this.telegramRequest('deleteWebhook', { drop_pending_updates: false });
+  } catch (err) {
+    console.warn('[TELEGRAM] Failed to disable webhook before polling:', err.message);
+  }
   if (TELEGRAM_COMMANDS_SKIP_OLD_UPDATES) {
     try {
       const response = await this.telegramRequest('getUpdates', null, {
