@@ -3577,10 +3577,11 @@ class FuturesGridEngine {
       const position = this.latestPositions?.get(symbol);
       const roi = this.getPositionRoiPct(position);
       const realized = numberOrZero(symState.realizedGridProfit) + numberOrZero(symState.realizedExitProfit);
-      const net = realized + numberOrZero(symState.fundingProfit) + numberOrZero(position?.unrealizedPnl);
+      const unrealized = numberOrZero(position?.unrealizedPnl);
+      const net = realized + numberOrZero(symState.fundingProfit) + unrealized;
       lines.push(
         `${symbol} | realized=${roundNumber(realized, 4)} USDT | funding=${roundNumber(symState.fundingProfit, 4)} USDT | ` +
-        `unrealized=${roundNumber(position?.unrealizedPnl, 4)} USDT | net=${roundNumber(net, 4)} USDT` +
+        `unrealized=${roundNumber(unrealized, 4)} USDT | net=${roundNumber(net, 4)} USDT` +
         (roi === null ? '' : ` | ROI=${roundNumber(roi, 2)}%`)
       );
     }

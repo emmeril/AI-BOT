@@ -164,3 +164,16 @@ test('ROI falls back to unrealized PnL divided by initial margin', () => {
   const engine = Object.create(FuturesGridEngine.prototype);
   assert.equal(engine.getPositionRoiPct({ unrealizedPnl: 10, initialMargin: 10 }), 100);
 });
+
+test('futures Telegram status reports zero unrealized PnL when position is closed', () => {
+  const engine = Object.create(FuturesGridEngine.prototype);
+  engine.state = {
+    getSymbol: () => ({ realizedGridProfit: 0.2409, realizedExitProfit: 0, fundingProfit: -0.0016 }),
+  };
+  engine.latestPositions = new Map();
+
+  const message = engine.buildTelegramStatusMessage();
+  assert.match(message, /unrealized=0 USDT/);
+  assert.match(message, /net=0\.2393 USDT/);
+  assert.doesNotMatch(message, /unrealized=null/);
+});
