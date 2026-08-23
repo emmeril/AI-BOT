@@ -245,6 +245,10 @@ const TELEGRAM_BOT_TOKEN = Config.get('TELEGRAM_BOT_TOKEN', '');
 const TELEGRAM_CHAT_ID = Config.get('TELEGRAM_CHAT_ID', '');
 const TELEGRAM_API_URL = Config.get('TELEGRAM_API_URL', 'https://api.telegram.org');
 const TELEGRAM_TIMEOUT_MS = Config.number('TELEGRAM_TIMEOUT_MS', 10_000);
+const TELEGRAM_STATUS_REPORT_ENABLED = Config.boolean('FUTURES_TELEGRAM_STATUS_REPORT_ENABLED', false);
+const TELEGRAM_STATUS_REPORT_INTERVAL_MS = Math.max(
+  Config.number('FUTURES_TELEGRAM_STATUS_REPORT_INTERVAL_MINUTES', 60), 1
+) * MINUTE_MS;
 
 const MAX_PROCESSED_TRADE_IDS = 2000;
 const TRADE_FETCH_LIMIT = 100;
@@ -1261,6 +1265,7 @@ class FuturesGridEngine {
     this.rangeResetSymbols = new Set();
     this.roiExitedSymbols = new Set();
     this.lastFundingSyncAt = new Map();
+    this.telegramStatusTimer = null;
     this.circuitBreaker = { errors: 0, pausedUntil: 0 };
     // for stuck investment warning deduplication
     this.stuckInvestmentWarned = new Set();
@@ -3126,6 +3131,8 @@ class FuturesGridEngine {
 
     let context = await this.fetchContext(symbol);
     let { currentPrice, balance, positions, lower, upper, levels } = context;
+    if (!this.latestPositions) this.latestPositions = new Map();
+    this.latestPositions.set(symbol, this.getActiveLongPosition(positions, symbol));
 
     const canContinue = await this.enforceRangeExits(symbol, currentPrice, positions);
 
@@ -3140,12 +3147,14 @@ class FuturesGridEngine {
         newContext = await this.fetchContext(symbol);
         newContext.trailingUpJustShifted = true;
         ({ currentPrice, balance, positions, lower, upper, levels } = newContext);
+        this.latestPositions.set(symbol, this.getActiveLongPosition(positions, symbol));
       } else {
         trailedDown = await this.maybeTrailDownRange(symbol, currentPrice, lower, upper);
         if (trailedDown) {
           newContext = await this.fetchContext(symbol);
           newContext.trailingDownJustShifted = true;
           ({ currentPrice, balance, positions, lower, upper, levels } = newContext);
+          this.latestPositions.set(symbol, this.getActiveLongPosition(positions, symbol));
         }
       }
     }
@@ -3529,6 +3538,34 @@ class FuturesGridEngine {
     }
   }
 
+  buildTelegramStatusMessage() {
+    const symbols = SYMBOLS.join(', ');
+    const lines = [`[FUTURES STATUS] ${symbols}`, `Mode=${EXCHANGE_MODE.toUpperCase()} | leverage=${LEVERAGE}x | margin=${MARGIN_MODE}`];
+    for (const symbol of SYMBOLS) {
+      const symState = this.state.getSymbol(symbol);
+      const position = this.latestPositions?.get(symbol);
+      const roi = this.getPositionRoiPct(position);
+      const realized = numberOrZero(symState.realizedGridProfit) + numberOrZero(symState.realizedExitProfit);
+      const net = realized + numberOrZero(symState.fundingProfit) + numberOrZero(position?.unrealizedPnl);
+      lines.push(
+        `${symbol} | realized=${roundNumber(realized, 4)} USDT | funding=${roundNumber(symState.fundingProfit, 4)} USDT | ` +
+        `unrealized=${roundNumber(position?.unrealizedPnl, 4)} USDT | net=${roundNumber(net, 4)} USDT` +
+        (roi === null ? '' : ` | ROI=${roundNumber(roi, 2)}%`)
+      );
+    }
+    return lines.join('\n');
+  }
+
+  startTelegramStatusReports() {
+    if (!TELEGRAM_STATUS_REPORT_ENABLED || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID || this.telegramStatusTimer) return;
+    this.telegramStatusTimer = setInterval(() => {
+      this.sendAlert(this.buildTelegramStatusMessage()).catch(err =>
+        console.warn('[TELEGRAM] Futures status report failed:', err.message)
+      );
+    }, TELEGRAM_STATUS_REPORT_INTERVAL_MS);
+    this.telegramStatusTimer.unref?.();
+  }
+
   async start() {
     console.log(`
 [FUTURES GRID BOT STARTED]
@@ -3558,6 +3595,7 @@ Multi-timeframe Fibonacci: ${FIBONACCI_RANGE_ADVISOR_ENABLED
 `);
     await this.init();
     startFuturesDashboardServer(this);
+    this.startTelegramStatusReports();
     while (true) {
       await sleep(INTERVAL_MS);
       await this.executeCycle();
