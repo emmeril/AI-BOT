@@ -496,7 +496,7 @@ class SpotGridEngine {
       `${roundNumber(newLower)}-${roundNumber(newUpper)}`
     );
     const boundsChanged = !this.effectiveRangeBoundsEqual(symbol, oldLower, oldUpper, newLower, newUpper);
-    await this.sendAlert(this.formatTelegramMessage(boundsChanged ? 'Range Reset' : 'Grid Levels Rebuilt', [
+    await this.sendAlert(this.formatTelegramMessage(boundsChanged ? 'SPOT RANGE RESET' : 'SPOT GRID LEVELS REBUILT', [
       ['Symbol', symbol],
       ['Old', `${this.formatPrice(oldLower)} - ${this.formatPrice(oldUpper)}`],
       ['New', `${this.formatPrice(newLower)} - ${this.formatPrice(newUpper)}`],
@@ -894,7 +894,7 @@ class SpotGridEngine {
     // counting of the same fill.
     this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
-    await this.sendAlert(this.formatTelegramMessage('Buy Filled', [
+    await this.sendAlert(this.formatTelegramMessage('SPOT BUY FILLED', [
       ['Symbol', symbol],
       ['Level', levelIndex],
       ['Price', this.formatPrice(price)],
@@ -1044,7 +1044,7 @@ class SpotGridEngine {
     // why this matters (no more partial-fill persistence on crash).
     this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
-    await this.sendAlert(this.formatTelegramMessage('Sell Filled', [
+    await this.sendAlert(this.formatTelegramMessage('SPOT SELL FILLED', [
       ['Symbol', symbol],
       ['Level', levelIndex],
       ['Source Buy Level', buyLevelIndex],
@@ -1277,7 +1277,7 @@ class SpotGridEngine {
   async enforceRangeExits(symbol, currentPrice) {
     if (STOP_LOSS_PRICE > 0 && currentPrice <= STOP_LOSS_PRICE) {
       await this.cancelGridOrders(symbol, `stop-loss ${STOP_LOSS_PRICE}`);
-      await this.sendAlert(this.formatTelegramMessage('Stop Loss', [
+      await this.sendAlert(this.formatTelegramMessage('SPOT STOP LOSS', [
         ['Symbol', symbol],
         ['Price', this.formatPrice(currentPrice)],
         ['Stop', this.formatPrice(STOP_LOSS_PRICE)],
@@ -1287,7 +1287,7 @@ class SpotGridEngine {
     }
     if (TAKE_PROFIT_PRICE > 0 && currentPrice >= TAKE_PROFIT_PRICE) {
       await this.cancelGridOrders(symbol, `take-profit ${TAKE_PROFIT_PRICE}`);
-      await this.sendAlert(this.formatTelegramMessage('Take Profit', [
+      await this.sendAlert(this.formatTelegramMessage('SPOT TAKE PROFIT', [
         ['Symbol', symbol],
         ['Price', this.formatPrice(currentPrice)],
         ['Target', this.formatPrice(TAKE_PROFIT_PRICE)],

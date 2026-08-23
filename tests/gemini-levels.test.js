@@ -190,9 +190,9 @@ test('range remap alert distinguishes unchanged bounds from rebuilt levels', asy
   await engine.remapStateAfterRangeReset('BTC/USDT', 90, 110, 90, 110, [90, 96, 101, 106, 110]);
 
   assert.equal(alerts.length, 1);
-  assert.match(alerts[0], /^\[Grid Levels Rebuilt\]/);
+  assert.match(alerts[0], /^\[SPOT GRID LEVELS REBUILT\]/);
   assert.match(alerts[0], /Bounds Changed: No/);
-  assert.doesNotMatch(alerts[0], /^\[Range Reset\]/);
+  assert.doesNotMatch(alerts[0], /^\[SPOT RANGE RESET\]/);
 });
 
 test('invalid target range preserves tracked inventory and does not cancel live orders', async () => {

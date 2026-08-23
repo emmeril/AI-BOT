@@ -1724,10 +1724,12 @@ class FuturesGridEngine {
       `[RANGE] ${symbol} range reset: remapped ${oldEntries.length} buy record(s) onto new grid ` +
       `${roundNumber(newLower)}-${roundNumber(newUpper)}`
     );
-    await this.sendAlert(
-      `[GRID RANGE RESET] ${symbol} range changed ${roundNumber(oldLower)}-${roundNumber(oldUpper)} -> ` +
-      `${roundNumber(newLower)}-${roundNumber(newUpper)}; remapped ${oldEntries.length} buy record(s)`
-    );
+    await this.sendAlert(this.formatFuturesTelegramMessage('FUTURES RANGE RESET', [
+      ['Symbol', symbol],
+      ['Old Range', `${roundNumber(oldLower)} - ${roundNumber(oldUpper)}`],
+      ['New Range', `${roundNumber(newLower)} - ${roundNumber(newUpper)}`],
+      ['Remapped Buys', oldEntries.length],
+    ]));
   }
 
   getTrailingUpState(symbol) {
@@ -2024,10 +2026,11 @@ class FuturesGridEngine {
       `[TRAILING ${direction.toUpperCase()}] ${symbol} shifted ${shift.steps} grid(s): ` +
       `${roundNumber(lower)}-${roundNumber(upper)} -> ${roundNumber(shift.lower)}-${roundNumber(shift.upper)}`
     );
-    await this.sendAlert(
-      `[GRID TRAILING ${direction.toUpperCase()}] ${symbol} shifted ${shift.steps} grid(s) to ` +
-      `${roundNumber(shift.lower)}-${roundNumber(shift.upper)}`
-    );
+    await this.sendAlert(this.formatFuturesTelegramMessage(`FUTURES TRAILING ${direction.toUpperCase()}`, [
+      ['Symbol', symbol],
+      ['Shift', `${shift.steps} grid(s)`],
+      ['New Range', `${roundNumber(shift.lower)} - ${roundNumber(shift.upper)}`],
+    ]));
 
     return { lower: shift.lower, upper: shift.upper };
   }
@@ -2657,7 +2660,14 @@ class FuturesGridEngine {
     // counting of the same fill.
     this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
-    await this.sendAlert(`[GRID BUY] ${symbol} amount=${amount} @ ${price} | sellable=${sellableAmount} | fee=${feeQuote.toFixed(4)} ${quote}`);
+    await this.sendAlert(this.formatFuturesTelegramMessage('FUTURES BUY FILLED', [
+      ['Symbol', symbol],
+      ['Level', levelIndex],
+      ['Price', this.formatFuturesNumber(price, 8)],
+      ['Amount', this.formatFuturesNumber(amount, 8)],
+      ['Sellable', this.formatFuturesNumber(sellableAmount, 8)],
+      ['Fee', `${this.formatFuturesNumber(feeQuote)} ${quote}`],
+    ]));
     if (!GRID_REFILL_ON_FILLED || !this.canPlaceNewOrders() || levelIndex + 1 >= levels.length) return;
     const trackedBuy = symState.lastBuyByLevel[levelIndex];
     const totalSellable = Math.max(0, Number(trackedBuy?.sellableAmount ?? trackedBuy?.amount) || 0);
@@ -2773,7 +2783,15 @@ class FuturesGridEngine {
     // why this matters (no more partial-fill persistence on crash).
     this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
-    await this.sendAlert(`[GRID SELL] ${symbol} amount=${amount} @ ${price} | profit=${profit.toFixed(4)} ${quote} | fee=${feeQuote.toFixed(4)} ${quote}`);
+    await this.sendAlert(this.formatFuturesTelegramMessage('FUTURES SELL FILLED', [
+      ['Symbol', symbol],
+      ['Level', levelIndex],
+      ['Source Buy Level', buyLevelIndex],
+      ['Price', this.formatFuturesNumber(price, 8)],
+      ['Amount', this.formatFuturesNumber(amount, 8)],
+      ['Net Profit', `${this.formatFuturesNumber(profit)} ${quote}`],
+      ['Fee', `${this.formatFuturesNumber(feeQuote)} ${quote}`],
+    ]));
 
     if (GRID_REFILL_ON_FILLED && this.canPlaceNewOrders() && buyLevelIndex >= 0) {
       const nextRefillCount = refillCount + 1;
@@ -2859,10 +2877,12 @@ class FuturesGridEngine {
     this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
     this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
-    await this.sendAlert(
-      `[FUTURES EXIT FILL] ${symbol} realizedPnl=${realizedPnl.toFixed(4)} ` +
-      `fee=${feeQuote.toFixed(4)} net=${netExitProfit.toFixed(4)} ${quote}`
-    );
+    await this.sendAlert(this.formatFuturesTelegramMessage('FUTURES EXIT FILLED', [
+      ['Symbol', symbol],
+      ['Gross PnL', `${this.formatFuturesNumber(realizedPnl)} ${quote}`],
+      ['Fee', `${this.formatFuturesNumber(feeQuote)} ${quote}`],
+      ['Net Profit', `${this.formatFuturesNumber(netExitProfit)} ${quote}`],
+    ]));
   }
 
   async syncFundingHistory(symbol, { force = false } = {}) {
@@ -3110,7 +3130,11 @@ class FuturesGridEngine {
       await this.closeActiveLongPosition(symbol, reason);
       if (!this.roiExitedSymbols) this.roiExitedSymbols = new Set();
       this.roiExitedSymbols.add(symbol);
-      await this.sendAlert(`[FUTURES ROI ${exitType.toUpperCase()}] ${symbol} ROI=${roiPct.toFixed(2)}% | LONG position closed`);
+      await this.sendAlert(this.formatFuturesTelegramMessage(`FUTURES ${exitType.toUpperCase()}`, [
+        ['Symbol', symbol],
+        ['ROI', `${this.formatFuturesNumber(roiPct, 2)}%`],
+        ['Position', 'LONG closed'],
+      ]));
       return false;
     }
     return true;
@@ -3535,6 +3559,17 @@ class FuturesGridEngine {
     }
   }
 
+  formatFuturesNumber(value, digits = 4) {
+    return numberOrZero(value).toFixed(digits);
+  }
+
+  formatFuturesTelegramMessage(title, rows = []) {
+    const body = rows
+      .filter(([, value]) => value !== undefined && value !== null && value !== '')
+      .map(([label, value]) => `${label}: ${value}`);
+    return [`[${title}]`, '', ...body].join('\n');
+  }
+
   async sendAlert(message) {
     if (!TELEGRAM_ENABLED || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
     try {
@@ -3570,8 +3605,13 @@ class FuturesGridEngine {
   }
 
   buildTelegramStatusMessage() {
-    const symbols = SYMBOLS.join(', ');
-    const lines = [`[FUTURES STATUS] ${symbols}`, `Mode=${EXCHANGE_MODE.toUpperCase()} | leverage=${LEVERAGE}x | margin=${MARGIN_MODE}`];
+    const lines = [
+      '[FUTURES STATUS]',
+      '',
+      `Mode: ${EXCHANGE_MODE.toUpperCase()}`,
+      `Leverage: ${LEVERAGE}x`,
+      `Margin: ${MARGIN_MODE}`,
+    ];
     for (const symbol of SYMBOLS) {
       const symState = this.state.getSymbol(symbol);
       const position = this.latestPositions?.get(symbol);
@@ -3580,10 +3620,15 @@ class FuturesGridEngine {
       const unrealized = numberOrZero(position?.unrealizedPnl);
       const net = realized + numberOrZero(symState.fundingProfit) + unrealized;
       lines.push(
-        `${symbol} | realized=${roundNumber(realized, 4)} USDT | funding=${roundNumber(symState.fundingProfit, 4)} USDT | ` +
-        `unrealized=${roundNumber(unrealized, 4)} USDT | net=${roundNumber(net, 4)} USDT` +
-        (roi === null ? '' : ` | ROI=${roundNumber(roi, 2)}%`)
+        '',
+        `-- ${symbol} --`,
+        `Position: ${position ? `LONG ${this.formatFuturesNumber(position.contracts, 0)}` : 'closed'}`,
+        `Realized: ${this.formatFuturesNumber(realized)} USDT`,
+        `Funding: ${this.formatFuturesNumber(symState.fundingProfit)} USDT`,
+        `Unrealized: ${this.formatFuturesNumber(unrealized)} USDT`,
+        `Net PnL: ${this.formatFuturesNumber(net)} USDT`
       );
+      if (roi !== null) lines.push(`ROI: ${this.formatFuturesNumber(roi, 2)}%`);
     }
     return lines.join('\n');
   }
@@ -3619,7 +3664,16 @@ class FuturesGridEngine {
         const lines = ['[FUTURES ORDERS]'];
         for (const symbol of SYMBOLS) {
           const orders = await retry(() => this.exchange.fetchOpenOrders(symbol));
-          lines.push('', symbol, ...orders.map(order => `${String(order.side).toUpperCase()} L${this.getBotOrderLevel(order) ?? '?'} | ${order.amount} @ ${order.price}`));
+          const buys = orders.filter(order => String(order.side).toLowerCase() === 'buy');
+          const sells = orders.filter(order => String(order.side).toLowerCase() === 'sell');
+          lines.push('', `-- ${symbol} --`, `Active: ${buys.length} buy / ${sells.length} sell`);
+          if (!orders.length) lines.push('No active orders');
+          for (const order of orders) {
+            lines.push(
+              `${String(order.side).toUpperCase()} | L${this.getBotOrderLevel(order) ?? '?'} | ` +
+              `${this.formatFuturesNumber(order.amount, 8)} @ ${this.formatFuturesNumber(order.price, 8)}`
+            );
+          }
         }
         await this.sendAlert(lines.join('\n').slice(0, 3900));
         return;
@@ -3627,15 +3681,29 @@ class FuturesGridEngine {
       if (name === '/futures_pause' || name === '/futures_resume') {
         if (name === '/futures_pause') {
           await fs.promises.writeFile(KILL_SWITCH_PATH, `paused by telegram at ${new Date().toISOString()}\n`);
-          await this.sendAlert(`[FUTURES PAUSED]\nFile: ${KILL_SWITCH_FILE}\nNew orders paused.`);
+          await this.sendAlert(this.formatFuturesTelegramMessage('FUTURES PAUSED', [
+            ['File', KILL_SWITCH_FILE],
+            ['Trading', 'new orders paused'],
+          ]));
         } else {
           try { await fs.promises.unlink(KILL_SWITCH_PATH); } catch (err) { if (err.code !== 'ENOENT') throw err; }
-          await this.sendAlert(`[FUTURES RESUMED]\nFile: ${KILL_SWITCH_FILE} removed.`);
+          await this.sendAlert(this.formatFuturesTelegramMessage('FUTURES RESUMED', [
+            ['File', `${KILL_SWITCH_FILE} removed`],
+            ['Trading', 'active'],
+          ]));
         }
         return;
       }
       if (name === '/futures_help') {
-        await this.sendAlert('[FUTURES COMMANDS]\n/futures_status\n/futures_orders\n/futures_pause\n/futures_resume\n/futures_help');
+        await this.sendAlert([
+          '[FUTURES COMMANDS]',
+          '',
+          '/futures_status - futures summary',
+          '/futures_orders - active futures orders',
+          '/futures_pause - pause new futures orders',
+          '/futures_resume - resume futures orders',
+          '/futures_help - command list',
+        ].join('\n'));
       }
     } finally {
       this.telegramCommandProcessing = false;

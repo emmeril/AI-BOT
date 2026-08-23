@@ -8,6 +8,19 @@ const {
   precisionDigits,
 } = require('../src/dashboard-server');
 const { positionMetrics } = require('../src/futures-dashboard-server');
+const { telegramMethods } = require('../src/telegram-controller');
+
+test('spot Telegram messages separate their title from details', () => {
+  assert.equal(telegramMethods.formatTelegramMessage('SPOT BUY FILLED', [
+    ['Symbol', 'SHIB/USDT'],
+    ['Price', '0.000005'],
+  ]), [
+    '[SPOT BUY FILLED]',
+    '',
+    'Symbol: SHIB/USDT',
+    'Price: 0.000005',
+  ].join('\n'));
+});
 
 test('futures dashboard uses position margin and excludes open-order margin from ROI', () => {
   const result = positionMetrics({

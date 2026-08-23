@@ -173,7 +173,22 @@ test('futures Telegram status reports zero unrealized PnL when position is close
   engine.latestPositions = new Map();
 
   const message = engine.buildTelegramStatusMessage();
-  assert.match(message, /unrealized=0 USDT/);
-  assert.match(message, /net=0\.2393 USDT/);
+  assert.match(message, /Unrealized: 0\.0000 USDT/);
+  assert.match(message, /Net PnL: 0\.2393 USDT/);
   assert.doesNotMatch(message, /unrealized=null/);
+});
+
+test('futures Telegram messages use a readable sectioned layout', () => {
+  const engine = Object.create(FuturesGridEngine.prototype);
+  const message = engine.formatFuturesTelegramMessage('FUTURES SELL FILLED', [
+    ['Symbol', '1000SHIB/USDT:USDT'],
+    ['Net Profit', '0.2292 USDT'],
+  ]);
+
+  assert.equal(message, [
+    '[FUTURES SELL FILLED]',
+    '',
+    'Symbol: 1000SHIB/USDT:USDT',
+    'Net Profit: 0.2292 USDT',
+  ].join('\n'));
 });

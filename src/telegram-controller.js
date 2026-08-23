@@ -28,7 +28,12 @@ async function queueFuturesTelegramCommand(text, chatId) {
   const tempPath = `${futuresCommandQueuePath}.${process.pid}.tmp`;
   await fs.promises.writeFile(tempPath, JSON.stringify({ command, chatId: String(chatId), queuedAt: new Date().toISOString() }));
   await fs.promises.rename(tempPath, futuresCommandQueuePath);
-  await this.sendAlert(`[FUTURES COMMAND] ${command} diterima, sedang diproses oleh bot futures.`);
+  await this.sendAlert([
+    '[FUTURES COMMAND]',
+    '',
+    `Command: ${command}`,
+    'Status: diterima, sedang diproses bot futures',
+  ].join('\n'));
   return true;
 }
 
@@ -101,7 +106,7 @@ function formatTelegramMessage(title, rows = []) {
   const body = rows
     .filter(([, value]) => value !== undefined && value !== null && value !== '')
     .map(([label, value]) => `${label}: ${value}`);
-  return [`[${title}]`, ...body].join('\n');
+  return [`[${title}]`, '', ...body].join('\n');
 }
 
 function getPauseStatusText() {
@@ -132,7 +137,7 @@ async function buildSymbolStatusLine(symbol) {
     : 'not initialized';
   return [
     '',
-    symbol,
+    `-- ${symbol} --`,
     `Price: ${this.formatPrice(ticker.last)}`,
     `Range: ${rangeText}`,
     `Orders: ${buyCount} buy / ${sellCount} sell`,
@@ -144,7 +149,8 @@ async function buildSymbolStatusLine(symbol) {
 
 async function buildStatusMessage() {
   const lines = [
-    '[Status]',
+    '[SPOT STATUS]',
+    '',
     `Mode: ${EXCHANGE_MODE}`,
     `Trading: ${this.getPauseStatusText()}`,
     `Circuit: ${this.circuitAllows() ? 'OK' : 'PAUSED'}`,
@@ -162,7 +168,7 @@ async function buildStatusMessage() {
 }
 
 async function buildOrdersMessage() {
-  const lines = ['[Orders]'];
+  const lines = ['[SPOT ORDERS]'];
   for (const symbol of SYMBOLS) {
     try {
       const symState = this.state.getSymbol(symbol);
@@ -173,7 +179,7 @@ async function buildOrdersMessage() {
       );
       const buys = managedOrders.filter(order => String(order.side).toLowerCase() === 'buy');
       const sells = managedOrders.filter(order => String(order.side).toLowerCase() === 'sell');
-      lines.push('', symbol, `Active: ${buys.length} buy / ${sells.length} sell`, `Tracked: ${Object.keys(symState.orders).length}`);
+      lines.push('', `-- ${symbol} --`, `Active: ${buys.length} buy / ${sells.length} sell`, `Tracked: ${Object.keys(symState.orders).length}`);
       for (const order of managedOrders.slice(0, 12)) {
         const level = this.getBotOrderLevel(order) ?? symState.orders[String(order.id)]?.levelIndex ?? '?';
         lines.push(`${String(order.side).toUpperCase()} L${level} | ${this.formatAmount(order.amount)} @ ${this.formatPrice(order.price)}`);
@@ -203,14 +209,14 @@ async function handleTelegramCommand(text) {
   }
   if (command === '/pause') {
     if (!KILL_SWITCH_ENABLED) {
-      await this.sendAlert(this.formatTelegramMessage('Pause Rejected', [
+      await this.sendAlert(this.formatTelegramMessage('SPOT PAUSE REJECTED', [
         ['Trading', 'still active'],
         ['Reason', 'KILL_SWITCH_ENABLED=false'],
       ]));
       return;
     }
     await fs.promises.writeFile(KILL_SWITCH_PATH, `paused by telegram at ${new Date().toISOString()}\n`);
-    await this.sendAlert(this.formatTelegramMessage('Paused', [
+    await this.sendAlert(this.formatTelegramMessage('SPOT PAUSED', [
       ['File', KILL_SWITCH_FILE],
       ['Trading', 'new orders paused'],
     ]));
@@ -222,7 +228,7 @@ async function handleTelegramCommand(text) {
     } catch (err) {
       if (err.code !== 'ENOENT') throw err;
     }
-    await this.sendAlert(this.formatTelegramMessage('Resumed', [
+    await this.sendAlert(this.formatTelegramMessage('SPOT RESUMED', [
       ['File', `${KILL_SWITCH_FILE} removed`],
       ['Trading', STOP_TRADING ? 'still stopped by STOP_TRADING=true' : 'active'],
     ]));
@@ -230,7 +236,8 @@ async function handleTelegramCommand(text) {
   }
   if (command === '/help' || command === '/start') {
     await this.sendAlert([
-      '[Commands]',
+      '[COMMANDS]',
+      '',
       '/status - bot summary',
       '/orders - active grid orders',
       '/pause - create kill-switch file',

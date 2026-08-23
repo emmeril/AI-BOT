@@ -313,7 +313,7 @@ async function applyTrailingRangeShift(symbol, lower, upper, shift, direction) {
     `[TRAILING ${direction.toUpperCase()}] ${symbol} shifted ${shift.steps} grid(s): ` +
     `${roundNumber(lower)}-${roundNumber(upper)} -> ${roundNumber(shift.lower)}-${roundNumber(shift.upper)}`
   );
-  await this.sendAlert(this.formatTelegramMessage(`Trailing ${direction.toUpperCase()}`, [
+  await this.sendAlert(this.formatTelegramMessage(`SPOT TRAILING ${direction.toUpperCase()}`, [
     ['Symbol', symbol],
     ['Shift', `${shift.steps} grid(s)`],
     ['Old Range', `${this.formatPrice(lower)} - ${this.formatPrice(upper)}`],
