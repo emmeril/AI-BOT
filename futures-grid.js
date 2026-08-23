@@ -6,6 +6,7 @@ const https = require('https');
 const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { FibonacciRangeAdvisor } = require('./src/fibonacci-range-advisor');
+const { startFuturesDashboardServer } = require('./src/futures-dashboard-server');
 
 // Tracks, per async call chain, which symbols' locks are currently held by
 // an ancestor call. Used by withSymbolLock() to detect true re-entrancy
@@ -3556,6 +3557,7 @@ Multi-timeframe Fibonacci: ${FIBONACCI_RANGE_ADVISOR_ENABLED
       : 'OFF'}
 `);
     await this.init();
+    startFuturesDashboardServer(this);
     while (true) {
       await sleep(INTERVAL_MS);
       await this.executeCycle();
