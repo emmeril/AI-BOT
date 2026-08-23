@@ -284,6 +284,7 @@ TELEGRAM_CHAT_ID=your_chat_id
 - `TELEGRAM_COMMANDS_ENABLED`: aktifkan command dari chat Telegram yang sama dengan `TELEGRAM_CHAT_ID`.
 - `TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS`: interval polling command.
 - `TELEGRAM_COMMANDS_SKIP_OLD_UPDATES`: abaikan command lama saat bot baru start.
+- `FUTURES_TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS`: interval bot futures membaca antrean command; default 2 detik.
 
 Command yang tersedia:
 
@@ -292,6 +293,7 @@ Command yang tersedia:
 - `/pause`: membuat `KILL_SWITCH_FILE` dan menghentikan order baru. Jika `KILL_SWITCH_ENABLED=false`, command ditolak agar tidak memberi sinyal pause palsu.
 - `/resume`: menghapus `KILL_SWITCH_FILE`.
 - `/help`: daftar command.
+- `/futures_status`, `/futures_orders`, `/futures_pause`, `/futures_resume`, `/futures_help`: command futures yang diteruskan oleh bot spot dan diproses terpisah dari cycle trading.
 
 ## Catatan Operasional
 

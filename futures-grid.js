@@ -91,6 +91,10 @@ const MARGIN_MODE = Config.get('MARGIN_MODE', 'ISOLATED').toUpperCase();
 const POSITION_SIDE = 'LONG';
 const INTERVAL_MINUTES = Config.number('INTERVAL_MINUTES', 1);
 const INTERVAL_MS = INTERVAL_MINUTES * MINUTE_MS;
+const TELEGRAM_COMMAND_POLL_INTERVAL_MS = Math.max(
+  Config.number('FUTURES_TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS', 2),
+  1
+) * 1000;
 const FUNDING_SYNC_INTERVAL_MS = Math.max(Config.number('FUNDING_SYNC_INTERVAL_MINUTES', 60), 1) * MINUTE_MS;
 
 const GRID_COUNT = Config.number('GRID_COUNT', 10);
@@ -1267,6 +1271,8 @@ class FuturesGridEngine {
     this.roiExitedSymbols = new Set();
     this.lastFundingSyncAt = new Map();
     this.telegramStatusTimer = null;
+    this.telegramCommandTimer = null;
+    this.telegramCommandProcessing = false;
     this.circuitBreaker = { errors: 0, pausedUntil: 0 };
     // for stuck investment warning deduplication
     this.stuckInvestmentWarned = new Set();
@@ -3486,7 +3492,6 @@ class FuturesGridEngine {
     this.isRunning = true;
     let hadError = false;
     try {
-      await this.processFuturesTelegramCommand();
       if (!this.circuitAllows()) return;
       for (const symbol of SYMBOLS) {
         try {
@@ -3569,41 +3574,58 @@ class FuturesGridEngine {
   }
 
   async processFuturesTelegramCommand() {
-    let command;
+    if (this.telegramCommandProcessing) return;
+    this.telegramCommandProcessing = true;
     try {
-      command = JSON.parse(await fs.promises.readFile(futuresTelegramCommandPath, 'utf8'));
-      await fs.promises.unlink(futuresTelegramCommandPath);
-    } catch (err) {
-      if (err.code !== 'ENOENT') console.warn('[TELEGRAM] Could not read futures command:', err.message);
-      return;
-    }
-    const name = String(command?.command || '').toLowerCase();
-    if (name === '/futures_status') {
-      await this.sendAlert(this.buildTelegramStatusMessage());
-      return;
-    }
-    if (name === '/futures_orders') {
-      const lines = ['[FUTURES ORDERS]'];
-      for (const symbol of SYMBOLS) {
-        const orders = await retry(() => this.exchange.fetchOpenOrders(symbol));
-        lines.push('', symbol, ...orders.map(order => `${String(order.side).toUpperCase()} L${this.getBotOrderLevel(order) ?? '?'} | ${order.amount} @ ${order.price}`));
+      let command;
+      try {
+        command = JSON.parse(await fs.promises.readFile(futuresTelegramCommandPath, 'utf8'));
+        await fs.promises.unlink(futuresTelegramCommandPath);
+      } catch (err) {
+        if (err.code !== 'ENOENT') console.warn('[TELEGRAM] Could not read futures command:', err.message);
+        return;
       }
-      await this.sendAlert(lines.join('\n').slice(0, 3900));
-      return;
-    }
-    if (name === '/futures_pause' || name === '/futures_resume') {
-      if (name === '/futures_pause') {
-        await fs.promises.writeFile(KILL_SWITCH_PATH, `paused by telegram at ${new Date().toISOString()}\n`);
-        await this.sendAlert(`[FUTURES PAUSED]\nFile: ${KILL_SWITCH_FILE}\nNew orders paused.`);
-      } else {
-        try { await fs.promises.unlink(KILL_SWITCH_PATH); } catch (err) { if (err.code !== 'ENOENT') throw err; }
-        await this.sendAlert(`[FUTURES RESUMED]\nFile: ${KILL_SWITCH_FILE} removed.`);
+      const name = String(command?.command || '').toLowerCase();
+      if (name === '/futures_status') {
+        await this.sendAlert(this.buildTelegramStatusMessage());
+        return;
       }
-      return;
+      if (name === '/futures_orders') {
+        const lines = ['[FUTURES ORDERS]'];
+        for (const symbol of SYMBOLS) {
+          const orders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+          lines.push('', symbol, ...orders.map(order => `${String(order.side).toUpperCase()} L${this.getBotOrderLevel(order) ?? '?'} | ${order.amount} @ ${order.price}`));
+        }
+        await this.sendAlert(lines.join('\n').slice(0, 3900));
+        return;
+      }
+      if (name === '/futures_pause' || name === '/futures_resume') {
+        if (name === '/futures_pause') {
+          await fs.promises.writeFile(KILL_SWITCH_PATH, `paused by telegram at ${new Date().toISOString()}\n`);
+          await this.sendAlert(`[FUTURES PAUSED]\nFile: ${KILL_SWITCH_FILE}\nNew orders paused.`);
+        } else {
+          try { await fs.promises.unlink(KILL_SWITCH_PATH); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+          await this.sendAlert(`[FUTURES RESUMED]\nFile: ${KILL_SWITCH_FILE} removed.`);
+        }
+        return;
+      }
+      if (name === '/futures_help') {
+        await this.sendAlert('[FUTURES COMMANDS]\n/futures_status\n/futures_orders\n/futures_pause\n/futures_resume\n/futures_help');
+      }
+    } finally {
+      this.telegramCommandProcessing = false;
     }
-    if (name === '/futures_help') {
-      await this.sendAlert('[FUTURES COMMANDS]\n/futures_status\n/futures_orders\n/futures_pause\n/futures_resume\n/futures_help');
-    }
+  }
+
+  startTelegramCommandProcessing() {
+    if (this.telegramCommandTimer || !TELEGRAM_ENABLED || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+    const poll = () => this.processFuturesTelegramCommand().catch(err => {
+      console.warn('[TELEGRAM] Futures command processing failed:', err.message);
+    });
+    this.telegramCommandTimer = setInterval(poll, TELEGRAM_COMMAND_POLL_INTERVAL_MS);
+    this.telegramCommandTimer.unref?.();
+    poll();
+    console.log(`[TELEGRAM] Futures command queue polling every ${TELEGRAM_COMMAND_POLL_INTERVAL_MS / 1000}s`);
   }
 
   async start() {
@@ -3635,6 +3657,7 @@ Multi-timeframe Fibonacci: ${FIBONACCI_RANGE_ADVISOR_ENABLED
 `);
     await this.init();
     startFuturesDashboardServer(this);
+    this.startTelegramCommandProcessing();
     this.startTelegramStatusReports();
     while (true) {
       await sleep(INTERVAL_MS);
