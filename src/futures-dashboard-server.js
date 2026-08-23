@@ -18,6 +18,28 @@ const refreshSeconds = Math.max(Number(process.env.FUTURES_DASHBOARD_REFRESH_SEC
 const timeframe = process.env.FUTURES_DASHBOARD_CHART_TIMEFRAME || '1m';
 const chartLimit = Math.max(Number(process.env.FUTURES_DASHBOARD_CHART_LIMIT || 120), 20);
 
+function positionMetrics(position, leverage, openPositionFees = 0) {
+  if (!position) return null;
+  const safeLeverage = Number(leverage) > 0 ? Number(leverage) : 1;
+  const contracts = numberOrZero(position.contracts);
+  const notional = Math.abs(numberOrZero(position.notional ?? position.info?.notional));
+  const positionMargin = numberOrZero(
+    position.info?.positionInitialMargin ?? position.initialMargin ?? (notional / safeLeverage)
+  );
+  const unrealizedPnl = numberOrZero(position.unrealizedPnl ?? position.info?.unRealizedProfit);
+  return {
+    contracts,
+    notional,
+    entryPrice: numberOrZero(position.entryPrice),
+    markPrice: numberOrZero(position.markPrice ?? position.info?.markPrice),
+    liquidationPrice: numberOrZero(position.liquidationPrice ?? position.info?.liquidationPrice),
+    positionMargin,
+    roiPct: positionMargin > 0 ? (unrealizedPnl / positionMargin) * 100 : 0,
+    unrealizedPnl,
+    openPositionFees: numberOrZero(openPositionFees),
+  };
+}
+
 async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
   const symbols = engine.constructor.SYMBOLS || String(process.env.SYMBOLS || '').split(',').filter(Boolean);
   const symbol = symbols.includes(requestedSymbol) ? requestedSymbol : symbols[0];
@@ -40,6 +62,17 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
   const realized = numberOrZero(symState.realizedGridProfit) + numberOrZero(symState.realizedExitProfit);
   const funding = numberOrZero(symState.fundingProfit);
   const fee = numberOrZero(symState.tradingFees);
+  const openPositionFees = Object.values(symState.lastBuyByLevel || {})
+    .reduce((sum, buy) => sum + numberOrZero(buy?.totalFeeQuote), 0);
+  const leverage = Number(process.env.LEVERAGE) || 0;
+  const position = positionMetrics(long, leverage, openPositionFees);
+  const walletInfo = balance?.info || {};
+  const walletBalance = numberOrZero(walletInfo.totalWalletBalance ?? balance?.total?.USDT);
+  const availableBalance = numberOrZero(walletInfo.availableBalance ?? freeUsdt);
+  const positionMargin = position ? numberOrZero(position.positionMargin) : 0;
+  const openOrderMargin = numberOrZero(walletInfo.totalOpenOrderInitialMargin);
+  const usedMargin = numberOrZero(walletInfo.totalInitialMargin ?? balance?.used?.USDT);
+  const net = realized + funding + unrealizedPnl - openPositionFees;
   return {
     generatedAt: new Date().toISOString(), refreshSeconds, source: 'Binance USDⓈ-M Futures',
     mode: process.env.EXCHANGE_MODE || 'testnet', running: engine.circuitAllows(),
@@ -62,11 +95,12 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
       realized: numberOrZero(symState.realizedGridProfit) + numberOrZero(symState.realizedExitProfit),
       totalRealized: numberOrZero(engine.state.data.totals.realizedGridProfit) + numberOrZero(engine.state.data.totals.realizedExitProfit),
       filledBuys: numberOrZero(engine.state.data.totals.filledBuys), filledSells: numberOrZero(engine.state.data.totals.filledSells), quoteAsset: 'USDT',
-      funding, fees: fee, unrealizedPnl, net: realized + funding + unrealizedPnl,
+      funding, fees: fee, openPositionFees, unrealizedPnl, net,
     },
     futures: {
-      leverage: Number(process.env.LEVERAGE) || 0, marginMode: process.env.MARGIN_MODE || '', positionMode: 'HEDGE',
-      positionSide: 'LONG', freeUsdt, totalUsdt, position: long ? { contracts: numberOrZero(long.contracts), entryPrice: numberOrZero(long.entryPrice), markPrice: numberOrZero(long.markPrice), initialMargin: numberOrZero(long.initialMargin), roiPct: numberOrZero(long.percentage) } : null,
+      leverage, marginMode: process.env.MARGIN_MODE || '', positionMode: 'HEDGE',
+      positionSide: 'LONG', freeUsdt, totalUsdt, walletBalance, availableBalance, usedMargin,
+      positionMargin, openOrderMargin, position,
     },
   };
 }
@@ -101,4 +135,4 @@ function startFuturesDashboardServer(engine) {
   return server;
 }
 
-module.exports = { buildFuturesDashboardSnapshot, startFuturesDashboardServer };
+module.exports = { buildFuturesDashboardSnapshot, positionMetrics, startFuturesDashboardServer };

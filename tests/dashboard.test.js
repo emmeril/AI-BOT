@@ -7,6 +7,23 @@ const {
   normalizeOrder,
   precisionDigits,
 } = require('../src/dashboard-server');
+const { positionMetrics } = require('../src/futures-dashboard-server');
+
+test('futures dashboard uses position margin and excludes open-order margin from ROI', () => {
+  const result = positionMetrics({
+    contracts: 2982,
+    notional: '15.93130518',
+    entryPrice: '0.005281',
+    markPrice: '0.00534249',
+    unrealizedPnl: '0.18336318',
+    initialMargin: '13.68235164',
+    info: { positionInitialMargin: '3.18626104', openOrderInitialMargin: '10.49609060' },
+  }, 5, 0.00314958);
+
+  assert.equal(result.positionMargin, 3.18626104);
+  assert.equal(result.openPositionFees, 0.00314958);
+  assert.ok(Math.abs(result.roiPct - 5.754) < 0.01);
+});
 
 test('dashboard market price follows Binance symbol precision', () => {
   const engine = {
