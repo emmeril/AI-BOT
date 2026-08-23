@@ -19,6 +19,18 @@ const {
   TELEGRAM_COMMANDS_SKIP_OLD_UPDATES
 } = require('./config');
 const { retry, roundNumber } = require('./utils');
+const futuresCommandQueuePath = require('path').resolve(process.cwd(), 'futures-telegram-command.json');
+
+async function queueFuturesTelegramCommand(text, chatId) {
+  const command = String(text || '').trim().split(/\s+/)[0].toLowerCase().replace(/@.+$/, '');
+  const allowed = new Set(['/futures_status', '/futures_orders', '/futures_pause', '/futures_resume', '/futures_help']);
+  if (!allowed.has(command)) return false;
+  const tempPath = `${futuresCommandQueuePath}.${process.pid}.tmp`;
+  await fs.promises.writeFile(tempPath, JSON.stringify({ command, chatId: String(chatId), queuedAt: new Date().toISOString() }));
+  await fs.promises.rename(tempPath, futuresCommandQueuePath);
+  await this.sendAlert(`[FUTURES COMMAND] ${command} diterima, sedang diproses oleh bot futures.`);
+  return true;
+}
 
 function killSwitchActive() {
   if (STOP_TRADING) return true;
@@ -177,6 +189,10 @@ async function buildOrdersMessage() {
 async function handleTelegramCommand(text) {
   const command = String(text || '').trim().split(/\s+/)[0].toLowerCase().replace(/@.+$/, '');
   if (!command) return;
+  if (command.startsWith('/futures_')) {
+    await queueFuturesTelegramCommand.call(this, text, TELEGRAM_CHAT_ID);
+    return;
+  }
   if (command === '/status') {
     await this.sendAlert(await this.buildStatusMessage());
     return;

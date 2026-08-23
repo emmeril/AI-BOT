@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { FibonacciRangeAdvisor } = require('./src/fibonacci-range-advisor');
 const { startFuturesDashboardServer } = require('./src/futures-dashboard-server');
+const futuresTelegramCommandPath = path.resolve(process.cwd(), 'futures-telegram-command.json');
 
 // Tracks, per async call chain, which symbols' locks are currently held by
 // an ancestor call. Used by withSymbolLock() to detect true re-entrancy
@@ -3485,6 +3486,7 @@ class FuturesGridEngine {
     this.isRunning = true;
     let hadError = false;
     try {
+      await this.processFuturesTelegramCommand();
       if (!this.circuitAllows()) return;
       for (const symbol of SYMBOLS) {
         try {
@@ -3564,6 +3566,44 @@ class FuturesGridEngine {
       );
     }, TELEGRAM_STATUS_REPORT_INTERVAL_MS);
     this.telegramStatusTimer.unref?.();
+  }
+
+  async processFuturesTelegramCommand() {
+    let command;
+    try {
+      command = JSON.parse(await fs.promises.readFile(futuresTelegramCommandPath, 'utf8'));
+      await fs.promises.unlink(futuresTelegramCommandPath);
+    } catch (err) {
+      if (err.code !== 'ENOENT') console.warn('[TELEGRAM] Could not read futures command:', err.message);
+      return;
+    }
+    const name = String(command?.command || '').toLowerCase();
+    if (name === '/futures_status') {
+      await this.sendAlert(this.buildTelegramStatusMessage());
+      return;
+    }
+    if (name === '/futures_orders') {
+      const lines = ['[FUTURES ORDERS]'];
+      for (const symbol of SYMBOLS) {
+        const orders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+        lines.push('', symbol, ...orders.map(order => `${String(order.side).toUpperCase()} L${this.getBotOrderLevel(order) ?? '?'} | ${order.amount} @ ${order.price}`));
+      }
+      await this.sendAlert(lines.join('\n').slice(0, 3900));
+      return;
+    }
+    if (name === '/futures_pause' || name === '/futures_resume') {
+      if (name === '/futures_pause') {
+        await fs.promises.writeFile(KILL_SWITCH_PATH, `paused by telegram at ${new Date().toISOString()}\n`);
+        await this.sendAlert(`[FUTURES PAUSED]\nFile: ${KILL_SWITCH_FILE}\nNew orders paused.`);
+      } else {
+        try { await fs.promises.unlink(KILL_SWITCH_PATH); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+        await this.sendAlert(`[FUTURES RESUMED]\nFile: ${KILL_SWITCH_FILE} removed.`);
+      }
+      return;
+    }
+    if (name === '/futures_help') {
+      await this.sendAlert('[FUTURES COMMANDS]\n/futures_status\n/futures_orders\n/futures_pause\n/futures_resume\n/futures_help');
+    }
   }
 
   async start() {
