@@ -1649,6 +1649,10 @@ class FuturesGridEngine {
       );
     }
 
+    // Reconcile fills against the old level mapping before cancelling or
+    // remapping orders, so a SELL cannot lose its cost basis or alert.
+    await this.reconcilePendingFillsBeforeRangeTransition(symbol, 'reset');
+
     // Persist the transition BEFORE the irreversible step (cancelling live
     // orders on the exchange). If the process dies anywhere after this point
     // and before the marker is cleared below, resumeInterruptedRangeTransition()
@@ -1680,6 +1684,7 @@ class FuturesGridEngine {
         `failed (ids: ${failedIds}). Will retry reset next cycle once all orders are cancelled.`
       );
     }
+    await this.reconcilePendingFillsBeforeRangeTransition(symbol, 'reset post-cancel');
     if (Object.keys(symState.orders).length > 0) {
       console.warn(
         `[RANGE] ${symbol} had ${Object.keys(symState.orders).length} managed order(s) after cancellation; clearing stale local metadata`
@@ -1730,6 +1735,13 @@ class FuturesGridEngine {
       ['New Range', `${roundNumber(newLower)} - ${roundNumber(newUpper)}`],
       ['Remapped Buys', oldEntries.length],
     ]));
+  }
+
+  async reconcilePendingFillsBeforeRangeTransition(symbol, kind = 'reset') {
+    if (!this.exchange?.fetchMyTrades || !this.exchange?.fetchOpenOrders) return;
+    const openOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+    await this.handleFilledTrades(symbol, [], openOrders);
+    console.log(`[RANGE] ${symbol} reconciled pending fills before ${kind} transition`);
   }
 
   getTrailingUpState(symbol) {
@@ -1944,6 +1956,7 @@ class FuturesGridEngine {
 
   async applyTrailingRangeShift(symbol, lower, upper, shift, direction) {
     const symStateForMarker = this.state.getSymbol(symbol);
+    await this.reconcilePendingFillsBeforeRangeTransition(symbol, `trailing-${direction}`);
     // Persist BEFORE the irreversible step (cancelling live orders), same
     // rationale as remapStateAfterRangeReset: survives a crash so the shift
     // can be resumed onto this exact target range instead of left half-done.
@@ -1971,6 +1984,7 @@ class FuturesGridEngine {
         `cancellation(s) failed (ids: ${failedIds}). Will retry shift next cycle once all orders are cancelled.`
       );
     }
+    await this.reconcilePendingFillsBeforeRangeTransition(symbol, `trailing-${direction} post-cancel`);
 
     const symState = this.state.getSymbol(symbol);
     const trailingState = direction === 'up'
@@ -2751,6 +2765,16 @@ class FuturesGridEngine {
     const buy = symState.lastBuyByLevel[buyLevelIndex];
     if (!buy) {
       console.warn(`[SELL] ${symbol} level ${levelIndex} has no corresponding buy record. Skipping profit calculation.`);
+      await this.sendAlert(this.formatFuturesTelegramMessage('FUTURES SELL FILLED - UNRECONCILED', [
+        ['Symbol', symbol],
+        ['Trade ID', this.getTradeId(trade)],
+        ['Order ID', trade.order],
+        ['Level', levelIndex],
+        ['Source Buy Level', buyLevelIndex],
+        ['Price', this.formatFuturesNumber(price, 8)],
+        ['Amount', this.formatFuturesNumber(amount, 8)],
+        ['Reason', 'Corresponding buy record was not found; accounting requires review'],
+      ]));
       this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
       this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
       await this.state.save();
@@ -2768,6 +2792,16 @@ class FuturesGridEngine {
     const sellableAtBuy = buy.sellableAmount ?? totalBuyAmount;
     if (!(sellableAtBuy > 0)) {
       console.warn(`[SELL] ${symbol} level ${levelIndex} buy record has zero sellable amount. Skipping profit calculation.`);
+      await this.sendAlert(this.formatFuturesTelegramMessage('FUTURES SELL FILLED - UNRECONCILED', [
+        ['Symbol', symbol],
+        ['Trade ID', this.getTradeId(trade)],
+        ['Order ID', trade.order],
+        ['Level', levelIndex],
+        ['Source Buy Level', buyLevelIndex],
+        ['Price', this.formatFuturesNumber(price, 8)],
+        ['Amount', this.formatFuturesNumber(amount, 8)],
+        ['Reason', 'Tracked buy has zero sellable amount; accounting requires review'],
+      ]));
       this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
       this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
       await this.state.save();

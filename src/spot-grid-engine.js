@@ -423,6 +423,10 @@ class SpotGridEngine {
       );
     }
 
+    // Reconcile fills against the old level mapping before cancelling or
+    // remapping orders, so a SELL cannot lose its cost basis or alert.
+    await this.reconcilePendingFillsBeforeRangeTransition(symbol, 'reset');
+
     // Persist the transition BEFORE the irreversible step (cancelling live
     // orders on the exchange). If the process dies anywhere after this point
     // and before the marker is cleared below, resumeInterruptedRangeTransition()
@@ -451,6 +455,7 @@ class SpotGridEngine {
         `failed (ids: ${failedIds}). Will retry reset next cycle once all orders are cancelled.`
       );
     }
+    await this.reconcilePendingFillsBeforeRangeTransition(symbol, 'reset post-cancel');
     if (Object.keys(symState.orders).length > 0) {
       console.warn(
         `[RANGE] ${symbol} had ${Object.keys(symState.orders).length} managed order(s) after cancellation; clearing stale local metadata`
@@ -503,6 +508,13 @@ class SpotGridEngine {
       ['Bounds Changed', boundsChanged ? 'Yes' : 'No'],
       ['Remapped Buys', oldEntries.length],
     ]));
+  }
+
+  async reconcilePendingFillsBeforeRangeTransition(symbol, kind = 'reset') {
+    if (!this.exchange?.fetchMyTrades || !this.exchange?.fetchOpenOrders) return;
+    const openOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+    await this.handleFilledTrades(symbol, [], openOrders);
+    console.log(`[RANGE] ${symbol} reconciled pending fills before ${kind} transition`);
   }
 
   buildLevels(lower, upper, symbol = null) {
@@ -1009,6 +1021,16 @@ class SpotGridEngine {
         `[SELL] ${symbol} level ${levelIndex} sourceBuy=${buyLevelIndex} has no corresponding buy record. ` +
         `Skipping profit calculation.`
       );
+      await this.sendAlert(this.formatTelegramMessage('SPOT SELL FILLED - UNRECONCILED', [
+        ['Symbol', symbol],
+        ['Trade ID', this.getTradeId(trade)],
+        ['Order ID', trade.order],
+        ['Level', levelIndex],
+        ['Source Buy Level', buyLevelIndex],
+        ['Price', this.formatPrice(price)],
+        ['Amount', this.formatAmount(amount)],
+        ['Reason', 'Corresponding buy record was not found; accounting requires review'],
+      ]));
       this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
       this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
       await this.state.save();
@@ -1030,6 +1052,16 @@ class SpotGridEngine {
     const sellableAtBuy = buy.sellableAmount ?? totalBuyAmount;
     if (!(sellableAtBuy > 0)) {
       console.warn(`[SELL] ${symbol} level ${levelIndex} buy record has zero sellable amount. Skipping profit calculation.`);
+      await this.sendAlert(this.formatTelegramMessage('SPOT SELL FILLED - UNRECONCILED', [
+        ['Symbol', symbol],
+        ['Trade ID', this.getTradeId(trade)],
+        ['Order ID', trade.order],
+        ['Level', levelIndex],
+        ['Source Buy Level', buyLevelIndex],
+        ['Price', this.formatPrice(price)],
+        ['Amount', this.formatAmount(amount)],
+        ['Reason', 'Tracked buy has zero sellable amount; accounting requires review'],
+      ]));
       this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
       this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
       await this.state.save();

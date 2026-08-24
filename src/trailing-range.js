@@ -233,6 +233,11 @@ function countActiveOrders(symState, side) {
 
 async function applyTrailingRangeShift(symbol, lower, upper, shift, direction) {
   const symStateForMarker = this.state.getSymbol(symbol);
+  // Reconcile fills against the old level mapping before cancelling or
+  // shifting orders, so a SELL cannot lose its cost basis or alert.
+  if (typeof this.reconcilePendingFillsBeforeRangeTransition === 'function') {
+    await this.reconcilePendingFillsBeforeRangeTransition(symbol, `trailing-${direction}`);
+  }
   // Persist BEFORE the irreversible step (cancelling live orders), same
   // rationale as remapStateAfterRangeReset: survives a crash so the shift
   // can be resumed onto this exact target range instead of left half-done.
@@ -259,6 +264,9 @@ async function applyTrailingRangeShift(symbol, lower, upper, shift, direction) {
       `[TRAILING] ${symbol} trailing-${direction} shift aborted: ${cancelResult.failed.length} order ` +
       `cancellation(s) failed (ids: ${failedIds}). Will retry shift next cycle once all orders are cancelled.`
     );
+  }
+  if (typeof this.reconcilePendingFillsBeforeRangeTransition === 'function') {
+    await this.reconcilePendingFillsBeforeRangeTransition(symbol, `trailing-${direction} post-cancel`);
   }
 
   const symState = this.state.getSymbol(symbol);

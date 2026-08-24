@@ -240,3 +240,60 @@ test('invalid futures target range preserves LONG cost basis and live orders', a
   assert.ok(symbolState.orders['buy-1']);
   assert.equal(symbolState.rangeTransition, null);
 });
+
+test('futures range reset reconciles pending fills before cancelling old orders', async () => {
+  const events = [];
+  const engine = Object.create(FuturesGridEngine.prototype);
+  const symbolState = {
+    config: { lower: 90, upper: 110 },
+    orders: { 'sell-1': { id: 'sell-1', side: 'sell', levelIndex: 2 } },
+    lastBuyByLevel: { 1: { price: 100, amount: 1, sellableAmount: 1 } },
+    refillCountByLevel: { 1: 0 },
+    rangeTransition: null,
+  };
+  engine.exchange = { fetchMyTrades: async () => [], fetchOpenOrders: async () => [] };
+  engine.state = { getSymbol: () => symbolState, save: async () => {} };
+  engine.buildLevels = () => [90, 100, 110];
+  engine.assertLevelsAreDistinct = () => {};
+  engine.cancelGridOrders = async () => { events.push('cancel'); return { failed: [] }; };
+  engine.handleFilledTrades = async (_symbol, levels, openOrders) => {
+    assert.deepEqual(levels, []);
+    assert.deepEqual(openOrders, []);
+    events.push('fills');
+  };
+  engine.getLevelIndex = () => 1;
+  engine.mergeBuyRecords = (existing, incoming) => existing || incoming;
+  engine.formatFuturesNumber = value => String(value);
+  engine.formatFuturesTelegramMessage = title => title;
+  engine.sendAlert = async () => {};
+
+  await engine.remapStateAfterRangeReset('BTC/USDT:USDT', 90, 110, 80, 120);
+
+  assert.deepEqual(events, ['fills', 'cancel', 'fills']);
+});
+
+test('futures sends an unreconciled alert when a SELL fill has no buy record', async () => {
+  const engine = Object.create(FuturesGridEngine.prototype);
+  const symState = { orders: {}, lastBuyByLevel: {} };
+  let alert = '';
+  let processed = '';
+  engine.state = {
+    markProcessedTradeLocal: (_symbol, id) => { processed = id; },
+    save: async () => {},
+  };
+  engine.sendAlert = async message => { alert = message; };
+  engine.formatFuturesTelegramMessage = title => title;
+  engine.formatFuturesNumber = String;
+
+  await engine.handleSellFill(
+    'BTC/USDT:USDT',
+    [],
+    symState,
+    { id: 'sell-1', order: 'order-1', price: 101, amount: 1 },
+    { levelIndex: 2, sourceBuyLevelIndex: 1 },
+    new Set()
+  );
+
+  assert.equal(alert, 'FUTURES SELL FILLED - UNRECONCILED');
+  assert.equal(processed, 'sell-1');
+});
