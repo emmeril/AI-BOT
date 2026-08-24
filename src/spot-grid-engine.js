@@ -842,6 +842,29 @@ class SpotGridEngine {
     let cleaned = 0;
     for (const orderId of Object.keys(symState.orders)) {
       if (!openOrderIds.has(orderId)) {
+        // An order can disappear from openOrders a little before its fill is
+        // visible in fetchMyTrades.  Removing it immediately lets the
+        // placement loop submit the same level again and double the position.
+        // Only forget explicit cancellation/rejection; keep closed/unknown
+        // orders until the fill reconciliation observes their trades.
+        let remote;
+        try {
+          remote = this.exchange.fetchOrder
+            ? await retry(() => this.exchange.fetchOrder(orderId, symbol))
+            : null;
+        } catch (err) {
+          console.warn(`[SYNC-STATE] ${symbol} keeping missing order ${orderId}: ${err.message}`);
+          continue;
+        }
+        const status = String(remote?.status || remote?.info?.status || '').toLowerCase();
+        const explicitlyCancelled = new Set(['canceled', 'cancelled', 'expired', 'rejected']).has(status);
+        if (!explicitlyCancelled) {
+          console.warn(
+            `[SYNC-STATE] ${symbol} keeping missing order ${orderId} for fill reconciliation ` +
+            `(status=${status || 'unknown'})`
+          );
+          continue;
+        }
         delete symState.orders[orderId];
         cleaned++;
       }

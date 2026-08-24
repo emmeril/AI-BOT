@@ -2609,6 +2609,27 @@ class FuturesGridEngine {
     let cleaned = 0;
     for (const orderId of Object.keys(symState.orders)) {
       if (!openOrderIds.has(orderId)) {
+        // Binance may remove a filled order from openOrders before the fill
+        // appears in fetchMyTrades.  Do not replace that level prematurely:
+        // only explicit cancellation/rejection is safe to forget here.
+        let remote;
+        try {
+          remote = this.exchange.fetchOrder
+            ? await retry(() => this.exchange.fetchOrder(orderId, symbol))
+            : null;
+        } catch (err) {
+          console.warn(`[SYNC-STATE] ${symbol} keeping missing order ${orderId}: ${err.message}`);
+          continue;
+        }
+        const status = String(remote?.status || remote?.info?.status || '').toLowerCase();
+        const explicitlyCancelled = new Set(['canceled', 'cancelled', 'expired', 'rejected']).has(status);
+        if (!explicitlyCancelled) {
+          console.warn(
+            `[SYNC-STATE] ${symbol} keeping missing order ${orderId} for fill reconciliation ` +
+            `(status=${status || 'unknown'})`
+          );
+          continue;
+        }
         delete symState.orders[orderId];
         cleaned++;
       }

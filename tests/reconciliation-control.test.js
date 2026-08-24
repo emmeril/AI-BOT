@@ -110,3 +110,35 @@ test('multiple fills from one closed spot order retain order metadata for the fu
 
   assert.deepEqual(seenLevels, [2, 2]);
 });
+
+test('spot keeps a missing closed order until its delayed fill is reconciled', async () => {
+  const symState = {
+    orders: { 'closed-1': { id: 'closed-1', side: 'buy', levelIndex: 2 } },
+  };
+  let saves = 0;
+  const engine = Object.create(SpotGridEngine.prototype);
+  engine.exchange = {
+    fetchOrder: async () => ({ id: 'closed-1', status: 'closed', filled: 1 }),
+  };
+  engine.state = { save: async () => { saves++; } };
+
+  await engine.syncManagedOrdersWithExchange('BTC/USDT', symState, new Set());
+
+  assert.ok(symState.orders['closed-1']);
+  assert.equal(saves, 0);
+});
+
+test('spot removes a missing explicitly canceled order', async () => {
+  const symState = {
+    orders: { 'canceled-1': { id: 'canceled-1', side: 'buy', levelIndex: 2 } },
+  };
+  const engine = Object.create(SpotGridEngine.prototype);
+  engine.exchange = {
+    fetchOrder: async () => ({ id: 'canceled-1', status: 'canceled' }),
+  };
+  engine.state = { save: async () => {} };
+
+  await engine.syncManagedOrdersWithExchange('BTC/USDT', symState, new Set());
+
+  assert.equal(symState.orders['canceled-1'], undefined);
+});
