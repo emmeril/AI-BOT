@@ -832,6 +832,8 @@ class GridState {
         orders: {},
         lastBuyByLevel: {},
         refillCountByLevel: {},
+        filledBuys: 0,
+        filledSells: 0,
         realizedGridProfit: 0,
         realizedExitProfit: 0,
         fundingProfit: 0,
@@ -848,6 +850,8 @@ class GridState {
     sym.orders = isPlainObject(sym.orders) ? sym.orders : {};
     sym.lastBuyByLevel = isPlainObject(sym.lastBuyByLevel) ? sym.lastBuyByLevel : {};
     sym.refillCountByLevel = isPlainObject(sym.refillCountByLevel) ? sym.refillCountByLevel : {};
+    sym.filledBuys = numberOrZero(sym.filledBuys);
+    sym.filledSells = numberOrZero(sym.filledSells);
     sym.realizedGridProfit = numberOrZero(sym.realizedGridProfit);
     sym.realizedExitProfit = numberOrZero(sym.realizedExitProfit);
     sym.fundingProfit = numberOrZero(sym.fundingProfit);
@@ -2681,6 +2685,7 @@ class FuturesGridEngine {
       }
     );
     symState.refillCountByLevel[levelIndex] = refillCount;
+    symState.filledBuys = numberOrZero(symState.filledBuys) + 1;
     this.state.data.totals.filledBuys++;
     symState.tradingFees += feeQuote;
     this.state.data.totals.tradingFees += feeQuote;
@@ -2817,6 +2822,7 @@ class FuturesGridEngine {
     this.state.data.totals.realizedGridProfit += profit;
     symState.tradingFees += feeQuote;
     this.state.data.totals.tradingFees += feeQuote;
+    symState.filledSells = numberOrZero(symState.filledSells) + 1;
     this.state.data.totals.filledSells++;
     symState.refillCountByLevel[buyLevelIndex] = refillCount;
     this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
@@ -2928,6 +2934,7 @@ class FuturesGridEngine {
     symState.tradingFees += feeQuote;
     this.state.data.totals.realizedExitProfit += netExitProfit;
     this.state.data.totals.tradingFees += feeQuote;
+    symState.filledSells = numberOrZero(symState.filledSells) + 1;
     this.state.data.totals.filledSells++;
     this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
     this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));

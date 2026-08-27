@@ -7,7 +7,7 @@ const {
   normalizeOrder,
   precisionDigits,
 } = require('../src/dashboard-server');
-const { positionMetrics } = require('../src/futures-dashboard-server');
+const { buildFuturesDashboardSnapshot, positionMetrics } = require('../src/futures-dashboard-server');
 const { telegramMethods } = require('../src/telegram-controller');
 
 test('spot Telegram messages separate their title from details', () => {
@@ -56,6 +56,42 @@ test('futures dashboard uses position margin and excludes open-order margin from
   assert.equal(result.positionMargin, 3.18626104);
   assert.equal(result.openPositionFees, 0.00314958);
   assert.ok(Math.abs(result.roiPct - 5.754) < 0.01);
+});
+
+test('futures dashboard reports fill counts for the selected symbol', async () => {
+  class TestEngine {}
+  TestEngine.SYMBOLS = ['1000SHIB/USDT:USDT', '1000PEPE/USDT:USDT'];
+  const states = {
+    '1000SHIB/USDT:USDT': {
+      config: {}, orders: {}, lastBuyByLevel: {}, filledBuys: 163, filledSells: 148,
+    },
+    '1000PEPE/USDT:USDT': {
+      config: {}, orders: {}, lastBuyByLevel: {}, filledBuys: 2, filledSells: 0,
+    },
+  };
+  const engine = new TestEngine();
+  engine.state = {
+    data: { totals: { filledBuys: 165, filledSells: 148, realizedGridProfit: 0, realizedExitProfit: 0 } },
+    getSymbol: symbol => states[symbol],
+  };
+  engine.exchange = {
+    fetchTicker: async () => ({ last: 1, high: 1, low: 1 }),
+    fetchOpenOrders: async () => [],
+    fetchOHLCV: async () => [],
+    fetchBalance: async () => ({ free: { USDT: 10 }, total: { USDT: 20 }, info: {} }),
+    fetchPositions: async () => [],
+    priceToPrecision: (_symbol, value) => String(value || 0),
+    amountToPrecision: (_symbol, value) => String(value || 0),
+  };
+  engine.getBotOrderLevel = () => null;
+  engine.circuitAllows = () => true;
+  engine.canPlaceNewOrders = () => true;
+
+  const snapshot = await buildFuturesDashboardSnapshot(engine, '1000PEPE/USDT:USDT');
+
+  assert.equal(snapshot.selectedSymbol, '1000PEPE/USDT:USDT');
+  assert.equal(snapshot.profit.filledBuys, 2);
+  assert.equal(snapshot.profit.filledSells, 0);
 });
 
 test('dashboard market price follows Binance symbol precision', () => {

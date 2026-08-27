@@ -13,6 +13,18 @@ test('futures state persistence errors propagate to the trading cycle', async ()
   await assert.rejects(state.save(), /ENOTDIR|not a directory/i);
 });
 
+test('futures state normalizes per-symbol fill counters', () => {
+  const state = Object.create(GridState.prototype);
+  state.data = GridState.normalize({
+    symbols: { 'BTC/USDT:USDT': { filledBuys: '4', filledSells: null } },
+  });
+
+  const symbol = state.getSymbol('BTC/USDT:USDT');
+
+  assert.equal(symbol.filledBuys, 4);
+  assert.equal(symbol.filledSells, 0);
+});
+
 test('STOP_TRADING still allows futures executeCycle to reconcile symbols', async () => {
   const engine = Object.create(FuturesGridEngine.prototype);
   let reconciled = 0;

@@ -104,7 +104,7 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
     profit: {
       realized: numberOrZero(symState.realizedGridProfit) + numberOrZero(symState.realizedExitProfit),
       totalRealized: numberOrZero(engine.state.data.totals.realizedGridProfit) + numberOrZero(engine.state.data.totals.realizedExitProfit),
-      filledBuys: numberOrZero(engine.state.data.totals.filledBuys), filledSells: numberOrZero(engine.state.data.totals.filledSells), quoteAsset: 'USDT',
+      filledBuys: numberOrZero(symState.filledBuys), filledSells: numberOrZero(symState.filledSells), quoteAsset: 'USDT',
       funding, fees: fee, openPositionFees, unrealizedPnl, net,
     },
     futures: {
