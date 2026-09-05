@@ -34,6 +34,9 @@ test('Config.number rejects invalid numeric env values', () => {
     process.env.TEST_NUMBER = '';
     assert.equal(Config.number('TEST_NUMBER', 10), 10);
 
+    process.env.TEST_NUMBER = '   ';
+    assert.equal(Config.number('TEST_NUMBER', 10), 10);
+
     process.env.TEST_NUMBER = '25.5';
     assert.equal(Config.number('TEST_NUMBER', 10), 25.5);
   } finally {
@@ -42,6 +45,20 @@ test('Config.number rejects invalid numeric env values', () => {
     } else {
       process.env.TEST_NUMBER = original;
     }
+  }
+});
+
+test('futures Config.number rejects invalid numeric env values', () => {
+  const original = process.env.FUTURES_TEST_NUMBER;
+  try {
+    process.env.FUTURES_TEST_NUMBER = '105O';
+    const { Config: FuturesConfig } = require('../futures-grid');
+    assert.throws(() => FuturesConfig.number('FUTURES_TEST_NUMBER', 10), /FUTURES_TEST_NUMBER must be a numeric value/);
+    process.env.FUTURES_TEST_NUMBER = '   ';
+    assert.equal(FuturesConfig.number('FUTURES_TEST_NUMBER', 10), 10);
+  } finally {
+    if (original === undefined) delete process.env.FUTURES_TEST_NUMBER;
+    else process.env.FUTURES_TEST_NUMBER = original;
   }
 });
 

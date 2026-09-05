@@ -20,6 +20,12 @@ const { retry, numberOrZero } = require('./utils');
 
 const dashboardFile = path.join(__dirname, '..', 'public', 'dashboard.html');
 
+function isLoopbackHost(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/^\[(.*)\]$/, '$1');
+  return normalized === 'localhost' || normalized === '::1' ||
+    normalized === '0:0:0:0:0:0:0:1' || /^127(?:\.\d{1,3}){3}$/.test(normalized);
+}
+
 function marketPrice(engine, symbol, value) {
   const numericValue = numberOrZero(value);
   if (!numericValue) return 0;
@@ -148,6 +154,9 @@ function sendJson(response, status, payload) {
 
 function startDashboardServer(engine) {
   if (!DASHBOARD_ENABLED || engine.dashboardServer) return null;
+  if (!isLoopbackHost(DASHBOARD_HOST) && !DASHBOARD_AUTH_ENABLED) {
+    throw new Error('Dashboard authentication is required when DASHBOARD_HOST is not loopback');
+  }
   const auth = createDashboardAuth({
     enabled: DASHBOARD_AUTH_ENABLED,
     username: DASHBOARD_USERNAME,
@@ -213,5 +222,6 @@ module.exports = {
   marketPriceText,
   normalizeOrder,
   precisionDigits,
+  isLoopbackHost,
   startDashboardServer,
 };

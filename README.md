@@ -110,7 +110,7 @@ Saat berjalan, bot akan validasi konfigurasi, membersihkan temp file state, meng
 Dashboard berbasis Bootstrap dan Alpine.js aktif secara default. Alamat awalnya `http://127.0.0.1:3000` setelah bot selesai melakukan inisialisasi. Jika port tersebut sudah dipakai, server otomatis mencoba `3001`, `3002`, dan seterusnya sampai menemukan port kosong; alamat yang terpilih ditampilkan pada log `[DASHBOARD]`. Data chart, order, dan profit diambil langsung dari engine serta exchange, lalu diperbarui otomatis tanpa perlu refresh halaman.
 
 - `DASHBOARD_ENABLED`: aktif/nonaktifkan dashboard. Default `true`.
-- `DASHBOARD_HOST`: alamat bind server. Default `127.0.0.1`; gunakan `0.0.0.0` hanya jika dashboard perlu diakses dari jaringan dan sudah dilindungi firewall/reverse proxy.
+- `DASHBOARD_HOST`: alamat bind server. Default `127.0.0.1`; alamat non-loopback seperti `0.0.0.0` hanya dapat dipakai jika autentikasi dashboard aktif.
 - `DASHBOARD_PORT`: port dashboard. Default `3000`.
 - `DASHBOARD_REFRESH_SECONDS`: interval refresh data, minimal 2 detik. Default `5`.
 - `DASHBOARD_CHART_TIMEFRAME`: timeframe candle chart CCXT, misalnya `1m`, `5m`, atau `1h`. Default `1m`.
@@ -121,7 +121,9 @@ Dashboard berbasis Bootstrap dan Alpine.js aktif secara default. Alamat awalnya 
 
 Futures dapat memakai kredensial yang sama melalui `DASHBOARD_*`, atau override khusus dengan
 `FUTURES_DASHBOARD_AUTH_ENABLED`, `FUTURES_DASHBOARD_USERNAME`,
-`FUTURES_DASHBOARD_PASSWORD`, dan `FUTURES_DASHBOARD_SESSION_HOURS`.
+`FUTURES_DASHBOARD_PASSWORD`, dan `FUTURES_DASHBOARD_SESSION_HOURS`. Dashboard futures bind ke
+`127.0.0.1` secara default. Jika `FUTURES_DASHBOARD_HOST` diubah ke alamat non-loopback seperti
+`0.0.0.0`, autentikasi wajib diaktifkan agar server tidak mengekspos data akun tanpa login.
 
 ## Struktur Kode
 

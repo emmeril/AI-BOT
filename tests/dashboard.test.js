@@ -6,8 +6,14 @@ const {
   marketPriceText,
   normalizeOrder,
   precisionDigits,
+  isLoopbackHost: isSpotLoopbackHost,
 } = require('../src/dashboard-server');
-const { buildFuturesDashboardSnapshot, positionMetrics } = require('../src/futures-dashboard-server');
+const {
+  buildFuturesDashboardSnapshot,
+  isLoopbackHost,
+  positionMetrics,
+  validateDashboardExposure,
+} = require('../src/futures-dashboard-server');
 const { telegramMethods } = require('../src/telegram-controller');
 
 test('spot Telegram messages separate their title from details', () => {
@@ -107,6 +113,26 @@ test('dashboard market price follows Binance symbol precision', () => {
   assert.equal(precisionDigits('65432.10'), 2);
   assert.equal(precisionDigits('2'), 0);
   assert.equal(marketAmountText(engine, 'BTC/USDT', 0.12), '0.1200');
+});
+
+test('futures dashboard recognizes loopback IPv4 and IPv6 hosts', () => {
+  assert.equal(isLoopbackHost('127.0.0.1'), true);
+  assert.equal(isLoopbackHost('127.42.1.9'), true);
+  assert.equal(isLoopbackHost('::1'), true);
+  assert.equal(isLoopbackHost('[::1]'), true);
+  assert.equal(isLoopbackHost('0.0.0.0'), false);
+  assert.equal(isLoopbackHost('192.168.1.10'), false);
+  assert.doesNotThrow(() => validateDashboardExposure('127.0.0.1', false));
+  assert.doesNotThrow(() => validateDashboardExposure('0.0.0.0', true));
+  assert.throws(
+    () => validateDashboardExposure('0.0.0.0', false),
+    /authentication is required/
+  );
+});
+
+test('spot dashboard uses the same loopback exposure rule', () => {
+  assert.equal(isSpotLoopbackHost('127.0.0.1'), true);
+  assert.equal(isSpotLoopbackHost('0.0.0.0'), false);
 });
 
 test('dashboard order normalization uses exchange data and tracked grid level', () => {

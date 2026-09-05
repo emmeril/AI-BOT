@@ -7,7 +7,7 @@ Object.assign(process.env, {
   STOP_TRADING: 'false', KILL_SWITCH_ENABLED: 'false',
   GRID_REFILL_ON_FILLED: 'true', GRID_MAX_REFILLS: '2',
   GRID_STATE_FILE: '/tmp/ai-bot-audit-test-state.json',
-  DASHBOARD_ENABLED: 'true', DASHBOARD_AUTH_ENABLED: 'false',
+  DASHBOARD_ENABLED: 'true', DASHBOARD_HOST: '127.0.0.1', DASHBOARD_AUTH_ENABLED: 'false',
   FUTURES_DASHBOARD_ENABLED: 'true', FUTURES_DASHBOARD_AUTH_ENABLED: 'false',
 });
 const spot = require('../index');
@@ -65,6 +65,13 @@ for (const [name, Engine, State] of [
     };
     await engine.reconcileSymbolUnlocked('BTC/USDT');
     assert.equal(reconciled, true);
+  });
+
+  test(`${name}: decimal-place price precision is converted to tick size`, () => {
+    const engine = Object.create(Engine.prototype);
+    const market = { precision: { price: 2 } };
+    assert.equal(engine.isOrderCloseToPriceLevel(100.01, [100], market), true);
+    assert.equal(engine.isOrderCloseToPriceLevel(100.5, [100], market), false);
   });
 
   test(`${name}: recover a closed order before processing its fill`, async () => {

@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { FibonacciRangeAdvisor } = require('./src/fibonacci-range-advisor');
 const { startFuturesDashboardServer } = require('./src/futures-dashboard-server');
+const { deferUnreconciledSell, retryUnreconciledSells } = require('./src/unreconciled-fills');
 const futuresTelegramCommandPath = path.resolve(process.cwd(), 'futures-telegram-command.json');
 
 // Tracks, per async call chain, which symbols' locks are currently held by
@@ -32,8 +33,13 @@ class Config {
   }
 
   static number(key, fallback) {
-    const parsed = Number(Config.get(key, fallback));
-    return Number.isFinite(parsed) ? parsed : fallback;
+    const value = process.env[key];
+    if (value === undefined || value.trim() === '') return fallback;
+    const parsed = Number(value.trim());
+    if (!Number.isFinite(parsed)) {
+      throw new Error(`${key} must be a numeric value`);
+    }
+    return parsed;
   }
 
   static boolean(key, fallback = true) {
@@ -847,6 +853,7 @@ class GridState {
         trailingUp: { shifts: 0, lastShiftAt: null },
         trailingDown: { shifts: 0, lastShiftAt: null },
         rangeTransition: null,
+        unreconciledSells: {},
       };
     }
     const sym = this.data.symbols[symbol];
@@ -872,6 +879,7 @@ class GridState {
     // instead of silently leaving cancelled-on-exchange orders paired with
     // stale local config/lastBuyByLevel. See resumeInterruptedRangeTransition().
     if (sym.rangeTransition === undefined) sym.rangeTransition = null;
+    if (!isPlainObject(sym.unreconciledSells)) sym.unreconciledSells = {};
     return sym;
   }
 
@@ -1277,6 +1285,9 @@ class FuturesGridEngine {
     this.pendingOrderLevels = new Set();
     this.rangeResetSymbols = new Set();
     this.roiExitedSymbols = new Set();
+    this.roiExitReasons = new Map();
+    this.roiExitAlertedSymbols = new Set();
+    this.roiCloseOrders = new Map();
     this.lastFundingSyncAt = new Map();
     this.telegramStatusTimer = null;
     this.telegramCommandTimer = null;
@@ -1361,7 +1372,7 @@ class FuturesGridEngine {
       } catch (err) {
         const message = String(err?.message || '').toLowerCase();
         if (!message.includes('no need to change') && !message.includes('-4046')) {
-          console.warn(`[FUTURES] ${symbol} could not set margin mode ${MARGIN_MODE}: ${err.message}`);
+          throw new Error(`Could not set margin mode ${MARGIN_MODE} for ${symbol}: ${err.message}`, { cause: err });
         }
       }
     }
@@ -1369,7 +1380,7 @@ class FuturesGridEngine {
       try {
         await retry(() => this.exchange.setLeverage(LEVERAGE, symbol));
       } catch (err) {
-        console.warn(`[FUTURES] ${symbol} could not set leverage ${LEVERAGE}x: ${err.message}`);
+        throw new Error(`Could not set leverage ${LEVERAGE}x for ${symbol}: ${err.message}`, { cause: err });
       }
     }
   }
@@ -2511,8 +2522,33 @@ class FuturesGridEngine {
     const positions = await retry(() => this.exchange.fetchPositions([symbol]));
     const positionAmount = this.getBaseFree(positions, symbol);
     if (positionAmount <= 0) {
+      this.roiCloseOrders?.delete(symbol);
       console.log(`[EXIT] ${symbol} has no active LONG position | ${reason}`);
       return null;
+    }
+
+    const pendingClose = this.roiCloseOrders?.get(symbol);
+    if (pendingClose) {
+      let status = 'unknown';
+      let filledAmount = 0;
+      if (this.exchange.fetchOrder && pendingClose.id) {
+        try {
+          const remote = await retry(() => this.exchange.fetchOrder(pendingClose.id, symbol));
+          status = String(remote?.status || remote?.info?.status || '').toLowerCase() || 'unknown';
+          filledAmount = Number(remote?.filled ?? remote?.info?.executedQty) || 0;
+        } catch (err) {
+          throw new Error(`${symbol} could not verify pending LONG close order ${pendingClose.id}: ${err.message}`, { cause: err });
+        }
+      }
+      if (['open', 'new', 'partially_filled', 'pending', 'unknown'].includes(status)) {
+        throw new Error(`${symbol} LONG close order ${pendingClose.id || 'unknown'} is still pending; refusing duplicate exit`);
+      }
+      if (status === 'closed' && pendingClose.amount > 0 && filledAmount >= pendingClose.amount - 1e-8) {
+        throw new Error(
+          `${symbol} LONG close order ${pendingClose.id || 'unknown'} was fully filled but the position is still reported active; refusing duplicate exit`
+        );
+      }
+      this.roiCloseOrders.delete(symbol);
     }
 
     const preciseAmount = Number(this.exchange.amountToPrecision(symbol, positionAmount));
@@ -2531,15 +2567,26 @@ class FuturesGridEngine {
         newClientOrderId: this.makeClientOrderId(symbol, 'sell', 'exit'),
       }
     ));
+    if (!this.roiCloseOrders) this.roiCloseOrders = new Map();
+    this.roiCloseOrders.set(symbol, {
+      id: order?.id ? String(order.id) : null,
+      amount: preciseAmount,
+    });
 
-    const remainingPositions = await retry(() => this.exchange.fetchPositions([symbol]));
-    const remainingAmount = this.getBaseFree(remainingPositions, symbol);
+    let remainingAmount = positionAmount;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const remainingPositions = await retry(() => this.exchange.fetchPositions([symbol]));
+      remainingAmount = this.getBaseFree(remainingPositions, symbol);
+      if (remainingAmount <= 0) break;
+      if (attempt < 4) await sleep(250);
+    }
     if (remainingAmount > 0) {
       throw new Error(
         `${symbol} LONG close order ${order?.id || 'unknown'} left ${remainingAmount} contracts active`
       );
     }
 
+    this.roiCloseOrders.delete(symbol);
     const symState = this.state.getSymbol(symbol);
     symState.lastBuyByLevel = {};
     await this.state.save();
@@ -2774,20 +2821,10 @@ class FuturesGridEngine {
     const buy = symState.lastBuyByLevel[buyLevelIndex];
     if (!buy) {
       console.warn(`[SELL] ${symbol} level ${levelIndex} has no corresponding buy record. Skipping profit calculation.`);
-      await this.sendAlert(this.formatFuturesTelegramMessage('FUTURES SELL FILLED - UNRECONCILED', [
-        ['Symbol', symbol],
-        ['Trade ID', this.getTradeId(trade)],
-        ['Order ID', trade.order],
-        ['Level', levelIndex],
-        ['Source Buy Level', buyLevelIndex],
-        ['Price', this.formatFuturesNumber(price, 8)],
-        ['Amount', this.formatFuturesNumber(amount, 8)],
-        ['Reason', 'Corresponding buy record was not found; accounting requires review'],
-      ]));
-      this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
-      this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
-      await this.state.save();
-      return;
+      return this.deferUnreconciledSell(
+        symbol, symState, trade, orderMeta,
+        'Corresponding buy record was not found; accounting requires review'
+      );
     }
 
     const base = this.getBaseAsset(symbol);
@@ -2801,20 +2838,16 @@ class FuturesGridEngine {
     const sellableAtBuy = buy.sellableAmount ?? totalBuyAmount;
     if (!(sellableAtBuy > 0)) {
       console.warn(`[SELL] ${symbol} level ${levelIndex} buy record has zero sellable amount. Skipping profit calculation.`);
-      await this.sendAlert(this.formatFuturesTelegramMessage('FUTURES SELL FILLED - UNRECONCILED', [
-        ['Symbol', symbol],
-        ['Trade ID', this.getTradeId(trade)],
-        ['Order ID', trade.order],
-        ['Level', levelIndex],
-        ['Source Buy Level', buyLevelIndex],
-        ['Price', this.formatFuturesNumber(price, 8)],
-        ['Amount', this.formatFuturesNumber(amount, 8)],
-        ['Reason', 'Tracked buy has zero sellable amount; accounting requires review'],
-      ]));
-      this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
-      this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
-      await this.state.save();
-      return;
+      return this.deferUnreconciledSell(
+        symbol, symState, trade, orderMeta,
+        'Tracked buy has zero sellable amount; accounting requires review'
+      );
+    }
+    if (amount > sellableAtBuy + 1e-8) {
+      return this.deferUnreconciledSell(
+        symbol, symState, trade, orderMeta,
+        `Sell amount ${amount} exceeds tracked sellable amount ${sellableAtBuy}`
+      );
     }
     const proportion = Math.min(amount / sellableAtBuy, 1.0);
     const allocatedBuyCost = buy.totalCostQuote * proportion;
@@ -2846,7 +2879,9 @@ class FuturesGridEngine {
     // Single atomic save for profit totals, buy-record update, order
     // bookkeeping, and the processed-trade marker - see handleBuyFill for
     // why this matters (no more partial-fill persistence on crash).
-    this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
+    const tradeId = this.getTradeId(trade);
+    if (symState.unreconciledSells) delete symState.unreconciledSells[tradeId];
+    this.state.markProcessedTradeLocal(symbol, tradeId);
     await this.state.save();
     await this.sendAlert(this.formatFuturesTelegramMessage('FUTURES SELL FILLED', [
       ['Symbol', symbol],
@@ -3175,6 +3210,7 @@ class FuturesGridEngine {
         await this.state.save();
       }
     }
+    await this.retryUnreconciledSells(symbol, levels, symState, openOrderIds);
     // Every trade in this batch was processed without throwing — safe to
     // advance the watermark now so these trades aren't re-fetched. If any
     // handler above had thrown, execution would never reach here, so
@@ -3192,34 +3228,71 @@ class FuturesGridEngine {
   }
 
   async enforceRangeExits(symbol, _currentPrice, positions = []) {
-    if (this.roiExitedSymbols?.has(symbol)) return false;
-
     const activeLong = this.getActiveLongPosition(positions, symbol);
+    const exitAlreadyRequested = this.roiExitedSymbols?.has(symbol) || false;
+    if (exitAlreadyRequested && !activeLong) {
+      this.roiCloseOrders?.delete(symbol);
+      const exit = this.roiExitReasons?.get(symbol) || {
+        exitType: 'exit',
+        triggerRoi: null,
+      };
+      const symState = this.state.getSymbol(symbol);
+      if (Object.keys(symState.lastBuyByLevel || {}).length) {
+        symState.lastBuyByLevel = {};
+        await this.state.save();
+      }
+      await this.sendRoiExitAlert(symbol, exit);
+      return false;
+    }
     const roiPct = this.getPositionRoiPct(activeLong);
-    if (!activeLong || roiPct === null) return true;
+    if (!activeLong || (!exitAlreadyRequested && roiPct === null)) return true;
 
     const takeProfitTriggered = TAKE_PROFIT_ROI_PCT > 0 && roiPct >= TAKE_PROFIT_ROI_PCT;
     const stopLossTriggered = STOP_LOSS_ROI_PCT < 0 && roiPct <= STOP_LOSS_ROI_PCT;
-    if (takeProfitTriggered || stopLossTriggered) {
-      const exitType = takeProfitTriggered ? 'take-profit' : 'stop-loss';
-      const targetRoi = takeProfitTriggered ? TAKE_PROFIT_ROI_PCT : STOP_LOSS_ROI_PCT;
-      const comparator = takeProfitTriggered ? '>=' : '<=';
-      const reason = `ROI ${exitType} ${roiPct.toFixed(2)}% ${comparator} ${targetRoi}%`;
+    if (exitAlreadyRequested || takeProfitTriggered || stopLossTriggered) {
+      if (!this.roiExitedSymbols) this.roiExitedSymbols = new Set();
+      if (!this.roiExitReasons) this.roiExitReasons = new Map();
+      if (!exitAlreadyRequested) {
+        const exitType = takeProfitTriggered ? 'take-profit' : 'stop-loss';
+        const targetRoi = takeProfitTriggered ? TAKE_PROFIT_ROI_PCT : STOP_LOSS_ROI_PCT;
+        const comparator = takeProfitTriggered ? '>=' : '<=';
+        this.roiExitReasons.set(symbol, {
+          exitType,
+          reason: `ROI ${exitType} ${roiPct.toFixed(2)}% ${comparator} ${targetRoi}%`,
+          triggerRoi: roiPct,
+        });
+        // Lock the symbol before sending the market close. If Binance position
+        // data is briefly stale, later cycles keep the grid paused while the
+        // existing close order is verified instead of submitting a duplicate.
+        this.roiExitedSymbols.add(symbol);
+      }
+      const exit = this.roiExitReasons.get(symbol) || {
+        exitType: 'exit',
+        reason: 'ROI exit retry',
+        triggerRoi: roiPct,
+      };
+      const { exitType, reason, triggerRoi } = exit;
       const cancelResult = await this.cancelGridOrders(symbol, reason);
       if (cancelResult.failed.length) {
         throw new Error(`Cannot execute ${reason}: ${cancelResult.failed.length} grid order(s) failed to cancel`);
       }
       await this.closeActiveLongPosition(symbol, reason);
-      if (!this.roiExitedSymbols) this.roiExitedSymbols = new Set();
-      this.roiExitedSymbols.add(symbol);
-      await this.sendAlert(this.formatFuturesTelegramMessage(`FUTURES ${exitType.toUpperCase()}`, [
-        ['Symbol', symbol],
-        ['ROI', `${this.formatFuturesNumber(roiPct, 2)}%`],
-        ['Position', 'LONG closed'],
-      ]));
+      await this.sendRoiExitAlert(symbol, { exitType, triggerRoi });
       return false;
     }
     return true;
+  }
+
+  async sendRoiExitAlert(symbol, { exitType = 'exit', triggerRoi = null } = {}) {
+    if (!this.roiExitAlertedSymbols) this.roiExitAlertedSymbols = new Set();
+    if (this.roiExitAlertedSymbols.has(symbol)) return;
+    const rows = [['Symbol', symbol]];
+    if (Number.isFinite(triggerRoi)) {
+      rows.push(['ROI', `${this.formatFuturesNumber(triggerRoi, 2)}%`]);
+    }
+    rows.push(['Position', 'LONG closed']);
+    await this.sendAlert(this.formatFuturesTelegramMessage(`FUTURES ${exitType.toUpperCase()}`, rows));
+    this.roiExitAlertedSymbols.add(symbol);
   }
 
   async withSymbolLock(symbol, fn) {
@@ -3600,7 +3673,10 @@ class FuturesGridEngine {
 
   isOrderCloseToPriceLevel(orderPrice, levels, market) {
     const price = Number(orderPrice);
-    const tickSize = market?.precision?.price || 0.00001;
+    const precisionPrice = Number(market?.precision?.price);
+    const tickSize = precisionPrice > 0
+      ? (precisionPrice >= 1 ? Math.pow(10, -precisionPrice) : precisionPrice)
+      : 0.00001;
     for (const level of levels) {
       if (Math.abs(price - level) <= tickSize * 1.5) return true;
     }
@@ -3840,6 +3916,11 @@ Multi-timeframe Fibonacci: ${FIBONACCI_RANGE_ADVISOR_ENABLED
     }
   }
 }
+
+Object.assign(FuturesGridEngine.prototype, {
+  deferUnreconciledSell,
+  retryUnreconciledSells,
+});
 
 async function bootstrap() {
   validateRuntimeConfiguration();

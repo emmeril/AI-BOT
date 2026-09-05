@@ -140,6 +140,65 @@ test('minus 100 percent ROI closes the complete active LONG position', async () 
   assert.equal(orders[0][2], 'sell');
 });
 
+test('ROI exit finalizes safely when position settlement is delayed to the next cycle', async () => {
+  const activePosition = {
+    symbol: 'BTC/USDT:USDT', side: 'long', contracts: 0.25, percentage: 100,
+  };
+  const { engine, orders } = makeEngine([
+    ...Array.from({ length: 6 }, () => [activePosition]),
+  ]);
+  const alerts = [];
+  engine.sendAlert = async message => alerts.push(message);
+
+  await assert.rejects(
+    engine.enforceRangeExits('BTC/USDT:USDT', 70000, [activePosition]),
+    /left 0\.25 contracts active/
+  );
+  assert.equal(orders.length, 1);
+  assert.equal(alerts.length, 0);
+
+  assert.equal(await engine.enforceRangeExits('BTC/USDT:USDT', 70000, []), false);
+  assert.equal(orders.length, 1);
+  assert.equal(alerts.length, 1);
+});
+
+test('ROI exit does not submit a duplicate market close while the first is pending', async () => {
+  const activePosition = {
+    symbol: 'BTC/USDT:USDT', side: 'long', contracts: 0.25, percentage: 100,
+  };
+  const { engine, orders } = makeEngine([
+    ...Array.from({ length: 6 }, () => [activePosition]),
+  ]);
+  engine.roiCloseOrders = new Map();
+
+  await assert.rejects(
+    engine.enforceRangeExits('BTC/USDT:USDT', 70000, [activePosition]),
+    /left 0\.25 contracts active/
+  );
+  await assert.rejects(
+    engine.enforceRangeExits('BTC/USDT:USDT', 70000, [activePosition]),
+    /refusing duplicate exit/
+  );
+  assert.equal(orders.length, 1);
+});
+
+test('ROI exit can close a remaining position after a prior close is filled partially', async () => {
+  const activePosition = {
+    symbol: 'BTC/USDT:USDT', side: 'long', contracts: 0.25, percentage: 100,
+  };
+  const { engine, orders } = makeEngine([
+    [activePosition],
+    [activePosition],
+    [activePosition],
+    [{ ...activePosition, contracts: 0 }],
+  ]);
+  engine.exchange.fetchOrder = async () => ({ status: 'closed', filled: 0.25 });
+  engine.roiCloseOrders = new Map([['BTC/USDT:USDT', { id: 'close-1', amount: 0.5 }]]);
+
+  assert.equal(await engine.enforceRangeExits('BTC/USDT:USDT', 70000, [activePosition]), false);
+  assert.equal(orders.length, 1);
+});
+
 test('ROI exit does not close a position when a grid order failed to cancel', async () => {
   const activePosition = {
     symbol: 'BTC/USDT:USDT',

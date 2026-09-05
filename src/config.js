@@ -17,8 +17,8 @@ class Config {
 
   static number(key, fallback) {
     const value = process.env[key];
-    if (value === undefined || value === '') return fallback;
-    const parsed = Number(value);
+    if (value === undefined || value.trim() === '') return fallback;
+    const parsed = Number(value.trim());
     if (!Number.isFinite(parsed)) {
       throw new Error(`${key} must be a numeric value`);
     }

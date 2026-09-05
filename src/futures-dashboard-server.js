@@ -12,20 +12,56 @@ const {
 } = require('./dashboard-server');
 
 const dashboardFile = path.join(__dirname, '..', 'public', 'dashboard.html');
-const enabled = String(process.env.FUTURES_DASHBOARD_ENABLED ?? 'true').toLowerCase() !== 'false';
-const host = process.env.FUTURES_DASHBOARD_HOST || '0.0.0.0';
-const port = Math.max(Number(process.env.FUTURES_DASHBOARD_PORT || 3988), 1);
-const refreshSeconds = Math.max(Number(process.env.FUTURES_DASHBOARD_REFRESH_SECONDS || 5), 2);
+const TRUE_VALUES = new Set(['true', '1', 'yes', 'on']);
+const FALSE_VALUES = new Set(['false', '0', 'no', 'off']);
+function envBoolean(key, fallback) {
+  const value = process.env[key];
+  if (value === undefined || value.trim() === '') return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (TRUE_VALUES.has(normalized)) return true;
+  if (FALSE_VALUES.has(normalized)) return false;
+  throw new Error(`${key} must be a boolean value`);
+}
+function envNumber(key, fallback, minimum = 0) {
+  const value = process.env[key];
+  if (value === undefined || value.trim() === '') return fallback;
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed) || parsed < minimum) {
+    throw new Error(`${key} must be a numeric value >= ${minimum}`);
+  }
+  return parsed;
+}
+
+const enabled = envBoolean('FUTURES_DASHBOARD_ENABLED', true);
+const host = process.env.FUTURES_DASHBOARD_HOST || '127.0.0.1';
+const port = envNumber('FUTURES_DASHBOARD_PORT', 3988, 1);
+if (!Number.isInteger(port) || port > 65535) throw new Error('FUTURES_DASHBOARD_PORT must be an integer between 1 and 65535');
+const refreshSeconds = Math.max(envNumber('FUTURES_DASHBOARD_REFRESH_SECONDS', 5, 0), 2);
 const timeframe = process.env.FUTURES_DASHBOARD_CHART_TIMEFRAME || '1m';
-const chartLimit = Math.max(Number(process.env.FUTURES_DASHBOARD_CHART_LIMIT || 120), 20);
-const authEnabled = String(
-  process.env.FUTURES_DASHBOARD_AUTH_ENABLED ?? process.env.DASHBOARD_AUTH_ENABLED ?? 'false'
-).toLowerCase() === 'true';
+const chartLimit = Math.max(envNumber('FUTURES_DASHBOARD_CHART_LIMIT', 120, 0), 20);
+const authEnabled = process.env.FUTURES_DASHBOARD_AUTH_ENABLED !== undefined
+  ? envBoolean('FUTURES_DASHBOARD_AUTH_ENABLED', false)
+  : envBoolean('DASHBOARD_AUTH_ENABLED', false);
 const authUsername = process.env.FUTURES_DASHBOARD_USERNAME || process.env.DASHBOARD_USERNAME || '';
 const authPassword = process.env.FUTURES_DASHBOARD_PASSWORD || process.env.DASHBOARD_PASSWORD || '';
-const authSessionHours = Math.max(Number(
-  process.env.FUTURES_DASHBOARD_SESSION_HOURS || process.env.DASHBOARD_SESSION_HOURS || 12
-), 1);
+const authSessionHours = Math.max(
+  process.env.FUTURES_DASHBOARD_SESSION_HOURS !== undefined
+    ? envNumber('FUTURES_DASHBOARD_SESSION_HOURS', 12, 0)
+    : envNumber('DASHBOARD_SESSION_HOURS', 12, 0),
+  1
+);
+
+function isLoopbackHost(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/^\[(.*)\]$/, '$1');
+  return normalized === 'localhost' || normalized === '::1' ||
+    normalized === '0:0:0:0:0:0:0:1' || /^127(?:\.\d{1,3}){3}$/.test(normalized);
+}
+
+function validateDashboardExposure(bindHost, authenticationEnabled) {
+  if (!isLoopbackHost(bindHost) && !authenticationEnabled) {
+    throw new Error('Futures dashboard authentication is required when FUTURES_DASHBOARD_HOST is not loopback');
+  }
+}
 
 function positionMetrics(position, leverage, openPositionFees = 0) {
   if (!position) return null;
@@ -122,6 +158,7 @@ function sendJson(response, status, payload) {
 
 function startFuturesDashboardServer(engine) {
   if (!enabled || engine.futuresDashboardServer) return null;
+  validateDashboardExposure(host, authEnabled);
   const auth = createDashboardAuth({
     enabled: authEnabled,
     username: authUsername,
@@ -164,4 +201,10 @@ function startFuturesDashboardServer(engine) {
   return server;
 }
 
-module.exports = { buildFuturesDashboardSnapshot, positionMetrics, startFuturesDashboardServer };
+module.exports = {
+  buildFuturesDashboardSnapshot,
+  isLoopbackHost,
+  positionMetrics,
+  startFuturesDashboardServer,
+  validateDashboardExposure,
+};

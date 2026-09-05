@@ -71,6 +71,7 @@ const { FibonacciRangeAdvisor } = require('./fibonacci-range-advisor');
 const { applyTelegramMethods } = require('./telegram-controller');
 const { applyTrailingRangeMethods } = require('./trailing-range');
 const { applyOrderExecutionMethods } = require('./order-execution');
+const { applyUnreconciledFillMethods } = require('./unreconciled-fills');
 const { startDashboardServer } = require('./dashboard-server');
 const { sleep, retry, roundNumber, numberOrZero } = require('./utils');
 
@@ -1021,20 +1022,10 @@ class SpotGridEngine {
         `[SELL] ${symbol} level ${levelIndex} sourceBuy=${buyLevelIndex} has no corresponding buy record. ` +
         `Skipping profit calculation.`
       );
-      await this.sendAlert(this.formatTelegramMessage('SPOT SELL FILLED - UNRECONCILED', [
-        ['Symbol', symbol],
-        ['Trade ID', this.getTradeId(trade)],
-        ['Order ID', trade.order],
-        ['Level', levelIndex],
-        ['Source Buy Level', buyLevelIndex],
-        ['Price', this.formatPrice(price)],
-        ['Amount', this.formatAmount(amount)],
-        ['Reason', 'Corresponding buy record was not found; accounting requires review'],
-      ]));
-      this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
-      this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
-      await this.state.save();
-      return;
+      return this.deferUnreconciledSell(
+        symbol, symState, trade, orderMeta,
+        'Corresponding buy record was not found; accounting requires review'
+      );
     }
 
     const base = this.getBaseAsset(symbol);
@@ -1052,20 +1043,16 @@ class SpotGridEngine {
     const sellableAtBuy = buy.sellableAmount ?? totalBuyAmount;
     if (!(sellableAtBuy > 0)) {
       console.warn(`[SELL] ${symbol} level ${levelIndex} buy record has zero sellable amount. Skipping profit calculation.`);
-      await this.sendAlert(this.formatTelegramMessage('SPOT SELL FILLED - UNRECONCILED', [
-        ['Symbol', symbol],
-        ['Trade ID', this.getTradeId(trade)],
-        ['Order ID', trade.order],
-        ['Level', levelIndex],
-        ['Source Buy Level', buyLevelIndex],
-        ['Price', this.formatPrice(price)],
-        ['Amount', this.formatAmount(amount)],
-        ['Reason', 'Tracked buy has zero sellable amount; accounting requires review'],
-      ]));
-      this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
-      this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
-      await this.state.save();
-      return;
+      return this.deferUnreconciledSell(
+        symbol, symState, trade, orderMeta,
+        'Tracked buy has zero sellable amount; accounting requires review'
+      );
+    }
+    if (consumedSellable > sellableAtBuy + 1e-8) {
+      return this.deferUnreconciledSell(
+        symbol, symState, trade, orderMeta,
+        `Sell amount ${consumedSellable} exceeds tracked sellable amount ${sellableAtBuy}`
+      );
     }
     // A base-asset sell commission consumes additional tracked inventory.
     // Its acquisition cost belongs in this fill's cost basis; treating the
@@ -1097,7 +1084,9 @@ class SpotGridEngine {
     // Single atomic save for profit totals, buy-record update, order
     // bookkeeping, and the processed-trade marker - see handleBuyFill for
     // why this matters (no more partial-fill persistence on crash).
-    this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
+    const tradeId = this.getTradeId(trade);
+    if (symState.unreconciledSells) delete symState.unreconciledSells[tradeId];
+    this.state.markProcessedTradeLocal(symbol, tradeId);
     await this.state.save();
     await this.sendAlert(this.formatTelegramMessage('SPOT SELL FILLED', [
       ['Symbol', symbol],
@@ -1334,6 +1323,7 @@ class SpotGridEngine {
         await this.state.save();
       }
     }
+    await this.retryUnreconciledSells(symbol, levels, symState, openOrderIds);
     // Every trade in this batch was processed without throwing - safe to
     // advance the watermark now so these trades aren't re-fetched. If any
     // handler above had thrown, execution would never reach here, so
@@ -1781,7 +1771,10 @@ class SpotGridEngine {
 
   isOrderCloseToPriceLevel(orderPrice, levels, market) {
     const price = Number(orderPrice);
-    const tickSize = market?.precision?.price || 0.00001;
+    const precisionPrice = Number(market?.precision?.price);
+    const tickSize = precisionPrice > 0
+      ? (precisionPrice >= 1 ? Math.pow(10, -precisionPrice) : precisionPrice)
+      : 0.00001;
     for (const level of levels) {
       if (Math.abs(price - level) <= tickSize * 1.5) return true;
     }
@@ -1859,5 +1852,6 @@ Multi-timeframe Fibonacci: ${FIBONACCI_RANGE_ADVISOR_ENABLED
 applyTrailingRangeMethods(SpotGridEngine);
 applyOrderExecutionMethods(SpotGridEngine);
 applyTelegramMethods(SpotGridEngine);
+applyUnreconciledFillMethods(SpotGridEngine);
 
 module.exports = { SpotGridEngine };

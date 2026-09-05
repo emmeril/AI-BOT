@@ -179,9 +179,8 @@ test('spot sends an unreconciled alert when a SELL fill has no buy record', asyn
   const engine = Object.create(SpotGridEngine.prototype);
   const symState = { orders: {}, lastBuyByLevel: {} };
   let alert = '';
-  let processed = '';
   engine.state = {
-    markProcessedTradeLocal: (_symbol, id) => { processed = id; },
+    markProcessedTradeLocal: () => { throw new Error('unreconciled sell must not be marked processed'); },
     save: async () => {},
   };
   engine.sendAlert = async message => { alert = message; };
@@ -199,5 +198,25 @@ test('spot sends an unreconciled alert when a SELL fill has no buy record', asyn
   );
 
   assert.equal(alert, 'SPOT SELL FILLED - UNRECONCILED');
-  assert.equal(processed, 'sell-1');
+  assert.ok(symState.unreconciledSells['sell-1']);
+});
+
+test('spot retries an unreconciled sell with the active grid levels', async () => {
+  const engine = Object.create(SpotGridEngine.prototype);
+  const symState = {
+    orders: {},
+    unreconciledSells: {
+      'sell-1': {
+        trade: { id: 'sell-1', order: 'order-1', timestamp: 1, price: 110, amount: 1, side: 'sell' },
+        orderMeta: { levelIndex: 2, sourceBuyLevelIndex: 1, refillCount: 0 },
+      },
+    },
+  };
+  let seenLevels;
+  engine.handleSellFill = async (_symbol, levels) => { seenLevels = levels; delete symState.unreconciledSells['sell-1']; };
+
+  await engine.retryUnreconciledSells('BTC/USDT', [90, 100, 110], symState, new Set());
+
+  assert.deepEqual(seenLevels, [90, 100, 110]);
+  assert.deepEqual(symState.unreconciledSells, {});
 });

@@ -293,9 +293,8 @@ test('futures sends an unreconciled alert when a SELL fill has no buy record', a
   const engine = Object.create(FuturesGridEngine.prototype);
   const symState = { orders: {}, lastBuyByLevel: {} };
   let alert = '';
-  let processed = '';
   engine.state = {
-    markProcessedTradeLocal: (_symbol, id) => { processed = id; },
+    markProcessedTradeLocal: () => { throw new Error('unreconciled sell must not be marked processed'); },
     save: async () => {},
   };
   engine.sendAlert = async message => { alert = message; };
@@ -312,5 +311,5 @@ test('futures sends an unreconciled alert when a SELL fill has no buy record', a
   );
 
   assert.equal(alert, 'FUTURES SELL FILLED - UNRECONCILED');
-  assert.equal(processed, 'sell-1');
+  assert.ok(symState.unreconciledSells['sell-1']);
 });
