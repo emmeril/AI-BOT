@@ -1193,14 +1193,29 @@ class SpotGridEngine {
     const since = symState.lastTradeTimestamp || 0;
     let allTrades = [];
     let from = since;
+    let fromId = null;
     let maxIterations = 10;
     let iteration = 0;
     while (iteration < maxIterations) {
-      const trades = await retry(() => this.exchange.fetchMyTrades(symbol, from, TRADE_FETCH_LIMIT));
+      const trades = await retry(() => fromId === null
+        ? this.exchange.fetchMyTrades(symbol, from, TRADE_FETCH_LIMIT)
+        : this.exchange.fetchMyTrades(symbol, undefined, TRADE_FETCH_LIMIT, { fromId }));
       if (!trades.length) break;
       allTrades = allTrades.concat(trades);
       const lastTimestamp = trades[trades.length - 1].timestamp;
       if (trades.length < TRADE_FETCH_LIMIT) break;
+      const lastId = String(trades[trades.length - 1].id ?? '');
+      if (/^\d+$/.test(lastId)) {
+        // Binance IDs advance even when a page ends within one millisecond.
+        const nextId = (BigInt(lastId) + 1n).toString();
+        if (fromId !== null && BigInt(nextId) <= BigInt(fromId)) {
+          throw new Error(`Trade pagination did not advance for ${symbol}`);
+        }
+        fromId = nextId;
+        iteration++;
+        await sleep(200);
+        continue;
+      }
       if (lastTimestamp === from) {
         // A full page of trades all share the same millisecond timestamp.
         // We cannot safely advance `from` to lastTimestamp+1 because there
@@ -1217,7 +1232,7 @@ class SpotGridEngine {
         // Return what we have but DO NOT update lastTradeTimestamp.
         return tradeFetchResult(allTrades, true);
       }
-      from = lastTimestamp + 1;
+      from = lastTimestamp;
       iteration++;
       await sleep(200);
     }
@@ -1275,12 +1290,18 @@ class SpotGridEngine {
       if (!orderMeta) {
         // clientOrderId format:
         // grid-<market>-<s|b>-<levelIndex>[-b<sourceBuyLevel>]-r<refillCount>-<nonce>
-        const clientId = String(
+        let clientId = String(
           trade.info?.clientOrderId ||
           trade.info?.origClientOrderId ||
           trade.clientOrderId ||
           ''
         );
+        if (!clientId) {
+          if (!this.exchange.fetchOrder) throw new Error(`Cannot recover ${symbol} filled order ${tradeOrderId}`);
+          const closedOrder = await retry(() => this.exchange.fetchOrder(tradeOrderId, symbol));
+          clientId = this.getOrderClientId(closedOrder);
+          if (!clientId) throw new Error(`Missing clientOrderId for ${symbol} filled order ${tradeOrderId}`);
+        }
         const recoveredMeta = this.getBotOrderMeta({ clientOrderId: clientId });
         if (recoveredMeta) {
           orderMeta = recoveredMeta;
@@ -1431,7 +1452,7 @@ class SpotGridEngine {
     // Fetch openOrders once here and pass it into handleFilledTrades so we avoid a
     // redundant exchange round-trip (handleFilledTrades previously fetched its own copy).
     let freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
-    await this.handleFilledTrades(symbol, levels, freshOpenOrders);
+    await this.handleFilledTrades(symbol, canContinue ? levels : [], freshOpenOrders);
 
     if (!canContinue) {
       console.log(`[SYNC] ${symbol} trading halted (stop-loss/take-profit); no new orders will be placed`);

@@ -796,11 +796,15 @@ class GridState {
 
   load() {
     try {
-      if (fs.existsSync(GRID_STATE_PATH)) {
-        return GridState.normalize(JSON.parse(fs.readFileSync(GRID_STATE_PATH, 'utf8')));
+      const data = JSON.parse(fs.readFileSync(GRID_STATE_PATH, 'utf8'));
+      if (!isPlainObject(data) || !isPlainObject(data.symbols)) {
+        throw new Error('Invalid state structure');
       }
+      return GridState.normalize(data);
     } catch (err) {
-      console.warn('[STATE] Failed to read grid state, starting fresh:', err.message);
+      if (err.code !== 'ENOENT') {
+        throw new Error(`Cannot load grid state ${GRID_STATE_PATH}: ${err.message}`, { cause: err });
+      }
     }
     return GridState.createEmpty();
   }
@@ -3012,14 +3016,29 @@ class FuturesGridEngine {
     const since = lastTradeTimestamp > 0 ? lastTradeTimestamp : undefined;
     let allTrades = [];
     let from = since;
+    let fromId = null;
     let maxIterations = 10;
     let iteration = 0;
     while (iteration < maxIterations) {
-      const trades = await retry(() => this.exchange.fetchMyTrades(symbol, from, TRADE_FETCH_LIMIT));
+      const trades = await retry(() => fromId === null
+        ? this.exchange.fetchMyTrades(symbol, from, TRADE_FETCH_LIMIT)
+        : this.exchange.fetchMyTrades(symbol, undefined, TRADE_FETCH_LIMIT, { fromId }));
       if (!trades.length) break;
       allTrades = allTrades.concat(trades);
       const lastTimestamp = trades[trades.length - 1].timestamp;
       if (trades.length < TRADE_FETCH_LIMIT) break;
+      const lastId = String(trades[trades.length - 1].id ?? '');
+      if (/^\d+$/.test(lastId)) {
+        // Binance IDs advance even when a page ends within one millisecond.
+        const nextId = (BigInt(lastId) + 1n).toString();
+        if (fromId !== null && BigInt(nextId) <= BigInt(fromId)) {
+          throw new Error(`Trade pagination did not advance for ${symbol}`);
+        }
+        fromId = nextId;
+        iteration++;
+        await sleep(200);
+        continue;
+      }
       if (lastTimestamp === from) {
         // A full page of trades all share the same millisecond timestamp.
         // We cannot safely advance `from` to lastTimestamp+1 because there
@@ -3036,7 +3055,7 @@ class FuturesGridEngine {
         // Return what we have but DO NOT update lastTradeTimestamp.
         return tradeFetchResult(allTrades, true);
       }
-      from = lastTimestamp + 1;
+      from = lastTimestamp;
       iteration++;
       await sleep(200);
     }
@@ -3113,12 +3132,13 @@ class FuturesGridEngine {
               trade.info = { ...(trade.info || {}), clientOrderId: recoveredClientId };
             }
           } catch (err) {
-            console.warn(`[RECOVER] ${symbol} could not fetch filled order ${tradeOrderId}: ${err.message}`);
+            throw new Error(`Cannot recover ${symbol} filled order ${tradeOrderId}: ${err.message}`, { cause: err });
           }
         }
         const resolvedClientId = String(
           trade.info?.clientOrderId || trade.clientOrderId || clientId
         );
+        if (!resolvedClientId) throw new Error(`Missing clientOrderId for ${symbol} filled order ${tradeOrderId}`);
         const recoveredMeta = this.getBotOrderMeta({ clientOrderId: resolvedClientId });
         if (recoveredMeta) {
           orderMeta = recoveredMeta;
@@ -3285,7 +3305,7 @@ class FuturesGridEngine {
     // Fetch openOrders once here and pass it into handleFilledTrades so we avoid a
     // redundant exchange round-trip (handleFilledTrades previously fetched its own copy).
     let freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
-    await this.handleFilledTrades(symbol, levels, freshOpenOrders);
+    await this.handleFilledTrades(symbol, canContinue ? levels : [], freshOpenOrders);
     await this.syncFundingHistory(symbol);
 
     if (!canContinue) {

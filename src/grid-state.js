@@ -65,11 +65,15 @@ class GridState {
 
   load() {
     try {
-      if (fs.existsSync(GRID_STATE_PATH)) {
-        return GridState.normalize(JSON.parse(fs.readFileSync(GRID_STATE_PATH, 'utf8')));
+      const data = JSON.parse(fs.readFileSync(GRID_STATE_PATH, 'utf8'));
+      if (!isPlainObject(data) || !isPlainObject(data.symbols)) {
+        throw new Error('Invalid state structure');
       }
+      return GridState.normalize(data);
     } catch (err) {
-      console.warn('[STATE] Failed to read grid state, starting fresh:', err.message);
+      if (err.code !== 'ENOENT') {
+        throw new Error(`Cannot load grid state ${GRID_STATE_PATH}: ${err.message}`, { cause: err });
+      }
     }
     return GridState.createEmpty();
   }

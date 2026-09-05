@@ -131,8 +131,14 @@ function startFuturesDashboardServer(engine) {
     dashboardName: 'Dashboard Futures',
   });
   const server = http.createServer(async (request, response) => {
-    const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
     try {
+      let url;
+      try {
+        url = new URL(request.url, 'http://localhost');
+      } catch {
+        sendJson(response, 400, { error: 'Invalid request URL' });
+        return;
+      }
       if (await auth.handleRoute(request, response, url)) return;
       if (!auth.requireAuthentication(request, response, url)) return;
       if (request.method === 'GET' && url.pathname === '/api/dashboard') {
@@ -146,7 +152,8 @@ function startFuturesDashboardServer(engine) {
       }
       sendJson(response, 404, { error: 'Not found' });
     } catch (err) {
-      sendJson(response, 503, { error: 'Futures dashboard data unavailable', detail: err.message });
+      console.error('[FUTURES DASHBOARD]', err.message);
+      sendJson(response, 503, { error: 'Futures dashboard data unavailable' });
     }
   });
   server.on('error', err => console.error('[FUTURES DASHBOARD]', err.message));

@@ -9,8 +9,13 @@ process.env.GRID_STATE_FILE = '/dev/null/grid-state-futures.json';
 const { FuturesGridEngine, GridState } = require('../futures-grid');
 
 test('futures state persistence errors propagate to the trading cycle', async () => {
-  const state = new GridState();
+  const state = Object.create(GridState.prototype);
+  state.data = GridState.createEmpty();
   await assert.rejects(state.save(), /ENOTDIR|not a directory/i);
+});
+
+test('futures refuses startup when the state path is unreadable', () => {
+  assert.throws(() => new GridState(), /Cannot load grid state/);
 });
 
 test('futures state normalizes per-symbol fill counters', () => {
