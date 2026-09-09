@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  buildDashboardSnapshot,
   marketAmountText,
   marketPrice,
   marketPriceText,
@@ -15,6 +16,37 @@ const {
   validateDashboardExposure,
 } = require('../src/futures-dashboard-server');
 const { telegramMethods } = require('../src/telegram-controller');
+
+test('spot dashboard reports total, free and locked balances for the selected pair', async () => {
+  const { SYMBOLS } = require('../src/config');
+  const symbol = SYMBOLS[0];
+  const [base, quote] = symbol.split('/');
+  const engine = {
+    state: { getSymbol: () => ({ orders: {}, config: {} }), data: { totals: {} } },
+    exchange: {
+      fetchTicker: async () => ({ last: 1 }),
+      fetchOpenOrders: async () => [],
+      fetchOHLCV: async () => [],
+      fetchBalance: async () => ({
+        free: { [quote]: '12.5', [base]: '0.00001234' },
+        used: { [quote]: '7.5', [base]: '0.00000001' },
+        total: { [quote]: '20', [base]: '0.00001235' },
+      }),
+    },
+    getQuoteAsset: () => quote,
+    getBotOrderLevel: () => null,
+    circuitAllows: () => true,
+    canPlaceNewOrders: () => true,
+  };
+  const snapshot = await buildDashboardSnapshot(engine, symbol);
+  assert.deepEqual(snapshot.balance.assets, [
+    { asset: quote, free: 12.5, used: 7.5, total: 20 },
+    { asset: base, free: 0.00001234, used: 0.00000001, total: 0.00001235 },
+  ]);
+  engine.exchange.fetchBalance = async () => ({});
+  const empty = await buildDashboardSnapshot(engine, symbol);
+  assert.ok(empty.balance.assets.every(asset => asset.total === 0 && asset.free === 0 && asset.used === 0));
+});
 
 test('spot Telegram messages separate their title from details', () => {
   assert.equal(telegramMethods.formatTelegramMessage('SPOT BUY FILLED', [

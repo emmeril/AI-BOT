@@ -81,10 +81,11 @@ function normalizeOrder(engine, symbol, order, stateOrder) {
 async function buildDashboardSnapshot(engine, requestedSymbol) {
   const symbol = SYMBOLS.includes(requestedSymbol) ? requestedSymbol : SYMBOLS[0];
   const symState = engine.state.getSymbol(symbol);
-  const [ticker, exchangeOrders, candles] = await Promise.all([
+  const [ticker, exchangeOrders, candles, balance] = await Promise.all([
     retry(() => engine.exchange.fetchTicker(symbol)),
     retry(() => engine.exchange.fetchOpenOrders(symbol)),
     retry(() => engine.exchange.fetchOHLCV(symbol, DASHBOARD_CHART_TIMEFRAME, undefined, DASHBOARD_CHART_LIMIT)),
+    retry(() => engine.exchange.fetchBalance()),
   ]);
   const managedIds = new Set(Object.keys(symState.orders));
   const orders = exchangeOrders
@@ -104,6 +105,16 @@ async function buildDashboardSnapshot(engine, requestedSymbol) {
     tradingEnabled: engine.canPlaceNewOrders(),
     symbols: SYMBOLS,
     selectedSymbol: symbol,
+    balance: {
+      assets: [engine.getQuoteAsset(symbol), symbol.split('/')[0]].map(asset => {
+        const free = numberOrZero(balance?.free?.[asset] ?? balance?.[asset]?.free);
+        const used = numberOrZero(balance?.used?.[asset] ?? balance?.[asset]?.used);
+        return {
+          asset, free, used,
+          total: numberOrZero(balance?.total?.[asset] ?? balance?.[asset]?.total ?? (free + used)),
+        };
+      }),
+    },
     market: {
       price: marketPrice(engine, symbol, ticker.last),
       priceText: marketPriceText(engine, symbol, ticker.last),
