@@ -6,6 +6,7 @@ const https = require('https');
 const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { FibonacciRangeAdvisor } = require('./src/fibonacci-range-advisor');
+const { FibonacciDirectionAnalyzer } = require('./src/fibonacci-direction-analyzer');
 const { startFuturesDashboardServer } = require('./src/futures-dashboard-server');
 const { deferUnreconciledSell, retryUnreconciledSells } = require('./src/unreconciled-fills');
 const futuresTelegramCommandPath = path.resolve(process.cwd(), 'futures-telegram-command.json');
@@ -164,6 +165,19 @@ const FIBONACCI_RANGE_ADVISOR_APPLY_ON = Config.get('FIBONACCI_RANGE_ADVISOR_APP
 const FIBONACCI_RANGE_ADVISOR_ALLOW_TRAILING = Config.boolean('FIBONACCI_RANGE_ADVISOR_ALLOW_TRAILING', false);
 const FIBONACCI_RANGE_ADVISOR_STATE_FILE = Config.get('FIBONACCI_RANGE_ADVISOR_STATE_FILE', 'fibonacci-range-advisor-futures.json');
 const FIBONACCI_RANGE_ADVISOR_STATE_PATH = path.resolve(process.cwd(), FIBONACCI_RANGE_ADVISOR_STATE_FILE);
+
+// Deterministic direction classifier for Futures. It never places/closes an
+// order itself; LEVEL_BIAS mode only changes how many selected Fibonacci
+// confluence levels sit below versus above current price. REPORT_ONLY is inert.
+const FIBONACCI_DIRECTION_ANALYZER_ENABLED = Config.boolean('FIBONACCI_DIRECTION_ANALYZER_ENABLED', false);
+const FIBONACCI_DIRECTION_TIMEFRAMES = Config.list('FIBONACCI_DIRECTION_TIMEFRAMES', '15m,1h,4h');
+const FIBONACCI_DIRECTION_CANDLE_LIMIT = Config.number('FIBONACCI_DIRECTION_CANDLE_LIMIT', 100);
+const FIBONACCI_DIRECTION_PIVOT_LOOKBACK = Config.number('FIBONACCI_DIRECTION_PIVOT_LOOKBACK', 2);
+const FIBONACCI_DIRECTION_MIN_TIMEFRAMES = Config.number('FIBONACCI_DIRECTION_MIN_TIMEFRAMES', 2);
+const FIBONACCI_DIRECTION_CONFIRMATIONS = Config.number('FIBONACCI_DIRECTION_CONFIRMATIONS', 2);
+const FIBONACCI_DIRECTION_MIN_CONFIDENCE = Config.number('FIBONACCI_DIRECTION_MIN_CONFIDENCE', 0.65);
+const FIBONACCI_DIRECTION_LEVEL_BIAS_PCT = Config.number('FIBONACCI_DIRECTION_LEVEL_BIAS_PCT', 10);
+const FIBONACCI_DIRECTION_APPLY_MODE = Config.get('FIBONACCI_DIRECTION_APPLY_MODE', 'REPORT_ONLY').toUpperCase();
 
 // ------------------------------
 //  Smart Grid Range Advisor (Gemini AI)
@@ -437,6 +451,9 @@ function validateRuntimeConfiguration() {
   requirePositive('LEVERAGE', LEVERAGE);
   requireNonNegative('BINANCE_FUTURES_MAKER_FEE_RATE', BINANCE_FUTURES_MAKER_FEE_RATE);
   requireNonNegative('GRID_MIN_NET_PROFIT_PCT', GRID_MIN_NET_PROFIT_PCT);
+  if (FIBONACCI_DIRECTION_ANALYZER_ENABLED && !FIBONACCI_RANGE_ADVISOR_ENABLED) {
+    errors.push('FIBONACCI_DIRECTION_ANALYZER_ENABLED requires FIBONACCI_RANGE_ADVISOR_ENABLED=true');
+  }
   if (FIBONACCI_RANGE_ADVISOR_ENABLED) {
     if (!FIBONACCI_RANGE_ADVISOR_TIMEFRAMES.length) errors.push('FIBONACCI_RANGE_ADVISOR_TIMEFRAMES must not be empty');
     if (!FIBONACCI_RANGE_ADVISOR_RATIOS.length ||
@@ -445,6 +462,22 @@ function validateRuntimeConfiguration() {
     }
     if (!['AUTO_RANGE_ONLY', 'ALWAYS'].includes(FIBONACCI_RANGE_ADVISOR_APPLY_ON)) {
       errors.push('FIBONACCI_RANGE_ADVISOR_APPLY_ON must be AUTO_RANGE_ONLY or ALWAYS');
+    }
+    if (FIBONACCI_DIRECTION_ANALYZER_ENABLED) {
+      if (!FIBONACCI_DIRECTION_TIMEFRAMES.length) errors.push('FIBONACCI_DIRECTION_TIMEFRAMES must not be empty');
+      requireInteger('FIBONACCI_DIRECTION_CANDLE_LIMIT', FIBONACCI_DIRECTION_CANDLE_LIMIT, 55);
+      requireInteger('FIBONACCI_DIRECTION_PIVOT_LOOKBACK', FIBONACCI_DIRECTION_PIVOT_LOOKBACK, 1);
+      requireInteger('FIBONACCI_DIRECTION_MIN_TIMEFRAMES', FIBONACCI_DIRECTION_MIN_TIMEFRAMES, 1);
+      requireInteger('FIBONACCI_DIRECTION_CONFIRMATIONS', FIBONACCI_DIRECTION_CONFIRMATIONS, 1);
+      if (!(FIBONACCI_DIRECTION_MIN_CONFIDENCE >= 0 && FIBONACCI_DIRECTION_MIN_CONFIDENCE <= 1)) {
+        errors.push('FIBONACCI_DIRECTION_MIN_CONFIDENCE must be between 0 and 1');
+      }
+      if (!(FIBONACCI_DIRECTION_LEVEL_BIAS_PCT >= 0 && FIBONACCI_DIRECTION_LEVEL_BIAS_PCT <= 40)) {
+        errors.push('FIBONACCI_DIRECTION_LEVEL_BIAS_PCT must be between 0 and 40');
+      }
+      if (!['REPORT_ONLY', 'LEVEL_BIAS'].includes(FIBONACCI_DIRECTION_APPLY_MODE)) {
+        errors.push('FIBONACCI_DIRECTION_APPLY_MODE must be REPORT_ONLY or LEVEL_BIAS');
+      }
     }
   }
   if (STOP_LOSS_ROI_PCT > 0) errors.push('GRID_STOP_LOSS_PRICE must be negative or 0 for futures ROI');
@@ -1296,6 +1329,7 @@ class FuturesGridEngine {
     // for stuck investment warning deduplication
     this.stuckInvestmentWarned = new Set();
     this.sellTargetWarnings = new Set();
+    this.lastFibonacciDirectionLog = new Map();
     this.rangeAdvisor = new GeminiRangeAdvisor(this.exchange);
     const targetNetRate = GRID_MIN_NET_PROFIT_PCT / 100;
     const minimumStepRatio = (1 + targetNetRate + BINANCE_FUTURES_MAKER_FEE_RATE) /
@@ -1313,7 +1347,17 @@ class FuturesGridEngine {
       rebuildCooldownMs: FIBONACCI_RANGE_ADVISOR_REBUILD_COOLDOWN_MS,
       levelCount: GRID_COUNT + 1,
       minimumStepRatio,
+      directionLevelBiasPct: FIBONACCI_DIRECTION_LEVEL_BIAS_PCT,
       statePath: FIBONACCI_RANGE_ADVISOR_STATE_PATH,
+    });
+    this.fibonacciDirectionAnalyzer = new FibonacciDirectionAnalyzer(this.exchange, {
+      enabled: FIBONACCI_DIRECTION_ANALYZER_ENABLED,
+      timeframes: FIBONACCI_DIRECTION_TIMEFRAMES,
+      candleLimit: FIBONACCI_DIRECTION_CANDLE_LIMIT,
+      candleCloseBufferMs: FIBONACCI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS,
+      pivotLookback: FIBONACCI_DIRECTION_PIVOT_LOOKBACK,
+      minimumTimeframes: FIBONACCI_DIRECTION_MIN_TIMEFRAMES,
+      confirmations: FIBONACCI_DIRECTION_CONFIRMATIONS,
     });
   }
 
@@ -1537,8 +1581,33 @@ class FuturesGridEngine {
 
     const fibonacciAllowed = FIBONACCI_RANGE_ADVISOR_ENABLED &&
       (FIBONACCI_RANGE_ADVISOR_APPLY_ON === 'ALWAYS' || !manualRange);
+    let fibonacciDirection = null;
+    let appliedDirection = 'RANGING';
+    if (fibonacciAllowed && FIBONACCI_DIRECTION_ANALYZER_ENABLED) {
+      fibonacciDirection = await this.fibonacciDirectionAnalyzer.getAnalysis(symbol);
+      if (FIBONACCI_DIRECTION_APPLY_MODE === 'LEVEL_BIAS' &&
+          fibonacciDirection &&
+          ['BULLISH', 'BEARISH'].includes(fibonacciDirection.confirmedDirection) &&
+          fibonacciDirection.confidence >= FIBONACCI_DIRECTION_MIN_CONFIDENCE) {
+        appliedDirection = fibonacciDirection.confirmedDirection;
+      }
+      if (fibonacciDirection) {
+        const logKey = `${fibonacciDirection.generatedAt}:${appliedDirection}`;
+        if (this.lastFibonacciDirectionLog.get(symbol) !== logKey) {
+          console.log(
+            `[FIB-DIRECTION] ${symbol} direction=${fibonacciDirection.direction} ` +
+            `score=${fibonacciDirection.score} confidence=${fibonacciDirection.confidence} ` +
+            `alignment=${fibonacciDirection.alignment} confirmation=${fibonacciDirection.confirmationCount}/` +
+            `${fibonacciDirection.confirmationsRequired} applied=${appliedDirection}`
+          );
+          this.lastFibonacciDirectionLog.set(symbol, logKey);
+        }
+      }
+    }
     let rangeSuggestion = fibonacciAllowed
-      ? await this.fibonacciRangeAdvisor.getSuggestion(symbol, currentPrice)
+      ? await this.fibonacciRangeAdvisor.getSuggestion(symbol, currentPrice, Date.now(), {
+        direction: appliedDirection,
+      })
       : null;
     let suggestionSource = rangeSuggestion ? 'FIBONACCI' : null;
     const geminiAllowed = GEMINI_RANGE_ADVISOR_APPLY_ON === 'ALWAYS' || !manualRange;
@@ -1598,6 +1667,22 @@ class FuturesGridEngine {
       confidence: rangeSuggestion.confidence,
       confluenceScore: rangeSuggestion.confluenceScore,
       timeframeCount: rangeSuggestion.timeframeCount,
+      direction: fibonacciDirection?.direction || rangeSuggestion.direction,
+      directionApplied: suggestionSource === 'FIBONACCI' ? appliedDirection : undefined,
+      directionApplyMode: FIBONACCI_DIRECTION_APPLY_MODE,
+      directionScore: fibonacciDirection?.score,
+      directionConfidence: fibonacciDirection?.confidence,
+      directionAlignment: fibonacciDirection?.alignment,
+      directionConfirmationCount: fibonacciDirection?.confirmationCount,
+      directionConfirmationsRequired: fibonacciDirection?.confirmationsRequired,
+      directionTimeframes: fibonacciDirection
+        ? Object.fromEntries(Object.entries(fibonacciDirection.timeframes).map(([timeframe, value]) => [timeframe, {
+          direction: value.direction,
+          score: value.score,
+          reasons: value.reasons,
+        }]))
+        : undefined,
+      levelDistribution: rangeSuggestion.levelDistribution,
       marketCondition: rangeSuggestion.marketCondition,
       reasoning: rangeSuggestion.reasoning,
       levels: advisorLevels || undefined,
@@ -3787,6 +3872,17 @@ class FuturesGridEngine {
         `Net PnL: ${this.formatFuturesNumber(net)} USDT`
       );
       if (roi !== null) lines.push(`ROI: ${this.formatFuturesNumber(roi, 2)}%`);
+      const advisor = symState.config?.rangeAdvisor;
+      if (advisor?.direction) {
+        const confirmation = advisor.directionConfirmationsRequired
+          ? ` confirm=${advisor.directionConfirmationCount || 0}/${advisor.directionConfirmationsRequired}`
+          : '';
+        lines.push(
+          `Fib Direction: ${advisor.direction} (mode=${advisor.directionApplyMode || 'REPORT_ONLY'}, ` +
+          `applied=${advisor.directionApplied || 'RANGING'}, ` +
+          `score=${advisor.directionScore ?? '-'}, confidence=${advisor.directionConfidence ?? '-'}${confirmation})`
+        );
+      }
     }
     return lines.join('\n');
   }
@@ -3905,6 +4001,9 @@ Smart Range Advisor (Gemini): ${GEMINI_RANGE_ADVISOR_ENABLED
 Multi-timeframe Fibonacci: ${FIBONACCI_RANGE_ADVISOR_ENABLED
       ? `ON (timeframes=${FIBONACCI_RANGE_ADVISOR_TIMEFRAMES.join(',')}, min-range-width=${FIBONACCI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}%, trailing=${FIBONACCI_RANGE_ADVISOR_ALLOW_TRAILING ? 'allowed' : 'paused while active'})`
       : 'OFF'}
+Fibonacci Direction (deterministic): ${FIBONACCI_DIRECTION_ANALYZER_ENABLED
+      ? `ON (mode=${FIBONACCI_DIRECTION_APPLY_MODE}, timeframes=${FIBONACCI_DIRECTION_TIMEFRAMES.join(',')}, confirmations=${FIBONACCI_DIRECTION_CONFIRMATIONS}, min-confidence=${FIBONACCI_DIRECTION_MIN_CONFIDENCE}, level-bias=${FIBONACCI_DIRECTION_LEVEL_BIAS_PCT}%)`
+      : 'OFF'}
 `);
     await this.init();
     startFuturesDashboardServer(this);
@@ -3963,6 +4062,7 @@ module.exports = {
   GeminiRangeAdvisor,
   AIGridValidator,
   TechnicalIndicators,
+  FibonacciDirectionAnalyzer,
   bootstrap,
   validateRuntimeConfiguration,
 };

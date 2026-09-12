@@ -250,6 +250,34 @@ Nilai `all` memakai seluruh timeframe OHLCV yang dilaporkan Binance. Untuk mengu
 
 Advisor selalu meminta tepat `GRID_COUNT + 1` level yang mengelilingi harga saat ini dan memenuhi jarak profit minimum sebelum precision exchange. Mesin grid melakukan validasi tick size dan fee sekali lagi. Jika level Fibonacci tidak dapat dipakai, bot fallback ke Gemini (jika aktif), lalu ke range/level lokal yang sudah ada. Jika Fibonacci dan Gemini sama-sama aktif, Fibonacci memiliki prioritas.
 
+### Fibonacci Direction Analyzer (Futures)
+
+Versi futures dapat menambahkan pembacaan arah deterministik di atas level confluence Fibonacci. Analyzer mengambil histori candle yang sudah close, mendeteksi struktur `Higher High/Higher Low` atau `Lower High/Lower Low`, memeriksa EMA 20/50 dan slope berbasis ATR, lalu mengonfirmasi posisi harga terhadap golden zone `0.5-0.618`. Hasil akhirnya adalah `BULLISH`, `BEARISH`, `RANGING`, atau `UNCERTAIN` dengan skor yang selalu sama untuk data yang sama.
+
+Analyzer tidak membuka atau menutup posisi dan tidak menggeser level ke harga buatan. Jika arah `BULLISH`/`BEARISH` melewati threshold, advisor memilih proporsi level confluence Fibonacci yang lebih banyak di sisi arah tersebut. Arah lemah, ranging, atau uncertain tetap memakai distribusi grid seimbang. Cooldown dan rebuild threshold Fibonacci yang sudah ada tetap berlaku agar perubahan arah tidak menyebabkan cancel/rebuild berulang.
+
+```env
+FIBONACCI_DIRECTION_ANALYZER_ENABLED=false
+FIBONACCI_DIRECTION_TIMEFRAMES=15m,1h,4h
+FIBONACCI_DIRECTION_CANDLE_LIMIT=100
+FIBONACCI_DIRECTION_PIVOT_LOOKBACK=2
+FIBONACCI_DIRECTION_MIN_TIMEFRAMES=2
+FIBONACCI_DIRECTION_CONFIRMATIONS=2
+FIBONACCI_DIRECTION_MIN_CONFIDENCE=0.65
+FIBONACCI_DIRECTION_LEVEL_BIAS_PCT=10
+FIBONACCI_DIRECTION_APPLY_MODE=REPORT_ONLY
+```
+
+- `FIBONACCI_DIRECTION_ANALYZER_ENABLED`: mengaktifkan analyzer khusus futures. Default aman `false`.
+- `FIBONACCI_DIRECTION_TIMEFRAMES`: timeframe klasifikasi; timeframe lebih besar mendapat bobot lebih tinggi.
+- `FIBONACCI_DIRECTION_CANDLE_LIMIT`: jumlah candle per timeframe, minimal 55.
+- `FIBONACCI_DIRECTION_PIVOT_LOOKBACK`: jumlah candle kiri/kanan untuk mengonfirmasi swing pivot.
+- `FIBONACCI_DIRECTION_MIN_TIMEFRAMES`: jumlah timeframe valid minimum sebelum arah digunakan.
+- `FIBONACCI_DIRECTION_CONFIRMATIONS`: jumlah pembacaan candle baru berturut-turut dengan arah sama sebelum bias diterapkan. Default `2` meredam perubahan sesaat.
+- `FIBONACCI_DIRECTION_MIN_CONFIDENCE`: threshold agar `BULLISH`/`BEARISH` boleh membias distribusi level.
+- `FIBONACCI_DIRECTION_LEVEL_BIAS_PCT`: persentase jumlah level yang dipindahkan dari sisi berlawanan ke sisi arah, rentang `0-40`. Nilai `10` membuat grid 21 level bullish berubah dari sekitar `10/11` menjadi `8/13` level bawah/atas.
+- `FIBONACCI_DIRECTION_APPLY_MODE`: `REPORT_ONLY` hanya mencatat arah tanpa mengubah grid; `LEVEL_BIAS` menerapkan distribusi level setelah confidence dan konfirmasi lolos.
+
 ## Smart Range Advisor Gemini
 
 Aktifkan dengan:

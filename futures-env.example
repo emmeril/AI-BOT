@@ -49,6 +49,21 @@ FIBONACCI_RANGE_ADVISOR_APPLY_ON=AUTO_RANGE_ONLY
 FIBONACCI_RANGE_ADVISOR_ALLOW_TRAILING=false
 FIBONACCI_RANGE_ADVISOR_STATE_FILE=fibonacci-range-advisor-futures.json
 
+# Futures-only deterministic direction analyzer. It reads closed candles,
+# HH/HL or LH/LL structure, EMA alignment/slope, ATR, and the 0.5-0.618 golden
+# zone. When confidence passes the threshold, it changes only the distribution
+# of existing Fibonacci confluence levels below/above price. Start a live rollout
+# with APPLY_MODE=REPORT_ONLY and observe its logs before using LEVEL_BIAS.
+FIBONACCI_DIRECTION_ANALYZER_ENABLED=false
+FIBONACCI_DIRECTION_TIMEFRAMES=15m,1h,4h
+FIBONACCI_DIRECTION_CANDLE_LIMIT=100
+FIBONACCI_DIRECTION_PIVOT_LOOKBACK=2
+FIBONACCI_DIRECTION_MIN_TIMEFRAMES=2
+FIBONACCI_DIRECTION_CONFIRMATIONS=2
+FIBONACCI_DIRECTION_MIN_CONFIDENCE=0.65
+FIBONACCI_DIRECTION_LEVEL_BIAS_PCT=10
+FIBONACCI_DIRECTION_APPLY_MODE=REPORT_ONLY
+
 # Futures ROI thresholds (despite the legacy PRICE suffix). The complete active
 # LONG is closed at ROI <= -100% or ROI >= 100%. Set either value to 0 to disable.
 GRID_STOP_LOSS_PRICE=-100

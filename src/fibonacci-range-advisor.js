@@ -52,6 +52,7 @@ class FibonacciRangeAdvisor {
       rebuildCooldownMs: 15 * 60 * 1000,
       levelCount: 11,
       minimumStepRatio: 1.0025025,
+      directionLevelBiasPct: 0,
       statePath: '',
       ...options,
     };
@@ -126,7 +127,7 @@ class FibonacciRangeAdvisor {
     return null;
   }
 
-  async getSuggestion(symbol, currentPrice, now = Date.now()) {
+  async getSuggestion(symbol, currentPrice, now = Date.now(), context = {}) {
     if (!this.isEnabled() || !(currentPrice > 0)) return null;
     const timeframes = this.resolveTimeframes();
     if (!timeframes.length) return this.cache[symbol]?.suggestion || null;
@@ -142,7 +143,11 @@ class FibonacciRangeAdvisor {
       entry.lastAppliedAt = 0;
       entry.configFingerprint = configFingerprint;
     }
-    let refreshed = configChanged;
+    const requestedDirection = ['BULLISH', 'BEARISH'].includes(context?.direction)
+      ? context.direction
+      : 'RANGING';
+    const directionChanged = requestedDirection !== (entry.requestedDirection || 'RANGING');
+    let refreshed = configChanged || directionChanged;
     for (const timeframe of timeframes) {
       const timeframeMs = timeframeToMs(timeframe);
       const targetStart = this.getLastClosedCandleStart(now, timeframeMs);
@@ -166,7 +171,8 @@ class FibonacciRangeAdvisor {
     const freshSuggestion = this.buildSuggestion(
       symbol,
       currentPrice,
-      Object.values(entry.candles || {})
+      Object.values(entry.candles || {}),
+      { direction: requestedDirection }
     );
     if (freshSuggestion && this.shouldAdoptSuggestion(entry.suggestion, freshSuggestion, currentPrice, entry.lastAppliedAt, now)) {
       entry.suggestion = freshSuggestion;
@@ -177,6 +183,7 @@ class FibonacciRangeAdvisor {
         `(score=${roundNumber(freshSuggestion.confluenceScore, 2)})`
       );
     }
+    entry.requestedDirection = requestedDirection;
     entry.lastComputedAt = now;
     this.cache[symbol] = entry;
     await this.saveCache();
@@ -220,7 +227,7 @@ class FibonacciRangeAdvisor {
     return representativeShiftPct >= this.options.rebuildThresholdPct;
   }
 
-  buildSuggestion(symbol, currentPrice, candles) {
+  buildSuggestion(symbol, currentPrice, candles, context = {}) {
     const validCandles = candles.filter(candle =>
       candle && candle.high > candle.low && candle.low > 0 && timeframeToMs(candle.timeframe) > 0
     );
@@ -235,7 +242,10 @@ class FibonacciRangeAdvisor {
         const distancePct = Math.abs(cluster.price - currentPrice) / currentPrice * 100;
         return distancePct <= this.options.maxDistancePct;
       });
-    const selection = this.selectGridLevels(clusters, currentPrice);
+    const direction = ['BULLISH', 'BEARISH'].includes(context?.direction)
+      ? context.direction
+      : 'RANGING';
+    const selection = this.selectGridLevels(clusters, currentPrice, direction);
     if (!selection) return null;
 
     const timeframeCount = new Set(selection.clusters.flatMap(cluster => cluster.timeframes)).size;
@@ -250,6 +260,11 @@ class FibonacciRangeAdvisor {
       confidence,
       confluenceScore: roundNumber(selection.score, 4),
       timeframeCount,
+      direction,
+      levelDistribution: {
+        support: selection.supportCount,
+        resistance: selection.resistanceCount,
+      },
       marketCondition: 'FIBONACCI_CONFLUENCE',
       reasoning: `${timeframeCount} closed-candle timeframes produced ${selection.levels.length} fee-spaced Fibonacci confluence levels for ${symbol}.`,
       generatedAt: new Date().toISOString(),
@@ -353,7 +368,7 @@ class FibonacciRangeAdvisor {
     return [...byPrice.values()].sort((a, b) => a.price - b.price);
   }
 
-  selectGridLevels(clusters, currentPrice) {
+  selectGridLevels(clusters, currentPrice, direction = 'RANGING') {
     const levelCount = Math.max(3, Number(this.options.levelCount) || 3);
     const minimumRatio = Math.max(Number(this.options.minimumStepRatio) || 1, 1);
     const minimumWidth = currentPrice * this.options.minRangeWidthPct / 100;
@@ -375,7 +390,8 @@ class FibonacciRangeAdvisor {
           upper,
           levelCount,
           minimumRatio,
-          currentPrice
+          currentPrice,
+          direction
         );
         if (!selected) continue;
         const midpoint = (lower.price + upper.price) / 2;
@@ -383,7 +399,14 @@ class FibonacciRangeAdvisor {
         const widthPenalty = (upper.price - lower.price) / currentPrice * 0.05;
         const score = selected.reduce((sum, cluster) => sum + cluster.score, 0) -
           asymmetryPenalty - widthPenalty;
-        if (!best || score > best.score) best = { clusters: selected, score };
+        if (!best || score > best.score) {
+          best = {
+            clusters: selected,
+            score,
+            supportCount: selected.supportCount,
+            resistanceCount: selected.resistanceCount,
+          };
+        }
       }
     }
 
@@ -392,6 +415,8 @@ class FibonacciRangeAdvisor {
       clusters: best.clusters,
       levels: best.clusters.map(cluster => roundNumber(cluster.price, 12)),
       score: best.score,
+      supportCount: best.supportCount,
+      resistanceCount: best.resistanceCount,
     };
   }
 
@@ -403,8 +428,20 @@ class FibonacciRangeAdvisor {
     return [...new Set([...strongest, ...edgeCandidates])];
   }
 
-  selectLevelsWithinBounds(clusters, lower, upper, levelCount, minimumRatio, currentPrice) {
-    const supportCount = Math.floor(levelCount / 2);
+  selectLevelsWithinBounds(clusters, lower, upper, levelCount, minimumRatio, currentPrice, direction = 'RANGING') {
+    const baseSupportCount = Math.floor(levelCount / 2);
+    const biasCount = Math.max(0, Math.floor(levelCount * Math.min(
+      Math.max(Number(this.options.directionLevelBiasPct) || 0, 0),
+      40
+    ) / 100));
+    const supportCount = Math.max(1, Math.min(
+      levelCount - 1,
+      direction === 'BULLISH'
+        ? baseSupportCount - biasCount
+        : direction === 'BEARISH'
+          ? baseSupportCount + biasCount
+          : baseSupportCount
+    ));
     const resistanceCount = levelCount - supportCount;
     const supportCeiling = currentPrice / minimumRatio;
     const resistanceFloor = currentPrice * minimumRatio;
@@ -432,7 +469,10 @@ class FibonacciRangeAdvisor {
     if (selectedResistances[0].price / selectedSupports[selectedSupports.length - 1].price < minimumRatio) {
       return null;
     }
-    return [...selectedSupports, ...selectedResistances];
+    const levels = [...selectedSupports, ...selectedResistances];
+    levels.supportCount = supportCount;
+    levels.resistanceCount = resistanceCount;
+    return levels;
   }
 
   selectAscendingSide(candidates, lower, ceiling, count, minimumRatio) {

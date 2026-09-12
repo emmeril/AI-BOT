@@ -132,6 +132,7 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
       candles: (candles || []).map(row => ({ time: Number(row[0]), open: marketPrice(engine, symbol, row[1]), high: marketPrice(engine, symbol, row[2]), low: marketPrice(engine, symbol, row[3]), close: marketPrice(engine, symbol, row[4]), volume: Number(row[5]) })),
     },
     range: { lower: numberOrZero(symState.config?.lower), lowerText: marketPriceText(engine, symbol, symState.config?.lower), upper: numberOrZero(symState.config?.upper), upperText: marketPriceText(engine, symbol, symState.config?.upper) },
+    advisor: symState.config?.rangeAdvisor || null,
     orders: {
       active: orders, buyCount: orders.filter(order => order.side === 'buy').length, sellCount: orders.filter(order => order.side === 'sell').length,
       buyValue: orders.filter(order => order.side === 'buy').reduce((sum, order) => sum + order.price * order.remaining, 0),
