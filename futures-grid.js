@@ -11,6 +11,7 @@ const { startFuturesDashboardServer } = require('./src/futures-dashboard-server'
 const { deferUnreconciledSell, retryUnreconciledSells } = require('./src/unreconciled-fills');
 const { syncIncome, incomeMetrics } = require('./src/futures-income');
 const { exposureBySymbol } = require('./src/futures-exposure');
+const { displayNumber, signedUsdt, sellOverview, sellFillMessage } = require('./src/futures-display');
 const futuresTelegramCommandPath = path.resolve(process.cwd(), 'futures-telegram-command.json');
 
 // Tracks, per async call chain, which symbols' locks are currently held by
@@ -2981,13 +2982,13 @@ class FuturesGridEngine {
     // counting of the same fill.
     this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
-    await this.sendAlert(this.formatFuturesTelegramMessage('FUTURES BUY FILLED', [
-      ['Symbol', symbol],
-      ['Level', levelIndex],
-      ['Price', this.formatFuturesNumber(price, 8)],
-      ['Amount', this.formatFuturesNumber(amount, 8)],
-      ['Sellable', this.formatFuturesNumber(sellableAmount, 8)],
-      ['Fee', `${this.formatFuturesNumber(feeQuote)} ${quote}`],
+    await this.sendAlert(this.formatFuturesTelegramMessage('BUY futures terisi', [
+      ['Simbol', symbol],
+      ['Harga beli', displayNumber(price, 8)],
+      ['Jumlah', displayNumber(amount, 8)],
+      ['Fee BUY', signedUsdt(feeQuote)],
+      ['Artinya', 'Posisi LONG bertambah. Pembelian ini belum menghasilkan profit.'],
+      ['Berikutnya', 'Bot mencari target SELL sesuai aturan grid; order belum tentu langsung tersedia.'],
     ]));
     if (!GRID_REFILL_ON_FILLED || !this.canPlaceNewOrders() || !levels.length) return;
     const trackedBuy = symState.lastBuyByLevel[levelIndex];
@@ -3108,16 +3109,9 @@ class FuturesGridEngine {
     if (symState.unreconciledSells) delete symState.unreconciledSells[tradeId];
     this.state.markProcessedTradeLocal(symbol, tradeId);
     await this.state.save();
-    await this.sendAlert(this.formatFuturesTelegramMessage('FUTURES SELL FILLED', [
-      ['Symbol', symbol],
-      ['Level', levelIndex],
-      ['Source Buy Level', buyLevelIndex],
-      ['Price', this.formatFuturesNumber(price, 8)],
-      ['Amount', this.formatFuturesNumber(amount, 8)],
-      ['Grid Pair Profit (not account PnL)', `${this.formatFuturesNumber(profit)} ${quote}`],
-      ['Binance Realized PnL (before fees)', trade.info?.realizedPnl ?? 'unavailable'],
-      ['Fee', `${this.formatFuturesNumber(feeQuote)} ${quote}`],
-    ]));
+    await this.sendAlert(sellFillMessage({ symbol, price, amount,
+      realizedPnl: trade.info?.realizedPnl ?? trade.info?.realizedProfit,
+      fee: feeQuote, gridProfit: profit }));
 
     if (GRID_REFILL_ON_FILLED && this.canPlaceNewOrders() && buyLevelIndex >= 0) {
       const nextRefillCount = refillCount + 1;
@@ -3204,12 +3198,8 @@ class FuturesGridEngine {
     this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
     this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
-    await this.sendAlert(this.formatFuturesTelegramMessage('FUTURES EXIT FILLED', [
-      ['Symbol', symbol],
-      ['Gross PnL', `${this.formatFuturesNumber(realizedPnl)} ${quote}`],
-      ['Fee', `${this.formatFuturesNumber(feeQuote)} ${quote}`],
-      ['Net Profit', `${this.formatFuturesNumber(netExitProfit)} ${quote}`],
-    ]));
+    await this.sendAlert(sellFillMessage({ symbol, price, amount: trade.amount,
+      realizedPnl: trade.info?.realizedPnl ?? trade.info?.realizedProfit, fee: feeQuote }));
   }
 
   async syncFundingHistory(symbol, { force = false } = {}) {
@@ -4001,42 +3991,35 @@ class FuturesGridEngine {
 
   buildTelegramStatusMessage() {
     const lines = [
-      '[FUTURES STATUS]',
+      '[Ringkasan futures]',
       '',
       `Mode: ${EXCHANGE_MODE.toUpperCase()}`,
       `Leverage: ${LEVERAGE}x`,
       `Margin: ${MARGIN_MODE}`,
+      'Hasil total = hasil Binance setelah fee + funding + hasil posisi berjalan.',
     ];
     for (const symbol of SYMBOLS) {
       const symState = this.state.getSymbol(symbol);
       const position = this.latestPositions?.get(symbol);
-      const roi = this.getPositionRoiPct(position);
+      const positionKnown = this.latestPositions?.has(symbol) || false;
       const unrealized = numberOrZero(position?.unrealizedPnl);
       const account = incomeMetrics(symState.accountIncome, this.latestAccountUnrealized?.get(symbol) ?? unrealized);
+      const exits = sellOverview(symState.orders, position);
       lines.push(
         '',
         `-- ${symbol} --`,
-        `Position: ${position ? `LONG ${this.formatFuturesNumber(position.contracts, 0)}` : 'closed'}`,
-        `Realized (Binance, after fees): ${account.ready ? this.formatFuturesNumber(account.realized) : 'unavailable'} USDT`,
-        `Grid pair profit: ${this.formatFuturesNumber(symState.realizedGridProfit)} USDT`,
-        `Funding: ${this.formatFuturesNumber(account.funding)} USDT`,
-        `Unrealized: ${this.formatFuturesNumber(this.latestAccountUnrealized?.get(symbol) ?? unrealized)} USDT`,
-        `Net PnL: ${account.ready ? this.formatFuturesNumber(account.net) : 'unavailable'} USDT`,
-        `Accounting scope: all trades on symbol; since ${account.since ? new Date(account.since).toISOString() : 'pending'}`
+        `Hasil total simbol: ${signedUsdt(positionKnown ? account.net : null)}`,
+        `Sudah tercatat (setelah fee): ${signedUsdt(account.realized)}`,
+        `Masih berjalan: ${signedUsdt(positionKnown ? (this.latestAccountUnrealized?.get(symbol) ?? unrealized) : null)}`,
+        `Funding bersih: ${account.ready ? signedUsdt(account.funding) : 'belum tersedia'}`,
+        `Posisi: ${!positionKnown ? 'belum tersedia' : position ? `LONG ${displayNumber(position.contracts, 8)}` : 'tidak ada LONG aktif'}`,
+        ...(position ? [`Entry rata-rata: ${displayNumber(position.entryPrice, 8)} | Mark: ${displayNumber(position.markPrice ?? position.info?.markPrice, 8)}`] : []),
+        `SELL terendah: ${exits.nearestPrice === null ? 'belum ada' : displayNumber(exits.nearestPrice, 8)+' ('+exits.nearestLabel.toLowerCase()+')'}`,
+        ...(exits.belowEntryCount > 0 ? [`${exits.belowEntryCount} SELL di bawah entry: bisa merealisasikan rugi Binance meski pasangan grid untung.`] : []),
+        `Riwayat sejak ${account.since ? new Date(account.since).toISOString().slice(0, 10) : 'belum tersedia'}`
       );
-      if (roi !== null) lines.push(`ROI: ${this.formatFuturesNumber(roi, 2)}%`);
-      const advisor = symState.config?.rangeAdvisor;
-      if (advisor?.direction) {
-        const confirmation = advisor.directionConfirmationsRequired
-          ? ` confirm=${advisor.directionConfirmationCount || 0}/${advisor.directionConfirmationsRequired}`
-          : '';
-        lines.push(
-          `Fib Direction: ${advisor.direction} (mode=${advisor.directionApplyMode || 'REPORT_ONLY'}, ` +
-          `applied=${advisor.directionApplied || 'RANGING'}, ` +
-          `score=${advisor.directionScore ?? '-'}, confidence=${advisor.directionConfidence ?? '-'}${confirmation})`
-        );
-      }
     }
+    lines.push('', 'Angka berjalan masih berubah. Riwayat mencakup transaksi manual dan SHORT pada simbol yang sama. Profit pasangan grid adalah statistik terpisah di dashboard.');
     return lines.join('\n');
   }
 

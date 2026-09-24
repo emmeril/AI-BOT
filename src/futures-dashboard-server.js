@@ -4,6 +4,7 @@ const path = require('path');
 const { retry, numberOrZero } = require('./utils');
 const { createDashboardAuth } = require('./dashboard-auth');
 const { incomeMetrics } = require('./futures-income');
+const { sellEntryLabel, sellOverview } = require('./futures-display');
 const {
   marketPrice,
   marketPriceText,
@@ -113,6 +114,9 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
     .reduce((sum, buy) => sum + numberOrZero(buy?.totalFeeQuote), 0);
   const leverage = Number(process.env.LEVERAGE) || 0;
   const position = positionMetrics(long, leverage, openPositionFees);
+  for (const order of orders) {
+    order.entryComparison = order.side === 'sell' ? sellEntryLabel(order.price, long?.entryPrice) : 'Menambah LONG';
+  }
   const walletInfo = balance?.info || {};
   const walletBalance = numberOrZero(walletInfo.totalWalletBalance ?? balance?.total?.USDT);
   const availableBalance = numberOrZero(walletInfo.availableBalance ?? freeUsdt);
@@ -152,7 +156,7 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
     futures: {
       leverage, marginMode: process.env.MARGIN_MODE || '', positionMode: 'HEDGE',
       positionSide: 'LONG', freeUsdt, totalUsdt, walletBalance, availableBalance, usedMargin,
-      positionMargin, openOrderMargin, position,
+      positionMargin, openOrderMargin, position, exits: sellOverview(orders, long),
     },
   };
 }

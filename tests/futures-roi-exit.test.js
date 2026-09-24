@@ -234,11 +234,11 @@ test('futures Telegram status reports zero unrealized PnL when position is close
       } },
     }),
   };
-  engine.latestPositions = new Map();
+  engine.latestPositions = new Map(String(process.env.SYMBOLS || 'BTC/USDT:USDT').split(',').map(symbol => [symbol.trim(), null]));
 
   const message = engine.buildTelegramStatusMessage();
-  assert.match(message, /Unrealized: 0\.0000 USDT/);
-  assert.match(message, /Net PnL: 0\.2393 USDT/);
+  assert.match(message, /Masih berjalan: 0 USDT/);
+  assert.match(message, /Hasil total simbol: \+0,2393 USDT/);
   assert.doesNotMatch(message, /unrealized=null/);
 });
 
