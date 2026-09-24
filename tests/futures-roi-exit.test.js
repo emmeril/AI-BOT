@@ -227,7 +227,12 @@ test('ROI falls back to unrealized PnL divided by initial margin', () => {
 test('futures Telegram status reports zero unrealized PnL when position is closed', () => {
   const engine = Object.create(FuturesGridEngine.prototype);
   engine.state = {
-    getSymbol: () => ({ realizedGridProfit: 0.2409, realizedExitProfit: 0, fundingProfit: -0.0016 }),
+    getSymbol: () => ({ realizedGridProfit: 0.2409, realizedExitProfit: 0, fundingProfit: -0.0016,
+      accountIncome: { since: Date.now() - 10000, syncedAt: Date.now(), records: {
+        pnl: { type: 'REALIZED_PNL', income: 0.2409, asset: 'USDT' },
+        funding: { type: 'FUNDING_FEE', income: -0.0016, asset: 'USDT' },
+      } },
+    }),
   };
   engine.latestPositions = new Map();
 

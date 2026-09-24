@@ -3,6 +3,7 @@ const http = require('http');
 const path = require('path');
 const { retry, numberOrZero } = require('./utils');
 const { createDashboardAuth } = require('./dashboard-auth');
+const { incomeMetrics } = require('./futures-income');
 const {
   marketPrice,
   marketPriceText,
@@ -103,10 +104,11 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
   const long = positions.find(position => String(position.side || '').toLowerCase() === 'long' && Number(position.contracts) > 0);
   const freeUsdt = numberOrZero(balance?.free?.USDT);
   const totalUsdt = numberOrZero(balance?.total?.USDT);
-  const unrealizedPnl = numberOrZero(long?.unrealizedPnl ?? long?.info?.unRealizedProfit);
-  const realized = numberOrZero(symState.realizedGridProfit) + numberOrZero(symState.realizedExitProfit);
-  const funding = numberOrZero(symState.fundingProfit);
-  const fee = numberOrZero(symState.tradingFees);
+  const accountUnrealized = positions.filter(p => p.symbol === symbol)
+    .reduce((sum, p) => sum + numberOrZero(p.unrealizedPnl ?? p.info?.unRealizedProfit), 0);
+  const account = incomeMetrics(symState.accountIncome, accountUnrealized);
+  const funding = account.funding;
+  const fee = account.fees;
   const openPositionFees = Object.values(symState.lastBuyByLevel || {})
     .reduce((sum, buy) => sum + numberOrZero(buy?.totalFeeQuote), 0);
   const leverage = Number(process.env.LEVERAGE) || 0;
@@ -117,7 +119,7 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
   const positionMargin = position ? numberOrZero(position.positionMargin) : 0;
   const openOrderMargin = numberOrZero(walletInfo.totalOpenOrderInitialMargin);
   const usedMargin = numberOrZero(walletInfo.totalInitialMargin ?? balance?.used?.USDT);
-  const net = realized + funding + unrealizedPnl - openPositionFees;
+  const net = account.net;
   return {
     generatedAt: new Date().toISOString(), refreshSeconds, dashboardAuthEnabled: authEnabled,
     source: 'Binance USDⓈ-M Futures',
@@ -139,10 +141,13 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
       sellValue: orders.filter(order => order.side === 'sell').reduce((sum, order) => sum + order.price * order.remaining, 0),
     },
     profit: {
-      realized: numberOrZero(symState.realizedGridProfit) + numberOrZero(symState.realizedExitProfit),
-      totalRealized: numberOrZero(engine.state.data.totals.realizedGridProfit) + numberOrZero(engine.state.data.totals.realizedExitProfit),
+      realized: account.realized,
+      totalRealized: symbols.every(s => incomeMetrics(engine.state.getSymbol(s).accountIncome).ready)
+        ? symbols.reduce((sum, s) => sum + incomeMetrics(engine.state.getSymbol(s).accountIncome).realized, 0) : null,
+      gridPairProfit: numberOrZero(symState.realizedGridProfit),
+      accounting: account,
       filledBuys: numberOrZero(symState.filledBuys), filledSells: numberOrZero(symState.filledSells), quoteAsset: 'USDT',
-      funding, fees: fee, openPositionFees, unrealizedPnl, net,
+      funding, fees: fee, openPositionFees, unrealizedPnl: accountUnrealized, net,
     },
     futures: {
       leverage, marginMode: process.env.MARGIN_MODE || '', positionMode: 'HEDGE',

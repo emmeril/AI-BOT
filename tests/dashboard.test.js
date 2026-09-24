@@ -130,6 +130,20 @@ test('futures dashboard reports fill counts for the selected symbol', async () =
   assert.equal(snapshot.selectedSymbol, '1000PEPE/USDT:USDT');
   assert.equal(snapshot.profit.filledBuys, 2);
   assert.equal(snapshot.profit.filledSells, 0);
+  assert.equal(snapshot.profit.net, null);
+  states['1000PEPE/USDT:USDT'].realizedGridProfit = 999;
+  states['1000PEPE/USDT:USDT'].accountIncome = {
+    since: Date.now() - 10000, syncedAt: Date.now(), records: {
+      pnl: { asset: 'USDT', type: 'REALIZED_PNL', income: -3 },
+      fee: { asset: 'USDT', type: 'COMMISSION', income: -0.1 },
+    },
+  };
+  states['1000PEPE/USDT:USDT'].lastBuyByLevel = { 1: { totalFeeQuote: 0.1 } };
+  engine.exchange.fetchPositions = async () => [{ symbol: '1000PEPE/USDT:USDT', side: 'long', contracts: 1, unrealizedPnl: -3 }];
+  const accounted = await buildFuturesDashboardSnapshot(engine, '1000PEPE/USDT:USDT');
+  assert.equal(accounted.profit.realized, -3.1);
+  assert.equal(accounted.profit.net, -6.1);
+  assert.equal(accounted.profit.gridPairProfit, 999);
 });
 
 test('dashboard market price follows Binance symbol precision', () => {

@@ -9,6 +9,8 @@ const { FibonacciRangeAdvisor } = require('./src/fibonacci-range-advisor');
 const { FibonacciDirectionAnalyzer } = require('./src/fibonacci-direction-analyzer');
 const { startFuturesDashboardServer } = require('./src/futures-dashboard-server');
 const { deferUnreconciledSell, retryUnreconciledSells } = require('./src/unreconciled-fills');
+const { syncIncome, incomeMetrics } = require('./src/futures-income');
+const { exposureBySymbol } = require('./src/futures-exposure');
 const futuresTelegramCommandPath = path.resolve(process.cwd(), 'futures-telegram-command.json');
 
 // Tracks, per async call chain, which symbols' locks are currently held by
@@ -122,6 +124,8 @@ const GRID_TRAILING_DOWN_COOLDOWN_MS = Math.max(
 ) * MINUTE_MS;
 const GRID_ORDER_SIZE_USDT = Config.number('GRID_ORDER_SIZE_USDT', Config.number('ORDER_SIZE_USDT', 20));
 const GRID_TOTAL_INVESTMENT_USDT = Config.number('GRID_TOTAL_INVESTMENT_USDT', 0);
+const FUTURES_MAX_SYMBOL_EXPOSURE_USDT = Config.number('FUTURES_MAX_SYMBOL_EXPOSURE_USDT', GRID_TOTAL_INVESTMENT_USDT || GRID_ORDER_SIZE_USDT * GRID_COUNT);
+const FUTURES_MAX_TOTAL_EXPOSURE_USDT = Config.number('FUTURES_MAX_TOTAL_EXPOSURE_USDT', FUTURES_MAX_SYMBOL_EXPOSURE_USDT * SYMBOLS.length);
 const GRID_MAX_ACTIVE_BUY_ORDERS = Config.number('GRID_MAX_ACTIVE_BUY_ORDERS', 5);
 const GRID_MAX_ACTIVE_SELL_ORDERS = Config.number('GRID_MAX_ACTIVE_SELL_ORDERS', 5);
 const GRID_RECREATE_ON_START = Config.boolean('GRID_RECREATE_ON_START', false);
@@ -439,6 +443,8 @@ function validateRuntimeConfiguration() {
   requirePositive('INTERVAL_MINUTES', INTERVAL_MINUTES);
   requireInteger('GRID_COUNT', GRID_COUNT, 2);
   requireNonNegative('GRID_TOTAL_INVESTMENT_USDT', GRID_TOTAL_INVESTMENT_USDT);
+  requirePositive('FUTURES_MAX_SYMBOL_EXPOSURE_USDT', FUTURES_MAX_SYMBOL_EXPOSURE_USDT);
+  requirePositive('FUTURES_MAX_TOTAL_EXPOSURE_USDT', FUTURES_MAX_TOTAL_EXPOSURE_USDT);
   requirePositive(
     GRID_TOTAL_INVESTMENT_USDT > 0 ? 'GRID_TOTAL_INVESTMENT_USDT' : 'GRID_ORDER_SIZE_USDT',
     GRID_TOTAL_INVESTMENT_USDT > 0 ? GRID_TOTAL_INVESTMENT_USDT : GRID_ORDER_SIZE_USDT
@@ -1322,6 +1328,7 @@ class FuturesGridEngine {
     this.roiExitAlertedSymbols = new Set();
     this.roiCloseOrders = new Map();
     this.lastFundingSyncAt = new Map();
+    this.exposureLimits = { symbol: FUTURES_MAX_SYMBOL_EXPOSURE_USDT, total: FUTURES_MAX_TOTAL_EXPOSURE_USDT };
     this.telegramStatusTimer = null;
     this.telegramCommandTimer = null;
     this.telegramCommandProcessing = false;
@@ -2471,13 +2478,71 @@ class FuturesGridEngine {
     // CCXT maps postOnly to Binance timeInForce=GTX. If Binance rejects an
     // immediately-marketable maker order, keep the rejection: silently
     // retrying without GTX would change the configured maker-only behavior.
-    return await this.exchange.createLimitOrder(
+    const submit = () => this.exchange.createLimitOrder(
       symbol,
       side,
       amount,
       price,
       orderParams
     );
+    if (side !== 'buy' || !this.exposureLimits) return submit();
+    return this.withExposureLock(async () => {
+      let exposure;
+      try { exposure = await this.fetchExposure(); } catch (err) {
+        console.warn(`[EXPOSURE] ${symbol} BUY blocked: cannot verify exposure (${err.message})`);
+        return null;
+      }
+      const cost = Number(amount) * Number(price);
+      if (exposure.values[symbol] + cost > this.exposureLimits.symbol + 1e-8 ||
+          exposure.total + cost > this.exposureLimits.total + 1e-8) {
+        console.warn(`[EXPOSURE] ${symbol} BUY blocked: symbol=${exposure.values[symbol]} total=${exposure.total} new=${cost}`);
+        return null;
+      }
+      return submit();
+    });
+  }
+
+  async withExposureLock(fn) {
+    const previous = this.exposureQueue || Promise.resolve();
+    let release;
+    this.exposureQueue = new Promise(resolve => { release = resolve; });
+    await previous;
+    try { return await fn(); } finally { release(); }
+  }
+
+  async fetchExposure() {
+    const groups = await Promise.all(SYMBOLS.map(symbol => this.exchange.fetchOpenOrders(symbol)));
+    const orders = groups.flatMap((group, index) => group.map(order => ({ ...order, symbol: order.symbol || SYMBOLS[index] })));
+    // Reading positions after orders conservatively counts fills during the snapshot twice.
+    const positions = await this.exchange.fetchPositions(SYMBOLS);
+    const exposure = exposureBySymbol(SYMBOLS, positions, orders);
+    return { ...exposure, orders };
+  }
+
+  async trimExcessBuys(symbol) {
+    if (!this.exposureLimits) return;
+    await this.withExposureLock(async () => {
+      let exposure = await this.fetchExposure();
+      const managed = await this.getManagedOpenOrders(symbol, exposure.orders.filter(order => order.symbol === symbol));
+      const buys = managed.filter(order => order.side === 'buy').sort((a, b) => Number(a.price) - Number(b.price));
+      for (const order of buys) {
+        if (exposure.values[symbol] <= this.exposureLimits.symbol + 1e-8 && exposure.total <= this.exposureLimits.total + 1e-8) break;
+        await this.cancelOrder(symbol, order, 'exposure cap; preserve SELL exits');
+        exposure = await this.fetchExposure();
+      }
+    });
+  }
+
+  async syncAccountIncome(symbol) {
+    if (!this.exchange.fapiPrivateGetIncome) return;
+    const sym = this.state.getSymbol(symbol);
+    if (sym.accountIncome?.syncedAt && Date.now() - sym.accountIncome.syncedAt < 300000) return;
+    try {
+      sym.accountIncome = await syncIncome(this.exchange, sym.accountIncome, symbol, sym.createdAt);
+      await this.state.save();
+    } catch (err) {
+      console.warn(`[ACCOUNTING] ${symbol} income unavailable: ${err.message}`);
+    }
   }
 
   async placeLimit(
@@ -2523,6 +2588,7 @@ class FuturesGridEngine {
       const order = await this.createFuturesLimitOrder(
         symbol, side, preciseAmount, precisePrice, levelIndex, refillCount, sourceBuyLevelIndex
       );
+      if (!order) return null;
       await this.state.rememberOrder(symbol, order, { levelIndex, refillCount, sourceBuyLevelIndex });
       const sourceLabel = side === 'sell' && sourceBuyLevelIndex !== null
         ? ` sourceBuy=${sourceBuyLevelIndex}`
@@ -2923,7 +2989,7 @@ class FuturesGridEngine {
       ['Sellable', this.formatFuturesNumber(sellableAmount, 8)],
       ['Fee', `${this.formatFuturesNumber(feeQuote)} ${quote}`],
     ]));
-    if (!GRID_REFILL_ON_FILLED || !this.canPlaceNewOrders() || levelIndex + 1 >= levels.length) return;
+    if (!GRID_REFILL_ON_FILLED || !this.canPlaceNewOrders() || !levels.length) return;
     const trackedBuy = symState.lastBuyByLevel[levelIndex];
     const totalSellable = Math.max(0, Number(trackedBuy?.sellableAmount ?? trackedBuy?.amount) || 0);
     if (!(totalSellable > 0)) {
@@ -3048,7 +3114,8 @@ class FuturesGridEngine {
       ['Source Buy Level', buyLevelIndex],
       ['Price', this.formatFuturesNumber(price, 8)],
       ['Amount', this.formatFuturesNumber(amount, 8)],
-      ['Net Profit', `${this.formatFuturesNumber(profit)} ${quote}`],
+      ['Grid Pair Profit (not account PnL)', `${this.formatFuturesNumber(profit)} ${quote}`],
+      ['Binance Realized PnL (before fees)', trade.info?.realizedPnl ?? 'unavailable'],
       ['Fee', `${this.formatFuturesNumber(feeQuote)} ${quote}`],
     ]));
 
@@ -3490,10 +3557,12 @@ class FuturesGridEngine {
   }
 
   async reconcileSymbolUnlocked(symbol) {
+    await this.syncAccountIncome(symbol);
     if (!this.canPlaceNewOrders()) {
       const freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
       await this.handleFilledTrades(symbol, [], freshOpenOrders);
       await this.syncFundingHistory(symbol);
+      if (this.exchange.fetchPositions) this.updatePositionSnapshot(symbol, await this.exchange.fetchPositions([symbol]));
       console.log(`[SYNC] ${symbol} trading paused; fills and funding reconciled but no new orders will be placed`);
       return;
     }
@@ -3541,8 +3610,13 @@ class FuturesGridEngine {
     await this.syncFundingHistory(symbol);
 
     if (!canContinue) {
+      if (this.exchange.fetchPositions) this.updatePositionSnapshot(symbol, await this.exchange.fetchPositions([symbol]));
       console.log(`[SYNC] ${symbol} trading halted (stop-loss/take-profit); no new orders will be placed`);
       return;
+    }
+
+    try { await this.trimExcessBuys(symbol); } catch (err) {
+      console.warn(`[EXPOSURE] ${symbol} could not trim pending BUY orders: ${err.message}`);
     }
 
     // Re-read balances, positions and open orders after fill handling so placement loops use fresh state.
@@ -3551,10 +3625,12 @@ class FuturesGridEngine {
       retry(() => this.exchange.fetchPositions([symbol])),
       retry(() => this.exchange.fetchOpenOrders(symbol)),
     ]);
+    this.updatePositionSnapshot(symbol, positions);
     let managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
 
     if (GRID_CANCEL_OUT_OF_RANGE) {
       for (const order of managedOrders) {
+        if (order.side === 'sell') continue;
         const orderTimestamp = Number(order.timestamp) || Date.parse(order.datetime || 0) || 0;
         const orderAgeMs = Date.now() - orderTimestamp;
         if (orderAgeMs < GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MS) continue;
@@ -3670,16 +3746,16 @@ class FuturesGridEngine {
 
     console.log(
       (() => {
-        const activeLong = this.getActiveLongPosition(positions, symbol);
-        const unrealizedPnl = Number(activeLong?.unrealizedPnl ?? activeLong?.info?.unRealizedProfit) || 0;
-        const realizedProfit = symState.realizedGridProfit + symState.realizedExitProfit;
-        const netProfit = realizedProfit + symState.fundingProfit + unrealizedPnl;
+        const accountUnrealized = positions.reduce((sum, position) => sum + numberOrZero(position.unrealizedPnl ?? position.info?.unRealizedProfit), 0);
+        const account = incomeMetrics(symState.accountIncome, accountUnrealized);
+        const realizedProfit = account.realized;
+        const netProfit = account.net;
         return (
       `[SYNC] ${symbol} price=${roundNumber(currentPrice)} range=${roundNumber(lower)}-${roundNumber(upper)} ` +
-      `orders=${managedOrders.length} realized=${roundNumber(realizedProfit, 4)} ` +
-      `funding=${roundNumber(symState.fundingProfit, 4)} unrealized=${roundNumber(unrealizedPnl, 4)} ` +
-      `net=${roundNumber(netProfit, 4)} ` +
-      `fees=${roundNumber(symState.tradingFees, 4)} ${this.getQuoteAsset(symbol)}`
+      `orders=${managedOrders.length} realized=${realizedProfit === null ? 'unavailable' : roundNumber(realizedProfit, 4)} gridPair=${roundNumber(symState.realizedGridProfit, 4)} ` +
+      `funding=${roundNumber(account.funding, 4)} unrealized=${roundNumber(accountUnrealized, 4)} ` +
+      `net=${netProfit === null ? 'unavailable' : roundNumber(netProfit, 4)} ` +
+      `fees=${roundNumber(account.fees, 4)} ${this.getQuoteAsset(symbol)}`
         );
       })()
     );
@@ -3699,6 +3775,14 @@ class FuturesGridEngine {
     return Number(orderMeta?.levelIndex) - 1;
   }
 
+  updatePositionSnapshot(symbol, positions) {
+    if (!this.latestPositions) this.latestPositions = new Map();
+    if (!this.latestAccountUnrealized) this.latestAccountUnrealized = new Map();
+    this.latestPositions.set(symbol, this.getActiveLongPosition(positions, symbol));
+    this.latestAccountUnrealized.set(symbol, positions.filter(p => p.symbol === symbol)
+      .reduce((sum, p) => sum + numberOrZero(p.unrealizedPnl ?? p.info?.unRealizedProfit), 0));
+  }
+
   getActiveSellOrderForBuyLevel(symState, buyLevelIndex) {
     return Object.values(symState.orders || {}).find(order =>
       String(order.side).toLowerCase() === 'sell' &&
@@ -3711,7 +3795,7 @@ class FuturesGridEngine {
     { amount = null, minimumPrice = -Infinity } = {}
   ) {
     const sourceLevel = Number(buyLevelIndex);
-    if (!Number.isInteger(sourceLevel) || sourceLevel < 0 || sourceLevel + 1 >= levels.length) return null;
+    if (!Number.isInteger(sourceLevel) || sourceLevel < 0 || !levels.length) return null;
     const sellableAmount = Math.max(0, Number(amount ?? trackedBuy?.sellableAmount ?? trackedBuy?.amount) || 0);
     if (!(sellableAmount > 0)) return null;
     const minCost = this.getMinCost(symbol);
@@ -3730,7 +3814,19 @@ class FuturesGridEngine {
         notional: precise.notional,
       };
     }
-    return null;
+    const tick = this.getMarketTickSize(symbol);
+    if (!(tick > 0)) return null;
+    const preciseAmount = Number(this.exchange.amountToPrecision(symbol, sellableAmount));
+    if (!(preciseAmount > 0)) return null;
+    const minimum = Math.max(this.getMinimumProfitableSellPrice(trackedBuy),
+      minCost / preciseAmount, Number(levels[levels.length - 1]) + tick,
+      Number.isFinite(minimumPrice) ? minimumPrice + tick : 0);
+    const sellPrice = Number(this.exchange.priceToPrecision(symbol, Math.ceil(minimum / tick) * tick + tick));
+    if (!Number.isFinite(sellPrice) || !this.isTrackedSellProfitable(symbol, trackedBuy, sellPrice)) return null;
+    const precise = this.getPreciseOrderNumbers(symbol, sellPrice, preciseAmount);
+    if (precise.notional < minCost || sellPrice <= minimumPrice) return null;
+    return { buyLevelIndex: sourceLevel, sellLevelIndex: levels.length - 1, sellPrice,
+      amount: preciseAmount, notional: precise.notional, outsideGrid: true };
   }
 
   warnNoSellTarget(symbol, buyLevelIndex, levels, trackedBuy, amount) {
@@ -3915,17 +4011,18 @@ class FuturesGridEngine {
       const symState = this.state.getSymbol(symbol);
       const position = this.latestPositions?.get(symbol);
       const roi = this.getPositionRoiPct(position);
-      const realized = numberOrZero(symState.realizedGridProfit) + numberOrZero(symState.realizedExitProfit);
       const unrealized = numberOrZero(position?.unrealizedPnl);
-      const net = realized + numberOrZero(symState.fundingProfit) + unrealized;
+      const account = incomeMetrics(symState.accountIncome, this.latestAccountUnrealized?.get(symbol) ?? unrealized);
       lines.push(
         '',
         `-- ${symbol} --`,
         `Position: ${position ? `LONG ${this.formatFuturesNumber(position.contracts, 0)}` : 'closed'}`,
-        `Realized: ${this.formatFuturesNumber(realized)} USDT`,
-        `Funding: ${this.formatFuturesNumber(symState.fundingProfit)} USDT`,
-        `Unrealized: ${this.formatFuturesNumber(unrealized)} USDT`,
-        `Net PnL: ${this.formatFuturesNumber(net)} USDT`
+        `Realized (Binance, after fees): ${account.ready ? this.formatFuturesNumber(account.realized) : 'unavailable'} USDT`,
+        `Grid pair profit: ${this.formatFuturesNumber(symState.realizedGridProfit)} USDT`,
+        `Funding: ${this.formatFuturesNumber(account.funding)} USDT`,
+        `Unrealized: ${this.formatFuturesNumber(this.latestAccountUnrealized?.get(symbol) ?? unrealized)} USDT`,
+        `Net PnL: ${account.ready ? this.formatFuturesNumber(account.net) : 'unavailable'} USDT`,
+        `Accounting scope: all trades on symbol; since ${account.since ? new Date(account.since).toISOString() : 'pending'}`
       );
       if (roi !== null) lines.push(`ROI: ${this.formatFuturesNumber(roi, 2)}%`);
       const advisor = symState.config?.rangeAdvisor;
@@ -4048,6 +4145,7 @@ Trailing Range: ${GRID_TRAILING_RANGE_ENABLED ? 'ON (auto up/down)' : 'OFF'}
 Trailing Up: ${GRID_TRAILING_UP_ENABLED ? `ON (range-follow trigger, cooldown=${GRID_TRAILING_UP_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
 Trailing Down: ${GRID_TRAILING_DOWN_ENABLED ? `ON (range-follow trigger, cooldown=${GRID_TRAILING_DOWN_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
 Active Order Policy: buy hard-limit=${GRID_MAX_ACTIVE_BUY_ORDERS}, sell soft-warning=${GRID_MAX_ACTIVE_SELL_ORDERS} (tracked exits remain priority)
+Exposure caps (positions + pending BUY): symbol=${FUTURES_MAX_SYMBOL_EXPOSURE_USDT} USDT, total=${FUTURES_MAX_TOTAL_EXPOSURE_USDT} USDT
 Max Refills Per Level: ${GRID_MAX_REFILLS}
 Recreate On Start: ${GRID_RECREATE_ON_START ? 'ON' : 'OFF'}
 Post Only (Maker): ${GRID_POST_ONLY ? 'ON' : 'OFF'}

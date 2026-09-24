@@ -22,6 +22,9 @@ GRID_UPPER_PRICE=0
 GRID_RANGE_PCT=5
 GRID_ORDER_SIZE_USDT=20
 GRID_TOTAL_INVESTMENT_USDT=0
+# Position exposure plus pending BUY notional across configured symbols.
+FUTURES_MAX_SYMBOL_EXPOSURE_USDT=400
+FUTURES_MAX_TOTAL_EXPOSURE_USDT=400
 
 GRID_MAX_ACTIVE_BUY_ORDERS=5
 # Soft warning threshold only. Tracked SELL exits remain eligible above it.
