@@ -2982,14 +2982,11 @@ class FuturesGridEngine {
     // counting of the same fill.
     this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
-    await this.sendAlert(this.formatFuturesTelegramMessage('BUY futures terisi', [
-      ['Simbol', symbol],
-      ['Harga beli', displayNumber(price, 8)],
-      ['Jumlah', displayNumber(amount, 8)],
-      ['Fee BUY', signedUsdt(feeQuote)],
-      ['Artinya', 'Posisi LONG bertambah. Pembelian ini belum menghasilkan profit.'],
-      ['Berikutnya', 'Bot mencari target SELL sesuai aturan grid; order belum tentu langsung tersedia.'],
-    ]));
+    await this.sendAlert([
+      `[BUY] ${symbol}`,
+      `${displayNumber(amount, 8)} @ ${displayNumber(price, 8)}`,
+      `Fee: ${signedUsdt(feeQuote)}`,
+    ].join('\n'));
     if (!GRID_REFILL_ON_FILLED || !this.canPlaceNewOrders() || !levels.length) return;
     const trackedBuy = symState.lastBuyByLevel[levelIndex];
     const totalSellable = Math.max(0, Number(trackedBuy?.sellableAmount ?? trackedBuy?.amount) || 0);
