@@ -3992,11 +3992,7 @@ class FuturesGridEngine {
   buildTelegramStatusMessage() {
     const lines = [
       '[Ringkasan futures]',
-      '',
-      `Mode: ${EXCHANGE_MODE.toUpperCase()}`,
-      `Leverage: ${LEVERAGE}x`,
-      `Margin: ${MARGIN_MODE}`,
-      'Hasil total = hasil Binance setelah fee + funding + hasil posisi berjalan.',
+      `${EXCHANGE_MODE.toUpperCase()} | ${LEVERAGE}x | ${MARGIN_MODE}`,
     ];
     for (const symbol of SYMBOLS) {
       const symState = this.state.getSymbol(symbol);
@@ -4006,20 +4002,12 @@ class FuturesGridEngine {
       const account = incomeMetrics(symState.accountIncome, this.latestAccountUnrealized?.get(symbol) ?? unrealized);
       const exits = sellOverview(symState.orders, position);
       lines.push(
-        '',
-        `-- ${symbol} --`,
-        `Hasil total simbol: ${signedUsdt(positionKnown ? account.net : null)}`,
-        `Sudah tercatat (setelah fee): ${signedUsdt(account.realized)}`,
-        `Masih berjalan: ${signedUsdt(positionKnown ? (this.latestAccountUnrealized?.get(symbol) ?? unrealized) : null)}`,
-        `Funding bersih: ${account.ready ? signedUsdt(account.funding) : 'belum tersedia'}`,
-        `Posisi: ${!positionKnown ? 'belum tersedia' : position ? `LONG ${displayNumber(position.contracts, 8)}` : 'tidak ada LONG aktif'}`,
-        ...(position ? [`Entry rata-rata: ${displayNumber(position.entryPrice, 8)} | Mark: ${displayNumber(position.markPrice ?? position.info?.markPrice, 8)}`] : []),
-        `SELL terendah: ${exits.nearestPrice === null ? 'belum ada' : displayNumber(exits.nearestPrice, 8)+' ('+exits.nearestLabel.toLowerCase()+')'}`,
-        ...(exits.belowEntryCount > 0 ? [`${exits.belowEntryCount} SELL di bawah entry: bisa merealisasikan rugi Binance meski pasangan grid untung.`] : []),
-        `Riwayat sejak ${account.since ? new Date(account.since).toISOString().slice(0, 10) : 'belum tersedia'}`
+        '', `${symbol}`,
+        `PnL: ${signedUsdt(positionKnown ? account.net : null)} | Realisasi: ${signedUsdt(account.realized)}`,
+        `Posisi: ${!positionKnown ? 'belum tersedia' : position ? `LONG ${displayNumber(position.contracts, 8)} | Entry ${displayNumber(position.entryPrice, 8)} | Mark ${displayNumber(position.markPrice ?? position.info?.markPrice, 8)}` : 'tidak ada'}`,
+        `SELL: ${exits.nearestPrice === null ? 'belum ada' : displayNumber(exits.nearestPrice, 8)+' ('+exits.nearestLabel.toLowerCase()+')'}`
       );
     }
-    lines.push('', 'Angka berjalan masih berubah. Riwayat mencakup transaksi manual dan SHORT pada simbol yang sama. Profit pasangan grid adalah statistik terpisah di dashboard.');
     return lines.join('\n');
   }
 

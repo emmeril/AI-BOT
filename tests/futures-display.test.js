@@ -4,20 +4,17 @@ const { sellFillMessage, sellOverview, signedUsdt, sellEntryLabel } = require('.
 
 test('profitable grid pair cannot hide an actual losing Binance close in the notification', () => {
   const message = sellFillMessage({ symbol: 'TEST/USDT:USDT', price: 92, amount: 1, realizedPnl: '-3', fee: 0.1, gridProfit: 2 });
-  assert.match(message, /tercatat rugi/);
-  assert.match(message, /Hasil setelah fee SELL: -3,1 USDT/);
-  assert.match(message, /Selisih pasangan grid: \+2 USDT/);
-  assert.match(message, /di bawah entry rata-rata Binance saat eksekusi/);
-  assert.match(message, /Fee BUY dan funding dihitung terpisah/);
-  assert.match(message, /sisa LONG/);
+  assert.match(message, /PnL setelah fee: -3,1 USDT/);
+  assert.match(message, /Grid: \+2 USDT/);
+  assert.match(message, /Tutup di bawah entry rata-rata/);
 });
 
 test('unknown PnL stays unknown; zero and fee-driven loss are represented accurately', () => {
   assert.equal(signedUsdt(null), 'belum tersedia');
-  assert.match(sellFillMessage({ fee: 0.1, realizedPnl: undefined }), /Hasil Binance belum tersedia/);
+  assert.match(sellFillMessage({ fee: 0.1, realizedPnl: undefined }), /PnL setelah fee: belum tersedia/);
   const message = sellFillMessage({ fee: 0.1, realizedPnl: '0.05' });
-  assert.match(message, /tercatat rugi/);
-  assert.doesNotMatch(message, /di bawah entry rata-rata Binance saat eksekusi/);
+  assert.match(message, /PnL setelah fee: -0,05 USDT/);
+  assert.doesNotMatch(message, /Tutup di bawah entry rata-rata/);
   assert.equal(sellEntryLabel(95, 95), 'Sama dengan entry rata-rata');
   assert.equal(sellEntryLabel(92, null), 'Entry belum tersedia');
 });

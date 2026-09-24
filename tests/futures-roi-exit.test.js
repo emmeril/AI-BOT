@@ -224,7 +224,7 @@ test('ROI falls back to unrealized PnL divided by initial margin', () => {
   assert.equal(engine.getPositionRoiPct({ unrealizedPnl: 10, initialMargin: 10 }), 100);
 });
 
-test('futures Telegram status reports zero unrealized PnL when position is closed', () => {
+test('futures Telegram status reports total PnL and no position when it is closed', () => {
   const engine = Object.create(FuturesGridEngine.prototype);
   engine.state = {
     getSymbol: () => ({ realizedGridProfit: 0.2409, realizedExitProfit: 0, fundingProfit: -0.0016,
@@ -237,8 +237,8 @@ test('futures Telegram status reports zero unrealized PnL when position is close
   engine.latestPositions = new Map(String(process.env.SYMBOLS || 'BTC/USDT:USDT').split(',').map(symbol => [symbol.trim(), null]));
 
   const message = engine.buildTelegramStatusMessage();
-  assert.match(message, /Masih berjalan: 0 USDT/);
-  assert.match(message, /Hasil total simbol: \+0,2393 USDT/);
+  assert.match(message, /PnL: \+0,2393 USDT/);
+  assert.match(message, /Posisi: tidak ada/);
   assert.doesNotMatch(message, /unrealized=null/);
 });
 

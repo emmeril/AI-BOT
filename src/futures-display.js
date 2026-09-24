@@ -30,20 +30,12 @@ function sellFillMessage({ symbol, price, amount, realizedPnl, fee, gridProfit }
   const gross = realizedPnl == null || realizedPnl === '' ? null : Number(realizedPnl);
   const valid = Number.isFinite(gross) && gross !== null;
   const net = valid ? gross - fee : null;
-  const result = net === null ? 'Hasil Binance belum tersedia.'
-    : net < 0 ? 'Penutupan ini tercatat rugi setelah fee SELL.'
-      : net > 0 ? 'Penutupan ini tercatat untung setelah fee SELL.' : 'Hasil penutupan ini nol setelah fee SELL.';
   return [
-    '[SELL futures terisi]', symbol,
-    `Terjual: ${displayNumber(amount, 8)} pada harga ${displayNumber(price, 8)}`,
-    '', result,
-    `Hasil Binance sebelum fee: ${signedUsdt(valid ? gross : null)}`,
-    `Fee SELL: ${signedUsdt(fee)}`,
-    `Hasil setelah fee SELL: ${signedUsdt(net)}`,
-    'Fee BUY dan funding dihitung terpisah dalam hasil total.',
-    ...(gridProfit == null ? [] : ['', `Selisih pasangan grid: ${signedUsdt(gridProfit)}`, 'Ini statistik pasangan BUY-SELL, bukan hasil total akun.']),
-    ...(valid && gross < 0 ? ['SELL ini menutup LONG di bawah entry rata-rata Binance saat eksekusi.'] : []),
-    'SELL mengurangi posisi. Jika masih ada sisa LONG, posisinya tetap berjalan.',
+    `[SELL] ${symbol}`,
+    `${displayNumber(amount, 8)} @ ${displayNumber(price, 8)}`,
+    `PnL setelah fee: ${signedUsdt(net)} (fee: ${signedUsdt(fee)})`,
+    ...(gridProfit == null ? [] : [`Grid: ${signedUsdt(gridProfit)}`]),
+    ...(valid && gross < 0 ? ['Tutup di bawah entry rata-rata.'] : []),
   ].join('\n');
 }
 
