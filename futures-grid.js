@@ -1973,9 +1973,9 @@ class FuturesGridEngine {
       if (clampedIndex !== shiftedIndex) {
         // Without clamping, an order's levelIndex could land outside
         // [0, GRID_COUNT-1]. That breaks every lookup keyed on levelIndex:
-        // reconcileSymbolUnlocked's activeBuyLevels/activeSellLevels
-        // wouldn't recognize the order (risking a duplicate placed at the
-        // same price), handleSellFill's `levelIndex - 1` buy lookup could
+        // reconcileSymbolUnlocked's active buy/source-level lookups wouldn't
+        // recognize the order (risking a duplicate), handleSellFill's
+        // `levelIndex - 1` buy lookup could
         // go negative and silently skip profit accounting, and
         // handleBuyFill's `levelIndex + 1` sell-refill lookup could target
         // a non-existent level. Clamping keeps the index valid; this order
@@ -2530,6 +2530,16 @@ class FuturesGridEngine {
       console.log(`[GRID] ${symbol} ${side.toUpperCase()} level=${levelIndex}${sourceLabel} refill=${refillCount} amount=${preciseAmount} price=${precisePrice}${GRID_POST_ONLY ? ' (postOnly)' : ''}`);
       return order;
     } catch (err) {
+      if (this.isMaxOpenOrdersError(err)) {
+        if (side === 'buy') {
+          console.warn(
+            `[SKIP] ${symbol} BUY level=${levelIndex} | exchange open-order limit reached; ` +
+            `preserving capacity for SELL exits`
+          );
+          return null;
+        }
+        throw err;
+      }
       if (this.isInsufficientFundsError(err)) {
         console.warn(
           `[SKIP] ${symbol} ${side.toUpperCase()} level=${levelIndex} amount=${amount} price=${price} | insufficient balance`
@@ -2565,6 +2575,75 @@ class FuturesGridEngine {
         message.includes('precision') ||
         message.includes('must be greater')
       ));
+  }
+
+  isMaxOpenOrdersError(err) {
+    const message = String(err?.message || err || '').toLowerCase();
+    return String(err?.code || '') === '-2025' ||
+      message.includes('-2025') ||
+      message.includes('max open order') ||
+      message.includes('maximum open order') ||
+      message.includes('too many open orders');
+  }
+
+  getOpenOrderRemainingAmount(order) {
+    const remaining = Number(order?.remaining);
+    if (Number.isFinite(remaining) && remaining >= 0) return remaining;
+    const amount = Math.max(0, Number(order?.amount) || 0);
+    const filled = Math.max(0, Number(order?.filled) || 0);
+    return Math.max(0, amount - filled);
+  }
+
+  getReservedSellAmount(openOrders) {
+    return (openOrders || []).reduce((total, order) => {
+      if (String(order?.side).toLowerCase() !== 'sell') return total;
+      return total + this.getOpenOrderRemainingAmount(order);
+    }, 0);
+  }
+
+  async cancelFarthestBuyForExit(symbol, referencePrice) {
+    const openOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+    const managed = await this.getManagedOpenOrders(symbol, openOrders);
+    const candidate = managed
+      .filter(order => String(order.side).toLowerCase() === 'buy')
+      .sort((a, b) =>
+        Math.abs(Number(b.price) - referencePrice) - Math.abs(Number(a.price) - referencePrice)
+      )[0];
+    if (!candidate) return false;
+    await this.cancelOrder(symbol, candidate, 'free exchange order slot for priority SELL exit');
+    return true;
+  }
+
+  async placeExitLimit(
+    symbol, levelIndex, price, amount,
+    { refillCount = 0, sourceBuyLevelIndex, referencePrice = price } = {}
+  ) {
+    const symState = this.state.getSymbol(symbol);
+    const activeSellCount = this.countActiveOrders(symState, 'sell');
+    if (activeSellCount >= GRID_MAX_ACTIVE_SELL_ORDERS) {
+      console.warn(
+        `[EXIT-PRIORITY] ${symbol} placing SELL sourceBuy=${sourceBuyLevelIndex} above configured ` +
+        `soft threshold ${GRID_MAX_ACTIVE_SELL_ORDERS}`
+      );
+    }
+    const options = { refillCount, sourceBuyLevelIndex };
+    try {
+      return await this.placeLimit(symbol, 'sell', levelIndex, price, amount, options);
+    } catch (err) {
+      if (!this.isMaxOpenOrdersError(err)) throw err;
+      const freedSlot = await this.cancelFarthestBuyForExit(symbol, Number(referencePrice));
+      if (!freedSlot) {
+        throw new Error(
+          `${symbol} priority SELL sourceBuy=${sourceBuyLevelIndex} could not be placed: ` +
+          `exchange open-order limit reached and no managed BUY could be cancelled`,
+          { cause: err }
+        );
+      }
+      console.warn(
+        `[EXIT-PRIORITY] ${symbol} retrying SELL sourceBuy=${sourceBuyLevelIndex} after cancelling a BUY`
+      );
+      return await this.placeLimit(symbol, 'sell', levelIndex, price, amount, options);
+    }
   }
 
   // Free margin available to open new positions, in the symbol's quote/margin
@@ -2856,7 +2935,6 @@ class FuturesGridEngine {
     const existingOrder = this.getActiveSellOrderForBuyLevel(symState, levelIndex);
     const target = this.findSellTargetForBuy(symbol, levels, levelIndex, trackedBuy, {
       amount: totalSellable,
-      reservedSellLevels: this.getReservedSellLevels(symState, existingOrder?.id),
     });
     if (!target) {
       this.warnNoSellTarget(symbol, levelIndex, levels, trackedBuy, totalSellable);
@@ -2877,8 +2955,8 @@ class FuturesGridEngine {
         );
         try {
           await this.cancelOrder(symbol, existingOrder, `sell target update sourceBuy=${levelIndex}`);
-          await this.placeLimit(symbol, 'sell', target.sellLevelIndex, target.sellPrice, totalSellable, {
-            refillCount, sourceBuyLevelIndex: levelIndex,
+          await this.placeExitLimit(symbol, target.sellLevelIndex, target.sellPrice, totalSellable, {
+            refillCount, sourceBuyLevelIndex: levelIndex, referencePrice: price,
           });
         } catch (err) {
           console.warn(`[UPDATE] ${symbol} SELL sourceBuy=${levelIndex} cancel+replace failed: ${err.message}`);
@@ -2889,12 +2967,8 @@ class FuturesGridEngine {
       return;
     }
 
-    if (this.countActiveOrders(symState, 'sell') >= GRID_MAX_ACTIVE_SELL_ORDERS) {
-      console.warn(`[SKIP] ${symbol} SELL sourceBuy=${levelIndex} | active sell order limit reached`);
-      return;
-    }
-    await this.placeLimit(symbol, 'sell', target.sellLevelIndex, target.sellPrice, totalSellable, {
-      refillCount, sourceBuyLevelIndex: levelIndex,
+    await this.placeExitLimit(symbol, target.sellLevelIndex, target.sellPrice, totalSellable, {
+      refillCount, sourceBuyLevelIndex: levelIndex, referencePrice: price,
     });
   }
 
@@ -3495,23 +3569,21 @@ class FuturesGridEngine {
     }
 
     const activeBuyLevels = new Set();
-    const activeSellLevels = new Set();
     const symState = this.state.getSymbol(symbol);
     for (const order of managedOrders) {
       const idx = this.getLevelIndex(levels, Number(order.price));
       if (order.side === 'buy') activeBuyLevels.add(idx);
-      if (order.side === 'sell') activeSellLevels.add(idx);
     }
     for (const order of Object.values(symState.orders)) {
       if (order.side === 'buy') activeBuyLevels.add(Number(order.levelIndex));
-      if (order.side === 'sell') activeSellLevels.add(Number(order.levelIndex));
     }
 
     const below = this.getNearestLevels(levels, currentPrice, 'buy', GRID_MAX_ACTIVE_BUY_ORDERS);
-    const above = this.getNearestLevels(levels, currentPrice, 'sell', GRID_MAX_ACTIVE_SELL_ORDERS);
 
     let quoteFree = this.getQuoteFree(balance, symbol);
-    let baseFree = this.getBaseFree(positions, symbol);
+    const positionAmount = this.getBaseFree(positions, symbol);
+    const reservedSellAmount = this.getReservedSellAmount(managedOrders);
+    let baseFree = Math.max(0, positionAmount - reservedSellAmount);
     let remainingInvestmentUsdt = this.getRemainingInvestmentUsdt(symbol);
 
     for (const level of below) {
@@ -3564,17 +3636,12 @@ class FuturesGridEngine {
       remainingInvestmentUsdt = Math.max(0, remainingInvestmentUsdt - cost);
     }
 
-    const reservedSellLevels = new Set(activeSellLevels);
     const trackedBuys = Object.entries(symState.lastBuyByLevel)
       .map(([buyLevelIndex, buy]) => ({ buyLevelIndex: Number(buyLevelIndex), buy }))
       .filter(item => Number.isInteger(item.buyLevelIndex) && item.buy)
       .sort((a, b) => b.buyLevelIndex - a.buyLevelIndex);
 
     for (const { buyLevelIndex, buy: trackedBuy } of trackedBuys) {
-      if (this.countActiveOrders(symState, 'sell') >= GRID_MAX_ACTIVE_SELL_ORDERS) {
-        console.warn(`[SKIP] ${symbol} SELL sourceBuy=${buyLevelIndex} | active sell order limit (${GRID_MAX_ACTIVE_SELL_ORDERS}) reached`);
-        break;
-      }
       if (this.getActiveSellOrderForBuyLevel(symState, buyLevelIndex)) continue;
       const trackedAmount = Math.max(0, Number(trackedBuy.sellableAmount ?? trackedBuy.amount) || 0);
       if (!(trackedAmount > 0)) continue;
@@ -3586,7 +3653,6 @@ class FuturesGridEngine {
       const target = this.findSellTargetForBuy(symbol, levels, buyLevelIndex, trackedBuy, {
         amount,
         minimumPrice: currentPrice,
-        reservedSellLevels,
       });
       if (!target) {
         this.warnNoSellTarget(symbol, buyLevelIndex, levels, trackedBuy, amount);
@@ -3594,12 +3660,11 @@ class FuturesGridEngine {
       }
       this.clearSellTargetWarning(symbol, buyLevelIndex);
       const refillCount = Math.max(0, Number(trackedBuy?.refillCount) || 0);
-      const order = await this.placeLimit(
-        symbol, 'sell', target.sellLevelIndex, target.sellPrice, amount,
-        { refillCount, sourceBuyLevelIndex: buyLevelIndex }
+      const order = await this.placeExitLimit(
+        symbol, target.sellLevelIndex, target.sellPrice, amount,
+        { refillCount, sourceBuyLevelIndex: buyLevelIndex, referencePrice: currentPrice }
       );
       if (!order) continue;
-      reservedSellLevels.add(target.sellLevelIndex);
       baseFree -= amount;
     }
 
@@ -3641,17 +3706,9 @@ class FuturesGridEngine {
     ) || null;
   }
 
-  getReservedSellLevels(symState, excludeOrderId = null) {
-    return new Set(Object.values(symState.orders || {})
-      .filter(order => String(order.side).toLowerCase() === 'sell' &&
-        String(order.id) !== String(excludeOrderId))
-      .map(order => Number(order.levelIndex))
-      .filter(Number.isInteger));
-  }
-
   findSellTargetForBuy(
     symbol, levels, buyLevelIndex, trackedBuy,
-    { amount = null, minimumPrice = -Infinity, reservedSellLevels = new Set() } = {}
+    { amount = null, minimumPrice = -Infinity } = {}
   ) {
     const sourceLevel = Number(buyLevelIndex);
     if (!Number.isInteger(sourceLevel) || sourceLevel < 0 || sourceLevel + 1 >= levels.length) return null;
@@ -3659,7 +3716,6 @@ class FuturesGridEngine {
     if (!(sellableAmount > 0)) return null;
     const minCost = this.getMinCost(symbol);
     for (let sellLevelIndex = sourceLevel + 1; sellLevelIndex < levels.length; sellLevelIndex++) {
-      if (reservedSellLevels.has(sellLevelIndex)) continue;
       const sellPrice = Number(levels[sellLevelIndex]);
       if (!(sellPrice > minimumPrice) || !this.isTrackedSellProfitable(symbol, trackedBuy, sellPrice)) continue;
       let precise;
@@ -3991,7 +4047,7 @@ Range: ${GRID_LOWER_PRICE && GRID_UPPER_PRICE ? `${GRID_LOWER_PRICE}-${GRID_UPPE
 Trailing Range: ${GRID_TRAILING_RANGE_ENABLED ? 'ON (auto up/down)' : 'OFF'}
 Trailing Up: ${GRID_TRAILING_UP_ENABLED ? `ON (range-follow trigger, cooldown=${GRID_TRAILING_UP_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
 Trailing Down: ${GRID_TRAILING_DOWN_ENABLED ? `ON (range-follow trigger, cooldown=${GRID_TRAILING_DOWN_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
-Max Active Orders: buy=${GRID_MAX_ACTIVE_BUY_ORDERS}, sell=${GRID_MAX_ACTIVE_SELL_ORDERS}
+Active Order Policy: buy hard-limit=${GRID_MAX_ACTIVE_BUY_ORDERS}, sell soft-warning=${GRID_MAX_ACTIVE_SELL_ORDERS} (tracked exits remain priority)
 Max Refills Per Level: ${GRID_MAX_REFILLS}
 Recreate On Start: ${GRID_RECREATE_ON_START ? 'ON' : 'OFF'}
 Post Only (Maker): ${GRID_POST_ONLY ? 'ON' : 'OFF'}

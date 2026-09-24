@@ -188,7 +188,7 @@ Trailing range hanya berlaku untuk auto range. Manual range tidak digeser oleh t
 - `ORDER_SIZE_USDT`: fallback legacy jika `GRID_ORDER_SIZE_USDT` kosong.
 - `GRID_TOTAL_INVESTMENT_USDT`: jika lebih dari 0, menjadi batas total modal grid dan mengambil prioritas. Ukuran efektif per grid menjadi `GRID_TOTAL_INVESTMENT_USDT / GRID_COUNT`.
 - `GRID_MAX_ACTIVE_BUY_ORDERS`: batas order buy aktif per symbol.
-- `GRID_MAX_ACTIVE_SELL_ORDERS`: batas order sell aktif per symbol.
+- `GRID_MAX_ACTIVE_SELL_ORDERS`: ambang peringatan order sell aktif per symbol. Pada futures, SELL untuk menutup buy lot yang sudah terisi tetap diprioritaskan dan tidak ditolak hanya karena ambang ini tercapai.
 - `GRID_RECREATE_ON_START`: cancel dan buat ulang grid saat bot start.
 - `GRID_CANCEL_OUT_OF_RANGE`: cancel managed order yang keluar range.
 - `GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MINUTES`: umur minimal order sebelum boleh dicancel karena out-of-range.
