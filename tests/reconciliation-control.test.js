@@ -148,7 +148,9 @@ test('spot range reset reconciles pending fills before cancelling old orders', a
   const engine = Object.create(SpotGridEngine.prototype);
   const symState = {
     config: { lower: 90, upper: 110 },
-    orders: { 'sell-1': { id: 'sell-1', side: 'sell', levelIndex: 2 } },
+    orders: {
+      'sell-1': { id: 'sell-1', side: 'sell', levelIndex: 2, sourceBuyLevelIndex: 1 },
+    },
     lastBuyByLevel: { 1: { price: 100, amount: 1, sellableAmount: 1 } },
     refillCountByLevel: { 1: 0 },
     rangeTransition: null,
@@ -173,6 +175,7 @@ test('spot range reset reconciles pending fills before cancelling old orders', a
   await engine.remapStateAfterRangeReset('BTC/USDT', 90, 110, 80, 120);
 
   assert.deepEqual(events, ['fills', 'cancel', 'fills']);
+  assert.equal(symState.remappedSellSources['sell-1'].sourceBuyLevelIndex, 1);
 });
 
 test('spot sends an unreconciled alert when a SELL fill has no buy record', async () => {
@@ -211,12 +214,21 @@ test('spot retries an unreconciled sell with the active grid levels', async () =
         orderMeta: { levelIndex: 2, sourceBuyLevelIndex: 1, refillCount: 0 },
       },
     },
+    remappedSellSources: {
+      'order-1': { sourceBuyLevelIndex: 0 },
+    },
   };
   let seenLevels;
-  engine.handleSellFill = async (_symbol, levels) => { seenLevels = levels; delete symState.unreconciledSells['sell-1']; };
+  let seenSourceBuyLevel;
+  engine.handleSellFill = async (_symbol, levels, _state, _trade, orderMeta) => {
+    seenLevels = levels;
+    seenSourceBuyLevel = orderMeta.sourceBuyLevelIndex;
+    delete symState.unreconciledSells['sell-1'];
+  };
 
   await engine.retryUnreconciledSells('BTC/USDT', [90, 100, 110], symState, new Set());
 
   assert.deepEqual(seenLevels, [90, 100, 110]);
+  assert.equal(seenSourceBuyLevel, 0);
   assert.deepEqual(symState.unreconciledSells, {});
 });

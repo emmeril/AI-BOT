@@ -263,7 +263,9 @@ test('futures range reset reconciles pending fills before cancelling old orders'
   const engine = Object.create(FuturesGridEngine.prototype);
   const symbolState = {
     config: { lower: 90, upper: 110 },
-    orders: { 'sell-1': { id: 'sell-1', side: 'sell', levelIndex: 2 } },
+    orders: {
+      'sell-1': { id: 'sell-1', side: 'sell', levelIndex: 2, sourceBuyLevelIndex: 1 },
+    },
     lastBuyByLevel: { 1: { price: 100, amount: 1, sellableAmount: 1 } },
     refillCountByLevel: { 1: 0 },
     rangeTransition: null,
@@ -287,6 +289,25 @@ test('futures range reset reconciles pending fills before cancelling old orders'
   await engine.remapStateAfterRangeReset('BTC/USDT:USDT', 90, 110, 80, 120);
 
   assert.deepEqual(events, ['fills', 'cancel', 'fills']);
+  assert.equal(symbolState.remappedSellSources['sell-1'].sourceBuyLevelIndex, 1);
+});
+
+test('futures resolves a delayed SELL through its persisted range remap', () => {
+  const engine = Object.create(FuturesGridEngine.prototype);
+  const symState = {
+    remappedSellSources: {
+      'order-1': { sourceBuyLevelIndex: 5, remappedAt: '2026-09-30T12:57:36.858Z' },
+    },
+  };
+
+  const resolved = engine.remapDelayedSellOrderMeta(
+    'JUP/USDT:USDT',
+    symState,
+    { order: 'order-1' },
+    { side: 'sell', levelIndex: 12, sourceBuyLevelIndex: 11, refillCount: 0 }
+  );
+
+  assert.equal(resolved.sourceBuyLevelIndex, 5);
 });
 
 test('futures sends an unreconciled alert when a SELL fill has no buy record', async () => {

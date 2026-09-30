@@ -457,6 +457,7 @@ class SpotGridEngine {
       );
     }
     await this.reconcilePendingFillsBeforeRangeTransition(symbol, 'reset post-cancel');
+    const staleOrders = Object.entries(symState.orders);
     if (Object.keys(symState.orders).length > 0) {
       console.warn(
         `[RANGE] ${symbol} had ${Object.keys(symState.orders).length} managed order(s) after cancellation; clearing stale local metadata`
@@ -473,10 +474,12 @@ class SpotGridEngine {
     }
 
     const remapped = {};
+    const sourceLevelRemap = {};
     for (const [oldIdx, buy] of oldEntries) {
       const fillPrice = Number(buy.price) || 0;
       if (!(fillPrice > 0)) continue;
       const newIdx = this.getLevelIndex(newLevels, fillPrice);
+      sourceLevelRemap[oldIdx] = newIdx;
       const collapsed = Boolean(remapped[newIdx]);
       remapped[newIdx] = this.mergeBuyRecords(remapped[newIdx], buy, {
         aggregatedAcrossLevels: collapsed,
@@ -486,6 +489,20 @@ class SpotGridEngine {
         `to new level ${newIdx} after range reset ${roundNumber(oldLower)}-${roundNumber(oldUpper)} -> ` +
         `${roundNumber(newLower)}-${roundNumber(newUpper)}`
       );
+    }
+    symState.remappedSellSources ||= {};
+    for (const remap of Object.values(symState.remappedSellSources)) {
+      const nextSource = sourceLevelRemap[remap.sourceBuyLevelIndex];
+      if (Number.isInteger(nextSource)) remap.sourceBuyLevelIndex = nextSource;
+    }
+    for (const [orderId, order] of staleOrders) {
+      if (String(order?.side).toLowerCase() !== 'sell') continue;
+      const nextSource = sourceLevelRemap[order.sourceBuyLevelIndex];
+      if (!Number.isInteger(nextSource)) continue;
+      symState.remappedSellSources[orderId] = {
+        sourceBuyLevelIndex: nextSource,
+        remappedAt: new Date().toISOString(),
+      };
     }
     symState.lastBuyByLevel = remapped;
     symState.refillCountByLevel = Object.fromEntries(
@@ -1313,6 +1330,10 @@ class SpotGridEngine {
       }
 
       const side = String(trade.side).toLowerCase();
+      if (side === 'sell') {
+        orderMeta = this.remapDelayedSellOrderMeta(symbol, symState, trade, orderMeta);
+        orderMetadataById.set(tradeOrderId, orderMeta);
+      }
       if (side === 'buy') {
         await this.handleBuyFill(symbol, levels, symState, trade, orderMeta, openOrderIds);
       } else if (side === 'sell') {

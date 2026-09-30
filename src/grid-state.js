@@ -32,6 +32,7 @@ class GridState {
       trailingDown: { shifts: 0, lastShiftAt: null },
       rangeTransition: null,
       unreconciledSells: {},
+      remappedSellSources: {},
     };
   }
 
@@ -47,6 +48,7 @@ class GridState {
     if (!isPlainObject(sym.trailingDown)) sym.trailingDown = { shifts: 0, lastShiftAt: null };
     if (sym.rangeTransition === undefined) sym.rangeTransition = null;
     if (!isPlainObject(sym.unreconciledSells)) sym.unreconciledSells = {};
+    if (!isPlainObject(sym.remappedSellSources)) sym.remappedSellSources = {};
     return sym;
   }
 

@@ -8,7 +8,11 @@ const { AsyncLocalStorage } = require('async_hooks');
 const { FibonacciRangeAdvisor } = require('./src/fibonacci-range-advisor');
 const { FibonacciDirectionAnalyzer } = require('./src/fibonacci-direction-analyzer');
 const { startFuturesDashboardServer } = require('./src/futures-dashboard-server');
-const { deferUnreconciledSell, retryUnreconciledSells } = require('./src/unreconciled-fills');
+const {
+  deferUnreconciledSell,
+  remapDelayedSellOrderMeta,
+  retryUnreconciledSells,
+} = require('./src/unreconciled-fills');
 const { syncIncome, incomeMetrics } = require('./src/futures-income');
 const { exposureBySymbol } = require('./src/futures-exposure');
 const { displayNumber, signedUsdt, sellOverview, sellFillMessage } = require('./src/futures-display');
@@ -894,6 +898,7 @@ class GridState {
         trailingDown: { shifts: 0, lastShiftAt: null },
         rangeTransition: null,
         unreconciledSells: {},
+        remappedSellSources: {},
       };
     }
     const sym = this.data.symbols[symbol];
@@ -920,6 +925,7 @@ class GridState {
     // stale local config/lastBuyByLevel. See resumeInterruptedRangeTransition().
     if (sym.rangeTransition === undefined) sym.rangeTransition = null;
     if (!isPlainObject(sym.unreconciledSells)) sym.unreconciledSells = {};
+    if (!isPlainObject(sym.remappedSellSources)) sym.remappedSellSources = {};
     return sym;
   }
 
@@ -1797,6 +1803,7 @@ class FuturesGridEngine {
       );
     }
     await this.reconcilePendingFillsBeforeRangeTransition(symbol, 'reset post-cancel');
+    const staleOrders = Object.entries(symState.orders);
     if (Object.keys(symState.orders).length > 0) {
       console.warn(
         `[RANGE] ${symbol} had ${Object.keys(symState.orders).length} managed order(s) after cancellation; clearing stale local metadata`
@@ -1813,10 +1820,12 @@ class FuturesGridEngine {
     }
 
     const remapped = {};
+    const sourceLevelRemap = {};
     for (const [oldIdx, buy] of oldEntries) {
       const fillPrice = Number(buy.price) || 0;
       if (!(fillPrice > 0)) continue;
       const newIdx = this.getLevelIndex(newLevels, fillPrice);
+      sourceLevelRemap[oldIdx] = newIdx;
       const collapsed = Boolean(remapped[newIdx]);
       remapped[newIdx] = this.mergeBuyRecords(remapped[newIdx], buy, {
         aggregatedAcrossLevels: collapsed,
@@ -1826,6 +1835,20 @@ class FuturesGridEngine {
         `to new level ${newIdx} after range reset ${roundNumber(oldLower)}-${roundNumber(oldUpper)} -> ` +
         `${roundNumber(newLower)}-${roundNumber(newUpper)}`
       );
+    }
+    symState.remappedSellSources ||= {};
+    for (const remap of Object.values(symState.remappedSellSources)) {
+      const nextSource = sourceLevelRemap[remap.sourceBuyLevelIndex];
+      if (Number.isInteger(nextSource)) remap.sourceBuyLevelIndex = nextSource;
+    }
+    for (const [orderId, order] of staleOrders) {
+      if (String(order?.side).toLowerCase() !== 'sell') continue;
+      const nextSource = sourceLevelRemap[order.sourceBuyLevelIndex];
+      if (!Number.isInteger(nextSource)) continue;
+      symState.remappedSellSources[orderId] = {
+        sourceBuyLevelIndex: nextSource,
+        remappedAt: new Date().toISOString(),
+      };
     }
     symState.lastBuyByLevel = remapped;
     symState.refillCountByLevel = Object.fromEntries(
@@ -3411,6 +3434,10 @@ class FuturesGridEngine {
       }
 
       const side = String(trade.side).toLowerCase();
+      if (side === 'sell' && !orderMeta.isPositionExit) {
+        orderMeta = this.remapDelayedSellOrderMeta(symbol, symState, trade, orderMeta);
+        orderMetadataById.set(tradeOrderId, orderMeta);
+      }
       if (orderMeta.isPositionExit) {
         await this.handleExitFill(symbol, symState, trade, openOrderIds);
       } else if (side === 'buy') {
@@ -4140,6 +4167,7 @@ Fibonacci Direction (deterministic): ${FIBONACCI_DIRECTION_ANALYZER_ENABLED
 
 Object.assign(FuturesGridEngine.prototype, {
   deferUnreconciledSell,
+  remapDelayedSellOrderMeta,
   retryUnreconciledSells,
 });
 

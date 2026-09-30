@@ -25,6 +25,22 @@ async function deferUnreconciledSell(symbol, symState, trade, orderMeta, reason)
   return false;
 }
 
+function remapDelayedSellOrderMeta(symbol, symState, trade, orderMeta) {
+  const orderId = String(trade?.order ?? '');
+  const remap = symState.remappedSellSources?.[orderId];
+  const mappedSource = Number(remap?.sourceBuyLevelIndex);
+  if (!orderId || !Number.isInteger(mappedSource)) return orderMeta;
+
+  const currentSource = this.getSellSourceBuyLevelIndex(orderMeta);
+  if (currentSource !== mappedSource) {
+    console.warn(
+      `[RECOVER] ${symbol} delayed SELL order ${orderId} sourceBuy=${currentSource}->${mappedSource} ` +
+      'after range remap'
+    );
+  }
+  return { ...orderMeta, sourceBuyLevelIndex: mappedSource };
+}
+
 async function retryUnreconciledSells(symbol, levels, symState, openOrderIds) {
   // Buys later in the fetched batch may restore the missing cost basis.
   const pending = Object.entries(symState.unreconciledSells || {})
@@ -36,14 +52,24 @@ async function retryUnreconciledSells(symbol, levels, symState, openOrderIds) {
     })
     .sort((a, b) => Number(a.trade.timestamp) - Number(b.trade.timestamp));
   for (const { trade, orderMeta } of pending) {
-    await this.handleSellFill(symbol, levels, symState, trade, orderMeta, openOrderIds);
+    const resolvedMeta = this.remapDelayedSellOrderMeta(symbol, symState, trade, orderMeta);
+    await this.handleSellFill(symbol, levels, symState, trade, resolvedMeta, openOrderIds);
   }
   const count = Object.keys(symState.unreconciledSells || {}).length;
   if (count) throw new Error(`${symbol}: ${count} unreconciled sell fill(s); holding trade watermark and new orders`);
 }
 
 function applyUnreconciledFillMethods(target) {
-  Object.assign(target.prototype, { deferUnreconciledSell, retryUnreconciledSells });
+  Object.assign(target.prototype, {
+    deferUnreconciledSell,
+    remapDelayedSellOrderMeta,
+    retryUnreconciledSells,
+  });
 }
 
-module.exports = { applyUnreconciledFillMethods, deferUnreconciledSell, retryUnreconciledSells };
+module.exports = {
+  applyUnreconciledFillMethods,
+  deferUnreconciledSell,
+  remapDelayedSellOrderMeta,
+  retryUnreconciledSells,
+};
