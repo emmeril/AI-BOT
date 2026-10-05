@@ -198,6 +198,9 @@ Trailing range hanya berlaku untuk auto range. Manual range tidak digeser oleh t
 - `GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MINUTES`: umur minimal order sebelum boleh dicancel karena out-of-range.
 - `GRID_REFILL_ON_FILLED`: buat order pengganti setelah fill.
 - `GRID_MAX_REFILLS`: batas buy refill per grid level setelah sell selesai. Default `2`; order sell untuk menutup inventory tetap dibuat agar posisi tidak tertahan.
+- `GRID_AGGREGATED_EXIT_LADDER_ENABLED`: futures saja. Pecah inventory hasil penggabungan/remap range menjadi beberapa SELL bertingkat. Inventory grid biasa tetap memakai satu SELL per sumber BUY.
+- `GRID_AGGREGATED_EXIT_LADDER_MAX_ORDERS`: jumlah maksimum tingkat SELL untuk satu inventory gabungan. Bot mengurangi jumlah tingkat otomatis jika quantity atau minimum notional exchange tidak mencukupi.
+- `GRID_AGGREGATED_EXIT_LADDER_SYMBOLS`: daftar simbol yang boleh memakai SELL bertingkat, dipisah koma. Kosong berarti seluruh simbol futures yang dikonfigurasi.
 - `GRID_POST_ONLY`: gunakan maker/post-only order jika exchange mendukung.
 - `GRID_PRICE_PRECISION_MAX_DEVIATION_PCT`: toleransi perubahan harga setelah dibulatkan mengikuti precision exchange.
 - `BINANCE_SPOT_MAKER_FEE_RATE`: asumsi fee maker Binance Spot per sisi untuk prompt AI. Default `0.001` atau 0.1%; gunakan `0.00075` jika fee dibayar pakai BNB dengan diskon 25%, atau sesuaikan dengan tier VIP/pair akun.

@@ -141,6 +141,9 @@ const GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MS = Math.max(
 ) * MINUTE_MS;
 const GRID_REFILL_ON_FILLED = Config.boolean('GRID_REFILL_ON_FILLED', true);
 const GRID_MAX_REFILLS = Config.number('GRID_MAX_REFILLS', 2);
+const GRID_AGGREGATED_EXIT_LADDER_ENABLED = Config.boolean('GRID_AGGREGATED_EXIT_LADDER_ENABLED', false);
+const GRID_AGGREGATED_EXIT_LADDER_MAX_ORDERS = Config.number('GRID_AGGREGATED_EXIT_LADDER_MAX_ORDERS', 7);
+const GRID_AGGREGATED_EXIT_LADDER_SYMBOLS = Config.list('GRID_AGGREGATED_EXIT_LADDER_SYMBOLS', '');
 const GRID_STATE_FILE = Config.get('GRID_STATE_FILE', 'grid-state-futures.json');
 const GRID_STATE_PATH = path.resolve(process.cwd(), GRID_STATE_FILE);
 const BOT_LOCK_FILE = Config.get('BOT_LOCK_FILE', `${GRID_STATE_FILE}.lock`);
@@ -457,6 +460,7 @@ function validateRuntimeConfiguration() {
   requireInteger('GRID_MAX_ACTIVE_BUY_ORDERS', GRID_MAX_ACTIVE_BUY_ORDERS);
   requireInteger('GRID_MAX_ACTIVE_SELL_ORDERS', GRID_MAX_ACTIVE_SELL_ORDERS);
   requireInteger('GRID_MAX_REFILLS', GRID_MAX_REFILLS, 0);
+  requireInteger('GRID_AGGREGATED_EXIT_LADDER_MAX_ORDERS', GRID_AGGREGATED_EXIT_LADDER_MAX_ORDERS, 2);
   requireNonNegative('BOT_LOCK_STALE_GRACE_MS', BOT_LOCK_STALE_GRACE_MS);
   requirePositive('TELEGRAM_TIMEOUT_MS', TELEGRAM_TIMEOUT_MS);
   requirePositive('LEVERAGE', LEVERAGE);
@@ -2058,6 +2062,134 @@ class FuturesGridEngine {
     };
   }
 
+  buildAggregatedExitLadderPlan(
+    symbol, levels, buyLevelIndex, buy,
+    { occupiedBuyLevels = new Set(), minimumPrice = -Infinity } = {}
+  ) {
+    if (!GRID_AGGREGATED_EXIT_LADDER_ENABLED || buy?.aggregated !== true) return null;
+    const sourceLevel = Number(buyLevelIndex);
+    const totalSellable = Math.max(0, Number(buy.sellableAmount ?? buy.amount) || 0);
+    if (!Number.isInteger(sourceLevel) || !(totalSellable > 0)) return null;
+
+    const preciseTotal = Number(this.exchange.amountToPrecision(symbol, totalSellable));
+    const tolerance = Math.max(1e-12, totalSellable * 1e-12);
+    if (!(preciseTotal > 0) || Math.abs(preciseTotal - totalSellable) > tolerance) return null;
+
+    const candidates = [];
+    for (let targetLevelIndex = sourceLevel + 1; targetLevelIndex < levels.length; targetLevelIndex++) {
+      const stagedSourceLevel = targetLevelIndex - 1;
+      if (stagedSourceLevel !== sourceLevel && occupiedBuyLevels.has(stagedSourceLevel)) continue;
+      const sellPrice = Number(levels[targetLevelIndex]);
+      if (!(sellPrice > minimumPrice) || !this.isTrackedSellProfitable(symbol, buy, sellPrice)) continue;
+      candidates.push({ sourceBuyLevelIndex: stagedSourceLevel, sellLevelIndex: targetLevelIndex, sellPrice });
+    }
+
+    const maxParts = Math.min(GRID_AGGREGATED_EXIT_LADDER_MAX_ORDERS, candidates.length);
+    const minCost = this.getMinCost(symbol);
+    for (let partCount = maxParts; partCount >= 2; partCount--) {
+      const weightTotal = partCount * (partCount + 1) / 2;
+      const amounts = [];
+      let allocated = 0;
+      for (let index = 0; index < partCount; index++) {
+        const rawAmount = index === partCount - 1
+          ? preciseTotal - allocated
+          : preciseTotal * (partCount - index) / weightTotal;
+        const amount = Number(this.exchange.amountToPrecision(symbol, rawAmount));
+        amounts.push(amount);
+        allocated += amount;
+      }
+
+      const difference = preciseTotal - allocated;
+      if (Math.abs(difference) > tolerance) {
+        amounts[0] = Number(this.exchange.amountToPrecision(symbol, amounts[0] + difference));
+      }
+      const plannedTotal = amounts.reduce((sum, amount) => sum + amount, 0);
+      if (Math.abs(plannedTotal - preciseTotal) > tolerance || amounts.some(amount => !(amount > 0))) continue;
+
+      const plan = candidates.slice(0, partCount).map((candidate, index) => ({
+        ...candidate,
+        amount: amounts[index],
+      }));
+      const valid = plan.every(part => {
+        try {
+          return this.getPreciseOrderNumbers(symbol, part.sellPrice, part.amount).notional >= minCost - 1e-8;
+        } catch {
+          return false;
+        }
+      });
+      if (valid) return plan;
+    }
+    return null;
+  }
+
+  stageAggregatedExitLadders(symbol, levels, currentPrice, symState, additionalOccupiedBuyLevels = new Set()) {
+    if (!GRID_AGGREGATED_EXIT_LADDER_ENABLED) return 0;
+    if (GRID_AGGREGATED_EXIT_LADDER_SYMBOLS.length &&
+        !GRID_AGGREGATED_EXIT_LADDER_SYMBOLS.includes(symbol)) return 0;
+    const occupiedBuyLevels = new Set(Object.keys(symState.lastBuyByLevel || {}).map(Number));
+    for (const levelIndex of additionalOccupiedBuyLevels) occupiedBuyLevels.add(Number(levelIndex));
+    const entries = Object.entries(symState.lastBuyByLevel || {});
+    let stagedCount = 0;
+
+    for (const [rawBuyLevelIndex, buy] of entries) {
+      const buyLevelIndex = Number(rawBuyLevelIndex);
+      if (buy?.aggregated !== true || additionalOccupiedBuyLevels.has(buyLevelIndex) ||
+          this.getActiveSellOrderForBuyLevel(symState, buyLevelIndex)) continue;
+      const plan = this.buildAggregatedExitLadderPlan(symbol, levels, buyLevelIndex, buy, {
+        occupiedBuyLevels,
+        minimumPrice: currentPrice,
+      });
+      if (!plan) continue;
+
+      const totalSellable = Number(buy.sellableAmount ?? buy.amount) || 0;
+      const totalAmount = Number(buy.amount) || totalSellable;
+      const totalCostQuote = Number(buy.totalCostQuote) || 0;
+      const totalFeeQuote = Number(buy.totalFeeQuote) || 0;
+      const group = buy.stagedExitGroup || `${Date.now().toString(36)}-${buyLevelIndex}`;
+      let allocatedAmount = 0;
+      let allocatedCost = 0;
+      let allocatedFee = 0;
+
+      delete symState.lastBuyByLevel[buyLevelIndex];
+      delete symState.refillCountByLevel[buyLevelIndex];
+      occupiedBuyLevels.delete(buyLevelIndex);
+
+      plan.forEach((part, index) => {
+        const isLast = index === plan.length - 1;
+        const ratio = part.amount / totalSellable;
+        const childAmount = isLast ? totalAmount - allocatedAmount : totalAmount * ratio;
+        const childCost = isLast ? totalCostQuote - allocatedCost : totalCostQuote * ratio;
+        const childFee = isLast ? totalFeeQuote - allocatedFee : totalFeeQuote * ratio;
+        allocatedAmount += childAmount;
+        allocatedCost += childCost;
+        allocatedFee += childFee;
+        symState.lastBuyByLevel[part.sourceBuyLevelIndex] = {
+          ...buy,
+          amount: childAmount,
+          sellableAmount: part.amount,
+          totalCostQuote: childCost,
+          totalFeeQuote: childFee,
+          aggregated: false,
+          stagedExitChild: true,
+          stagedExitGroup: group,
+          stagedExitPart: index + 1,
+          stagedExitParts: plan.length,
+          stagedExitTargetLevel: part.sellLevelIndex,
+        };
+        symState.refillCountByLevel[part.sourceBuyLevelIndex] = Math.max(0, Number(buy.refillCount) || 0);
+        occupiedBuyLevels.add(part.sourceBuyLevelIndex);
+      });
+
+      stagedCount++;
+      console.log(
+        `[EXIT-LADDER] ${symbol} split aggregated BUY source=${buyLevelIndex} amount=${totalSellable} ` +
+        `into ${plan.length} staged exits: ` +
+        plan.map(part => `L${part.sellLevelIndex}:${part.amount}`).join(', ')
+      );
+    }
+    return stagedCount;
+  }
+
   clampBuyLevelIndex(levelIndex) {
     return Math.max(0, Math.min(GRID_COUNT - 1, Number(levelIndex)));
   }
@@ -3100,6 +3232,7 @@ class FuturesGridEngine {
     const allocatedBuyFee = buy.totalFeeQuote * proportion;
     const profit = (proceedsQuote - feeQuote) - (allocatedBuyCost + allocatedBuyFee);
     const refillCount = Math.max(0, Number(orderMeta.refillCount ?? buy.refillCount) || 0);
+    const stagedExitChild = buy.stagedExitChild === true;
 
     symState.realizedGridProfit += profit;
     this.state.data.totals.realizedGridProfit += profit;
@@ -3107,7 +3240,7 @@ class FuturesGridEngine {
     this.state.data.totals.tradingFees += feeQuote;
     symState.filledSells = numberOrZero(symState.filledSells) + 1;
     this.state.data.totals.filledSells++;
-    symState.refillCountByLevel[buyLevelIndex] = refillCount;
+    if (!stagedExitChild) symState.refillCountByLevel[buyLevelIndex] = refillCount;
     this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
     const remainingSellable = sellableAtBuy - amount;
     if (remainingSellable > 0) {
@@ -3121,6 +3254,7 @@ class FuturesGridEngine {
       };
     } else {
       delete symState.lastBuyByLevel[buyLevelIndex];
+      if (stagedExitChild) delete symState.refillCountByLevel[buyLevelIndex];
     }
     // Single atomic save for profit totals, buy-record update, order
     // bookkeeping, and the processed-trade marker - see handleBuyFill for
@@ -3132,6 +3266,14 @@ class FuturesGridEngine {
     await this.sendAlert(sellFillMessage({ symbol, price, amount,
       realizedPnl: trade.info?.realizedPnl ?? trade.info?.realizedProfit,
       fee: feeQuote, gridProfit: profit }));
+
+    if (stagedExitChild) {
+      console.log(
+        `[EXIT-LADDER] ${symbol} staged SELL part=${buy.stagedExitPart}/${buy.stagedExitParts} ` +
+        `filled amount=${amount}; immediate refill skipped`
+      );
+      return;
+    }
 
     if (GRID_REFILL_ON_FILLED && this.canPlaceNewOrders() && buyLevelIndex >= 0) {
       const nextRefillCount = refillCount + 1;
@@ -3668,6 +3810,11 @@ class FuturesGridEngine {
       if (order.side === 'buy') activeBuyLevels.add(Number(order.levelIndex));
     }
 
+    const stagedExitGroups = this.stageAggregatedExitLadders(
+      symbol, levels, currentPrice, symState, activeBuyLevels
+    );
+    if (stagedExitGroups > 0) await this.state.save();
+
     const below = this.getNearestLevels(levels, currentPrice, 'buy', GRID_MAX_ACTIVE_BUY_ORDERS);
 
     let quoteFree = this.getQuoteFree(balance, symbol);
@@ -3729,7 +3876,13 @@ class FuturesGridEngine {
     const trackedBuys = Object.entries(symState.lastBuyByLevel)
       .map(([buyLevelIndex, buy]) => ({ buyLevelIndex: Number(buyLevelIndex), buy }))
       .filter(item => Number.isInteger(item.buyLevelIndex) && item.buy)
-      .sort((a, b) => b.buyLevelIndex - a.buyLevelIndex);
+      .sort((a, b) => {
+        const aStaged = a.buy.stagedExitChild === true;
+        const bStaged = b.buy.stagedExitChild === true;
+        if (aStaged && bStaged) return Number(a.buy.stagedExitPart) - Number(b.buy.stagedExitPart);
+        if (aStaged !== bStaged) return aStaged ? -1 : 1;
+        return b.buyLevelIndex - a.buyLevelIndex;
+      });
 
     for (const { buyLevelIndex, buy: trackedBuy } of trackedBuys) {
       if (this.getActiveSellOrderForBuyLevel(symState, buyLevelIndex)) continue;
@@ -4142,6 +4295,9 @@ Trailing Down: ${GRID_TRAILING_DOWN_ENABLED ? `ON (range-follow trigger, cooldow
 Active Order Policy: buy hard-limit=${GRID_MAX_ACTIVE_BUY_ORDERS}, sell soft-warning=${GRID_MAX_ACTIVE_SELL_ORDERS} (tracked exits remain priority)
 Exposure caps (positions + pending BUY): symbol=${FUTURES_MAX_SYMBOL_EXPOSURE_USDT} USDT, total=${FUTURES_MAX_TOTAL_EXPOSURE_USDT} USDT
 Max Refills Per Level: ${GRID_MAX_REFILLS}
+Aggregated Exit Ladder: ${GRID_AGGREGATED_EXIT_LADDER_ENABLED
+      ? `ON (max ${GRID_AGGREGATED_EXIT_LADDER_MAX_ORDERS} orders; symbols=${GRID_AGGREGATED_EXIT_LADDER_SYMBOLS.join(',') || 'all'})`
+      : 'OFF'}
 Recreate On Start: ${GRID_RECREATE_ON_START ? 'ON' : 'OFF'}
 Post Only (Maker): ${GRID_POST_ONLY ? 'ON' : 'OFF'}
 Smart Range Advisor (Gemini): ${GEMINI_RANGE_ADVISOR_ENABLED
