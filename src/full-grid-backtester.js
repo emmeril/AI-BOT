@@ -233,8 +233,8 @@ class FullGridBacktester {
       if (!activeSuggestion?.levels?.length) return;
       const recommendation = adaptive && lastDecision
         ? lastDecision.recommendation
-        : { buyWeight: { upper: 1, middle: 1, lower: 1 }, spacingMultiplier: 1, reservePct: 0 };
-      const cap = options.totalInvestment * (1 - recommendation.reservePct / 100);
+        : { buyWeight: { upper: 1, middle: 1, lower: 1 }, spacingMultiplier: 1 };
+      const cap = options.totalInvestment;
       const occupied = new Set(lots.filter(lot => lot.generation === rangeGeneration).map(lot => lot.levelIndex));
       const candidates = activeSuggestion.levels
         .map((price, levelIndex) => ({ price, levelIndex }))

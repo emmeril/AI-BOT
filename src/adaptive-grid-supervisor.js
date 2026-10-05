@@ -9,22 +9,18 @@ const PROFILE_RECOMMENDATIONS = Object.freeze({
   BULLISH: Object.freeze({
     buyWeight: Object.freeze({ upper: 1, middle: 1, lower: 1 }),
     spacingMultiplier: 0.95,
-    reservePct: 10,
   }),
   SIDEWAYS: Object.freeze({
     buyWeight: Object.freeze({ upper: 1, middle: 1, lower: 1 }),
     spacingMultiplier: 1,
-    reservePct: 0,
   }),
   BEARISH: Object.freeze({
     buyWeight: Object.freeze({ upper: 0.5, middle: 1, lower: 1.5 }),
     spacingMultiplier: 1.2,
-    reservePct: 30,
   }),
   RISK_OFF: Object.freeze({
     buyWeight: Object.freeze({ upper: 0.25, middle: 0.5, lower: 1.25 }),
     spacingMultiplier: 1.4,
-    reservePct: 50,
   }),
 });
 
@@ -38,7 +34,6 @@ function recommendationFor(profile) {
   return {
     buyWeight: { ...source.buyWeight },
     spacingMultiplier: source.spacingMultiplier,
-    reservePct: source.reservePct,
   };
 }
 
@@ -81,11 +76,6 @@ function buildAdaptiveBuyPlan(candidates, recommendation, limit = Infinity) {
       weight: Math.max(0, Number(recommendation?.buyWeight?.[zone]) || 0),
     };
   });
-}
-
-function adaptiveInvestmentLimit(totalInvestment, recommendation) {
-  const reservePct = Math.min(100, Math.max(0, Number(recommendation?.reservePct) || 0));
-  return Math.max(0, Number(totalInvestment) || 0) * (1 - reservePct / 100);
 }
 
 function marketFeatures(analysis) {
@@ -277,5 +267,4 @@ module.exports = {
   zoneForRank,
   selectSpacedBuyLevels,
   buildAdaptiveBuyPlan,
-  adaptiveInvestmentLimit,
 };

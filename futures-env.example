@@ -71,8 +71,8 @@ FIBONACCI_DIRECTION_MIN_CONFIDENCE=0.65
 FIBONACCI_DIRECTION_LEVEL_BIAS_PCT=10
 FIBONACCI_DIRECTION_APPLY_MODE=REPORT_ONLY
 
-# SHADOW only logs recommendations. LIVE applies sizing, spacing, and reserve
-# to new/refill BUY orders without changing tracked SELL exits.
+# SHADOW only logs recommendations. LIVE applies sizing and spacing to
+# new/refill BUY orders without changing the configured cap or tracked SELL exits.
 ADAPTIVE_GRID_SUPERVISOR_ENABLED=false
 ADAPTIVE_GRID_SUPERVISOR_MODE=SHADOW
 ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS=3

@@ -248,7 +248,7 @@ async function main() {
       'Both entry and exit maker fees, historical funding, minimum notional, exposure caps, two refills, range resets, and final mark-to-market liquidation are included.',
       'Existing inventory survives range resets and receives a newly profitable exit target. Exact live aggregation/partial-fill sequencing cannot be reconstructed from OHLC data.',
       'Liquidation and maintenance-margin tiers are not simulated. Return on 5x margin is informational, not a liquidation-safe equity model.',
-      'The adaptive variant applies reserve, zone sizing, and spacing recommendations; the baseline keeps equal sizing and standard spacing.',
+      'The adaptive variant applies zone sizing and spacing recommendations; both variants keep the configured investment cap unchanged.',
     ],
     full,
     outOfSample,

@@ -2,7 +2,6 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   AdaptiveGridSupervisor,
-  adaptiveInvestmentLimit,
   buildAdaptiveBuyPlan,
   classifyProfile,
   recommendationFor,
@@ -33,7 +32,6 @@ test('bearish profile keeps buys active and shifts weight toward lower levels', 
   const supervisor = new AdaptiveGridSupervisor({ profileConfirmations: 1, cooldownMs: 0 });
   const result = supervisor.evaluate('TEST', { analysis: analysis('BEARISH'), now: 1, signalId: 'a' });
   assert.deepEqual(result.recommendation.buyWeight, { upper: 0.5, middle: 1, lower: 1.5 });
-  assert.equal(result.recommendation.reservePct, 30);
 });
 
 test('profile requires confirmation and ignores a duplicate candle signal', () => {
@@ -148,5 +146,4 @@ test('risk-off live plan widens spacing and shifts size toward lower levels', ()
 
   assert.deepEqual(plan.map(level => level.price), [100, 98, 96]);
   assert.deepEqual(plan.map(level => level.weight), [0.25, 0.5, 1.25]);
-  assert.equal(adaptiveInvestmentLimit(150, recommendation), 75);
 });

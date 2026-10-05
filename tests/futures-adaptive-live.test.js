@@ -40,10 +40,11 @@ test('live adaptive configuration passes runtime validation', () => {
   assert.doesNotThrow(() => validateRuntimeConfiguration());
 });
 
-test('risk-off reserve limits new allocation to half of the configured investment', () => {
-  assert.equal(createEngine().getRemainingInvestmentUsdt(symbol), 75);
-  assert.equal(createEngine(70).getRemainingInvestmentUsdt(symbol), 5);
-  assert.equal(createEngine(80).getRemainingInvestmentUsdt(symbol), 0);
+test('risk-off preserves the configured investment cap', () => {
+  assert.equal(createEngine().getRemainingInvestmentUsdt(symbol), 150);
+  assert.equal(createEngine(70).getRemainingInvestmentUsdt(symbol), 80);
+  assert.equal(createEngine(104.92).getRemainingInvestmentUsdt(symbol), 45.08);
+  assert.equal(createEngine(150).getRemainingInvestmentUsdt(symbol), 0);
 });
 
 test('live sizing skips sub-minimum upper buys but keeps lower-zone buys', () => {

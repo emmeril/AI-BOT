@@ -305,7 +305,7 @@ Simulator memasukkan maker fee dua sisi, funding historis, minimum notional, bat
 
 Supervisor adaptif menghasilkan profil `BULLISH`, `SIDEWAYS`, `BEARISH`, atau `RISK_OFF`. Tanpa Gemini monitor, profil berasal dari direction analyzer deterministik. Jika Gemini monitor aktif dan confidence-nya lolos validasi, profil Gemini menjadi input supervisor. Hard guard deterministik tetap memaksa `RISK_OFF` saat exposure atau kondisi bearish ekstrem melewati batas.
 
-Mode `SHADOW` hanya menulis rekomendasi ke log. Mode `LIVE` menerapkan bobot notional BUY per zona, jarak level BUY, dan reserve terhadap BUY baru serta refill. Posisi yang sudah terbuka tidak ditutup paksa dan SELL exit tetap mengikuti target profit grid normal.
+Mode `SHADOW` hanya menulis rekomendasi ke log. Mode `LIVE` menerapkan bobot notional BUY per zona dan jarak level BUY terhadap BUY baru serta refill. Semua profil tetap memakai `GRID_TOTAL_INVESTMENT_USDT` sebagai batas yang sama; supervisor tidak membuat reserve atau mengecilkan cap yang ditentukan pengguna. Posisi yang sudah terbuka tidak ditutup paksa dan SELL exit tetap mengikuti target profit grid normal.
 
 ```env
 ADAPTIVE_GRID_SUPERVISOR_ENABLED=true

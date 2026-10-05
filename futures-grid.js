@@ -10,7 +10,6 @@ const { FibonacciDirectionAnalyzer } = require('./src/fibonacci-direction-analyz
 const {
   PROFILES,
   AdaptiveGridSupervisor,
-  adaptiveInvestmentLimit,
   buildAdaptiveBuyPlan,
   recommendationFor,
 } = require('./src/adaptive-grid-supervisor');
@@ -1686,7 +1685,7 @@ class FuturesGridEngine {
         `[${label}] ${symbol} profile=${decision.profile} raw=${decision.rawProfile} source=${decision.decisionSource} ` +
         `changed=${decision.changed} exposure=${decision.exposurePct}% ` +
         `buy-weight=${weights.upper}/${weights.middle}/${weights.lower} ` +
-        `spacing=${decision.recommendation.spacingMultiplier} reserve=${decision.recommendation.reservePct}% ` +
+        `spacing=${decision.recommendation.spacingMultiplier} investment-cap=${GRID_TOTAL_INVESTMENT_USDT}USDT ` +
         `reasons=${decision.reasons.join(',')}`
       );
       await fs.promises.appendFile(
@@ -4270,11 +4269,7 @@ class FuturesGridEngine {
 
   getRemainingInvestmentUsdt(symbol) {
     if (!(GRID_TOTAL_INVESTMENT_USDT > 0)) return Infinity;
-    const recommendation = this.getAdaptiveRecommendation(symbol);
-    const limit = recommendation
-      ? adaptiveInvestmentLimit(GRID_TOTAL_INVESTMENT_USDT, recommendation)
-      : GRID_TOTAL_INVESTMENT_USDT;
-    return Math.max(0, limit - this.getAllocatedInvestmentUsdt(symbol));
+    return Math.max(0, GRID_TOTAL_INVESTMENT_USDT - this.getAllocatedInvestmentUsdt(symbol));
   }
 
   amountForBuy(
