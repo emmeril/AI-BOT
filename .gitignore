@@ -26,5 +26,5 @@ pnpm-debug.log*
 *.log
 backtest-data/
 backtest-results/
-adaptive-grid-shadow*.jsonl
+adaptive-grid-*.jsonl
 futures.js

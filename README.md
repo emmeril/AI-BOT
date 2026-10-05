@@ -293,17 +293,25 @@ npm run backtest:fibonacci-direction
 
 Runner membandingkan konfigurasi saat ini, beberapa minimum alignment, dan konsensus `4h + satu timeframe lebih rendah`. Data publik Binance disimpan di `backtest-data/`, sedangkan laporan JSON dan Markdown disimpan di `backtest-results/`. Pengujian ini mengukur ketepatan arah 4 jam dan 24 jam tanpa mengklaim simulasi PnL grid, funding, likuidasi, atau urutan fill intrabar.
 
-### Adaptive grid supervisor shadow mode
+Full-grid PnL backtest membandingkan grid live sebagai baseline dengan rekomendasi adaptive supervisor yang benar-benar diterapkan di simulator:
 
-Supervisor adaptif menerjemahkan hasil direction analyzer menjadi profil `BULLISH`, `SIDEWAYS`, `BEARISH`, atau `RISK_OFF`. Dalam mode `SHADOW`, rekomendasi bobot BUY atas/tengah/bawah, pengali jarak grid, dan cadangan modal hanya ditulis ke log. Supervisor tidak dapat menempatkan, mengubah, atau membatalkan order.
+```bash
+npm run backtest:full-grid-pnl
+```
+
+Simulator memasukkan maker fee dua sisi, funding historis, minimum notional, batas exposure, refill, reset range, dan mark-to-market posisi tersisa. Fill memakai OHLC 15 menit secara konservatif: SELL yang dibuat setelah BUY fill baru boleh terisi mulai candle berikutnya. Kandidat range dihitung setiap 120 menit sesuai cooldown konfigurasi, atau langsung saat harga keluar dari range aktif. Laporan tersimpan sebagai `backtest-results/full-grid-pnl-backtest.{json,md}`. Ini bukan replay tick/orderbook dan tidak memodelkan antrean maker atau likuidasi.
+
+### Adaptive grid supervisor
+
+Supervisor adaptif menerjemahkan hasil direction analyzer menjadi profil `BULLISH`, `SIDEWAYS`, `BEARISH`, atau `RISK_OFF`. Mode `SHADOW` hanya menulis rekomendasi ke log. Mode `LIVE` menerapkan bobot notional BUY per zona, jarak level BUY, dan reserve terhadap BUY baru serta refill. Posisi yang sudah terbuka tidak ditutup paksa dan SELL exit tetap mengikuti target profit grid normal.
 
 ```env
 ADAPTIVE_GRID_SUPERVISOR_ENABLED=true
-ADAPTIVE_GRID_SUPERVISOR_MODE=SHADOW
+ADAPTIVE_GRID_SUPERVISOR_MODE=LIVE
 ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS=3
 ADAPTIVE_GRID_SUPERVISOR_COOLDOWN_MINUTES=120
 ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT=90
-ADAPTIVE_GRID_SUPERVISOR_LOG_FILE=adaptive-grid-shadow.jsonl
+ADAPTIVE_GRID_SUPERVISOR_LOG_FILE=adaptive-grid-live.jsonl
 ```
 
 Backtest shadow memakai cache candle yang sama dengan backtest arah:
@@ -312,7 +320,7 @@ Backtest shadow memakai cache candle yang sama dengan backtest arah:
 npm run backtest:adaptive-supervisor
 ```
 
-Laporan shadow mengukur pemisahan kondisi pasar, future return, dan maximum adverse excursion selama 24 jam. Laporan ini belum mensimulasikan fill grid, fee, funding, likuidasi, atau profit sehingga hasilnya tidak boleh dipakai untuk mengaktifkan perubahan order otomatis.
+Laporan shadow mengukur pemisahan kondisi pasar, future return, dan maximum adverse excursion selama 24 jam. Gunakan full-grid PnL backtest untuk membandingkan dampak rekomendasi ketika benar-benar diterapkan pada BUY.
 
 ## Smart Range Advisor Gemini
 

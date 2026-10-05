@@ -7,7 +7,13 @@ const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { FibonacciRangeAdvisor } = require('./src/fibonacci-range-advisor');
 const { FibonacciDirectionAnalyzer } = require('./src/fibonacci-direction-analyzer');
-const { AdaptiveGridSupervisor } = require('./src/adaptive-grid-supervisor');
+const {
+  PROFILES,
+  AdaptiveGridSupervisor,
+  adaptiveInvestmentLimit,
+  buildAdaptiveBuyPlan,
+  recommendationFor,
+} = require('./src/adaptive-grid-supervisor');
 const { startFuturesDashboardServer } = require('./src/futures-dashboard-server');
 const {
   deferUnreconciledSell,
@@ -192,8 +198,8 @@ const FIBONACCI_DIRECTION_MIN_CONFIDENCE = Config.number('FIBONACCI_DIRECTION_MI
 const FIBONACCI_DIRECTION_LEVEL_BIAS_PCT = Config.number('FIBONACCI_DIRECTION_LEVEL_BIAS_PCT', 10);
 const FIBONACCI_DIRECTION_APPLY_MODE = Config.get('FIBONACCI_DIRECTION_APPLY_MODE', 'REPORT_ONLY').toUpperCase();
 
-// The adaptive supervisor is observation-only. SHADOW mode records how it
-// would distribute future BUY orders but cannot alter, place, or cancel them.
+// SHADOW only records decisions. LIVE applies them to future BUY placement;
+// existing inventory and every SELL exit remain under the normal grid rules.
 const ADAPTIVE_GRID_SUPERVISOR_ENABLED = Config.boolean('ADAPTIVE_GRID_SUPERVISOR_ENABLED', false);
 const ADAPTIVE_GRID_SUPERVISOR_MODE = Config.get('ADAPTIVE_GRID_SUPERVISOR_MODE', 'SHADOW').toUpperCase();
 const ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS = Config.number(
@@ -491,8 +497,11 @@ function validateRuntimeConfiguration() {
     if (!FIBONACCI_DIRECTION_ANALYZER_ENABLED) {
       errors.push('ADAPTIVE_GRID_SUPERVISOR_ENABLED requires FIBONACCI_DIRECTION_ANALYZER_ENABLED=true');
     }
-    if (ADAPTIVE_GRID_SUPERVISOR_MODE !== 'SHADOW') {
-      errors.push('ADAPTIVE_GRID_SUPERVISOR_MODE currently supports SHADOW only');
+    if (!['SHADOW', 'LIVE'].includes(ADAPTIVE_GRID_SUPERVISOR_MODE)) {
+      errors.push('ADAPTIVE_GRID_SUPERVISOR_MODE must be SHADOW or LIVE');
+    }
+    if (ADAPTIVE_GRID_SUPERVISOR_MODE === 'LIVE' && !(GRID_TOTAL_INVESTMENT_USDT > 0)) {
+      errors.push('ADAPTIVE_GRID_SUPERVISOR_MODE=LIVE requires GRID_TOTAL_INVESTMENT_USDT greater than 0');
     }
     requireInteger(
       'ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS',
@@ -1382,6 +1391,8 @@ class FuturesGridEngine {
     // for stuck investment warning deduplication
     this.stuckInvestmentWarned = new Set();
     this.sellTargetWarnings = new Set();
+    this.adaptiveMinimumWarnings = new Set();
+    this.adaptiveGridDecisions = new Map();
     this.lastFibonacciDirectionLog = new Map();
     this.rangeAdvisor = new GeminiRangeAdvisor(this.exchange);
     const targetNetRate = GRID_MIN_NET_PROFIT_PCT / 100;
@@ -1417,6 +1428,7 @@ class FuturesGridEngine {
       profileConfirmations: ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS,
       cooldownMs: ADAPTIVE_GRID_SUPERVISOR_COOLDOWN_MS,
       riskExposureRatio: ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT / 100,
+      mode: ADAPTIVE_GRID_SUPERVISOR_MODE,
     });
   }
 
@@ -1559,7 +1571,7 @@ class FuturesGridEngine {
     return true;
   }
 
-  async recordAdaptiveSupervisorShadow(symbol, analysis) {
+  async evaluateAdaptiveSupervisor(symbol, analysis) {
     try {
       const exposureRatio = GRID_TOTAL_INVESTMENT_USDT > 0
         ? this.getAllocatedInvestmentUsdt(symbol) / GRID_TOTAL_INVESTMENT_USDT
@@ -1573,10 +1585,13 @@ class FuturesGridEngine {
         exposureRatio,
         signalId,
       });
-      if (!decision?.evaluated) return;
+      if (!decision) return null;
+      this.adaptiveGridDecisions.set(symbol, decision);
+      if (!decision.evaluated) return decision;
       const weights = decision.recommendation.buyWeight;
+      const label = ADAPTIVE_GRID_SUPERVISOR_MODE === 'LIVE' ? 'ADAPTIVE-LIVE' : 'ADAPTIVE-SHADOW';
       console.log(
-        `[ADAPTIVE-SHADOW] ${symbol} profile=${decision.profile} raw=${decision.rawProfile} ` +
+        `[${label}] ${symbol} profile=${decision.profile} raw=${decision.rawProfile} ` +
         `changed=${decision.changed} exposure=${decision.exposurePct}% ` +
         `buy-weight=${weights.upper}/${weights.middle}/${weights.lower} ` +
         `spacing=${decision.recommendation.spacingMultiplier} reserve=${decision.recommendation.reservePct}% ` +
@@ -1587,10 +1602,32 @@ class FuturesGridEngine {
         `${JSON.stringify(decision)}\n`,
         'utf8'
       );
+      return decision;
     } catch (err) {
-      // Shadow monitoring must never interrupt the trading path.
-      console.warn(`[ADAPTIVE-SHADOW] ${symbol} observation failed: ${err.message}`);
+      console.warn(`[ADAPTIVE-${ADAPTIVE_GRID_SUPERVISOR_MODE}] ${symbol} evaluation failed: ${err.message}`);
+      return null;
     }
+  }
+
+  getAdaptiveRecommendation(symbol) {
+    if (!ADAPTIVE_GRID_SUPERVISOR_ENABLED || ADAPTIVE_GRID_SUPERVISOR_MODE !== 'LIVE') return null;
+    const allocated = this.getAllocatedInvestmentUsdt(symbol);
+    const exposureRatio = GRID_TOTAL_INVESTMENT_USDT > 0 ? allocated / GRID_TOTAL_INVESTMENT_USDT : 0;
+    if (exposureRatio >= ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT / 100) {
+      return { ...recommendationFor(PROFILES.RISK_OFF), profile: PROFILES.RISK_OFF };
+    }
+    const decision = this.adaptiveGridDecisions?.get(symbol);
+    if (decision?.recommendation) {
+      return { ...decision.recommendation, profile: decision.profile };
+    }
+    return { ...recommendationFor(PROFILES.RISK_OFF), profile: PROFILES.RISK_OFF };
+  }
+
+  getBuyPlacementLevels(symbol, levels, currentPrice, limit = GRID_MAX_ACTIVE_BUY_ORDERS) {
+    const candidates = this.getNearestLevels(levels, currentPrice, 'buy', levels.length);
+    const recommendation = this.getAdaptiveRecommendation(symbol);
+    if (!recommendation) return candidates.slice(0, limit);
+    return buildAdaptiveBuyPlan(candidates, recommendation, limit);
   }
 
   // Completes a range reset/trailing shift that a previous process
@@ -1697,7 +1734,7 @@ class FuturesGridEngine {
         }
       }
       if (ADAPTIVE_GRID_SUPERVISOR_ENABLED && fibonacciDirection) {
-        await this.recordAdaptiveSupervisorShadow(symbol, fibonacciDirection);
+        await this.evaluateAdaptiveSupervisor(symbol, fibonacciDirection);
       }
     }
     let rangeSuggestion = fibonacciAllowed
@@ -3371,10 +3408,26 @@ class FuturesGridEngine {
         console.warn(`[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | active buy order limit reached`);
         return;
       }
-      let amountToBuy = this.amountForBuy(symbol, buyPrice);
+      const recommendation = this.getAdaptiveRecommendation(symbol);
+      const adaptiveLevel = recommendation
+        ? this.getBuyPlacementLevels(symbol, levels, price, GRID_MAX_ACTIVE_BUY_ORDERS)
+          .find(level => level.index === buyLevelIndex)
+        : null;
+      if (recommendation && !adaptiveLevel) {
+        console.log(
+          `[ADAPTIVE-LIVE] ${symbol} BUY refill level=${buyLevelIndex} skipped by ` +
+          `${recommendation.profile} spacing policy`
+        );
+        return;
+      }
+      const weight = Number(adaptiveLevel?.weight) || 1;
+      const remainingInvestmentUsdt = this.getRemainingInvestmentUsdt(symbol);
+      let amountToBuy = this.amountForBuy(symbol, buyPrice, remainingInvestmentUsdt, weight);
       let cost = amountToBuy * buyPrice;
       if (!(amountToBuy > 0)) {
-        console.warn(`[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | investment cap reached`);
+        console.warn(
+          `[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | adaptive minimum or investment cap reached`
+        );
         return;
       }
       const minCost = this.getMinCost(symbol);
@@ -3386,7 +3439,6 @@ class FuturesGridEngine {
           return;
         }
       }
-      const remainingInvestmentUsdt = this.getRemainingInvestmentUsdt(symbol);
       const precise = this.getPreciseOrderNumbers(symbol, buyPrice, amountToBuy);
       if (precise.notional > remainingInvestmentUsdt + 1e-8) {
         console.warn(
@@ -3880,6 +3932,7 @@ class FuturesGridEngine {
 
     const activeBuyLevels = new Set();
     const symState = this.state.getSymbol(symbol);
+    symState.refillCountByLevel ||= {};
     for (const order of managedOrders) {
       const idx = this.getLevelIndex(levels, Number(order.price));
       if (order.side === 'buy') activeBuyLevels.add(idx);
@@ -3893,7 +3946,9 @@ class FuturesGridEngine {
     );
     if (stagedExitGroups > 0) await this.state.save();
 
-    const below = this.getNearestLevels(levels, currentPrice, 'buy', GRID_MAX_ACTIVE_BUY_ORDERS);
+    const below = this.getBuyPlacementLevels(
+      symbol, levels, currentPrice, GRID_MAX_ACTIVE_BUY_ORDERS
+    );
 
     let quoteFree = this.getQuoteFree(balance, symbol);
     const positionAmount = this.getBaseFree(positions, symbol);
@@ -3914,9 +3969,14 @@ class FuturesGridEngine {
         ? 0
         : Math.max(0, Number(previousRefillCount) || 0) + 1;
       if (refillCount > GRID_MAX_REFILLS) continue;
-      let amount = this.amountForBuy(symbol, level.price, remainingInvestmentUsdt);
+      const weight = Number(level.weight) || 1;
+      let amount = this.amountForBuy(symbol, level.price, remainingInvestmentUsdt, weight);
       let cost = amount * level.price;
       if (!(amount > 0)) {
+        const recommendation = this.getAdaptiveRecommendation(symbol);
+        if (recommendation && this.getOrderSizeUsdt() * weight < this.getMinCost(symbol) - 1e-8) {
+          continue;
+        }
         console.warn(`[SKIP] ${symbol} BUY level=${level.index} | investment cap reached`);
         break;
       }
@@ -4118,12 +4178,34 @@ class FuturesGridEngine {
 
   getRemainingInvestmentUsdt(symbol) {
     if (!(GRID_TOTAL_INVESTMENT_USDT > 0)) return Infinity;
-    return Math.max(0, GRID_TOTAL_INVESTMENT_USDT - this.getAllocatedInvestmentUsdt(symbol));
+    const recommendation = this.getAdaptiveRecommendation(symbol);
+    const limit = recommendation
+      ? adaptiveInvestmentLimit(GRID_TOTAL_INVESTMENT_USDT, recommendation)
+      : GRID_TOTAL_INVESTMENT_USDT;
+    return Math.max(0, limit - this.getAllocatedInvestmentUsdt(symbol));
   }
 
-  amountForBuy(symbol, price, availableInvestmentUsdt = this.getRemainingInvestmentUsdt(symbol)) {
+  amountForBuy(
+    symbol,
+    price,
+    availableInvestmentUsdt = this.getRemainingInvestmentUsdt(symbol),
+    weight = 1
+  ) {
     const minCost = this.getMinCost(symbol);
-    const targetNotional = Math.max(this.getOrderSizeUsdt(), minCost);
+    const recommendation = this.getAdaptiveRecommendation(symbol);
+    const weightedTarget = this.getOrderSizeUsdt() * (recommendation ? Math.max(0, Number(weight) || 0) : 1);
+    if (recommendation && minCost > 0 && weightedTarget < minCost - 1e-8) {
+      const warningKey = `${symbol}|${recommendation.profile}|${weight}`;
+      if (!this.adaptiveMinimumWarnings?.has(warningKey)) {
+        this.adaptiveMinimumWarnings?.add(warningKey);
+        console.log(
+          `[ADAPTIVE-LIVE] ${symbol} skipping ${weight}x BUY weight: target ` +
+          `${roundNumber(weightedTarget, 8)} USDT is below minimum notional ${minCost} USDT`
+        );
+      }
+      return 0;
+    }
+    const targetNotional = recommendation ? weightedTarget : Math.max(weightedTarget, minCost);
     const notional = Math.min(targetNotional, availableInvestmentUsdt);
     if (minCost > 0 && notional < minCost - 1e-8) {
       this.warnIfInvestmentPermanentlyStuck(symbol, availableInvestmentUsdt, minCost);

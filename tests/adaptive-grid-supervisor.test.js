@@ -2,7 +2,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   AdaptiveGridSupervisor,
+  adaptiveInvestmentLimit,
+  buildAdaptiveBuyPlan,
   classifyProfile,
+  recommendationFor,
 } = require('../src/adaptive-grid-supervisor');
 
 function analysis(direction, overrides = {}) {
@@ -81,4 +84,27 @@ test('strong bearish move selects risk-off from market conditions', () => {
 
   assert.equal(result.profile, 'RISK_OFF');
   assert.ok(result.reasons.includes('sharp_15m_drop'));
+});
+
+test('live decisions expose the configured execution mode', () => {
+  const supervisor = new AdaptiveGridSupervisor({
+    mode: 'LIVE',
+    profileConfirmations: 1,
+    cooldownMs: 0,
+  });
+  const result = supervisor.evaluate('TEST', {
+    analysis: analysis('BULLISH'), now: 1, signalId: 'live',
+  });
+  assert.equal(result.mode, 'LIVE');
+});
+
+test('risk-off live plan widens spacing and shifts size toward lower levels', () => {
+  const recommendation = recommendationFor('RISK_OFF');
+  const candidates = [100, 99, 98, 97, 96]
+    .map((price, index) => ({ price, index }));
+  const plan = buildAdaptiveBuyPlan(candidates, recommendation, 20);
+
+  assert.deepEqual(plan.map(level => level.price), [100, 98, 96]);
+  assert.deepEqual(plan.map(level => level.weight), [0.25, 0.5, 1.25]);
+  assert.equal(adaptiveInvestmentLimit(150, recommendation), 75);
 });

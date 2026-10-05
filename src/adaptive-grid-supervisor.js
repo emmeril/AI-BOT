@@ -42,6 +42,52 @@ function recommendationFor(profile) {
   };
 }
 
+function zoneForRank(rank, count) {
+  if (count <= 1) return 'middle';
+  const fraction = rank / count;
+  if (fraction <= 1 / 3) return 'upper';
+  if (fraction <= 2 / 3) return 'middle';
+  return 'lower';
+}
+
+function selectSpacedBuyLevels(candidates, multiplier) {
+  const descending = [...candidates].sort((left, right) => right.price - left.price);
+  if (descending.length < 2 || !(multiplier > 1)) return descending;
+  const ascending = [...descending].reverse();
+  const logSteps = [];
+  for (let index = 1; index < ascending.length; index++) {
+    logSteps.push(Math.log(ascending[index].price / ascending[index - 1].price));
+  }
+  logSteps.sort((left, right) => left - right);
+  const minimumLogStep = (logSteps[Math.floor(logSteps.length / 2)] || 0) * multiplier;
+  const selected = [];
+  for (const candidate of descending) {
+    const previous = selected.at(-1);
+    if (!previous || Math.log(previous.price / candidate.price) + 1e-12 >= minimumLogStep) {
+      selected.push(candidate);
+    }
+  }
+  return selected;
+}
+
+function buildAdaptiveBuyPlan(candidates, recommendation, limit = Infinity) {
+  const selected = selectSpacedBuyLevels(candidates, recommendation?.spacingMultiplier)
+    .slice(0, Math.max(0, Number(limit) || 0));
+  return selected.map((candidate, index) => {
+    const zone = zoneForRank(index + 1, selected.length);
+    return {
+      ...candidate,
+      zone,
+      weight: Math.max(0, Number(recommendation?.buyWeight?.[zone]) || 0),
+    };
+  });
+}
+
+function adaptiveInvestmentLimit(totalInvestment, recommendation) {
+  const reservePct = Math.min(100, Math.max(0, Number(recommendation?.reservePct) || 0));
+  return Math.max(0, Number(totalInvestment) || 0) * (1 - reservePct / 100);
+}
+
 function marketFeatures(analysis) {
   const short = analysis?.timeframes?.['15m'] || {};
   return {
@@ -99,6 +145,7 @@ class AdaptiveGridSupervisor {
       profileConfirmations: 3,
       cooldownMs: 120 * 60 * 1000,
       riskExposureRatio: 0.9,
+      mode: 'SHADOW',
       ...options,
     };
     this.states = new Map();
@@ -146,7 +193,7 @@ class AdaptiveGridSupervisor {
     }
 
     const decision = {
-      mode: 'SHADOW',
+      mode: String(this.options.mode || 'SHADOW').toUpperCase(),
       symbol,
       evaluated: true,
       generatedAt: new Date(now).toISOString(),
@@ -179,4 +226,8 @@ module.exports = {
   classifyProfile,
   marketFeatures,
   recommendationFor,
+  zoneForRank,
+  selectSpacedBuyLevels,
+  buildAdaptiveBuyPlan,
+  adaptiveInvestmentLimit,
 };
