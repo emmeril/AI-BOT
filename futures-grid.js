@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { FibonacciRangeAdvisor } = require('./src/fibonacci-range-advisor');
 const { FibonacciDirectionAnalyzer } = require('./src/fibonacci-direction-analyzer');
+const { AdaptiveGridSupervisor } = require('./src/adaptive-grid-supervisor');
 const { startFuturesDashboardServer } = require('./src/futures-dashboard-server');
 const {
   deferUnreconciledSell,
@@ -190,6 +191,23 @@ const FIBONACCI_DIRECTION_CONFIRMATIONS = Config.number('FIBONACCI_DIRECTION_CON
 const FIBONACCI_DIRECTION_MIN_CONFIDENCE = Config.number('FIBONACCI_DIRECTION_MIN_CONFIDENCE', 0.65);
 const FIBONACCI_DIRECTION_LEVEL_BIAS_PCT = Config.number('FIBONACCI_DIRECTION_LEVEL_BIAS_PCT', 10);
 const FIBONACCI_DIRECTION_APPLY_MODE = Config.get('FIBONACCI_DIRECTION_APPLY_MODE', 'REPORT_ONLY').toUpperCase();
+
+// The adaptive supervisor is observation-only. SHADOW mode records how it
+// would distribute future BUY orders but cannot alter, place, or cancel them.
+const ADAPTIVE_GRID_SUPERVISOR_ENABLED = Config.boolean('ADAPTIVE_GRID_SUPERVISOR_ENABLED', false);
+const ADAPTIVE_GRID_SUPERVISOR_MODE = Config.get('ADAPTIVE_GRID_SUPERVISOR_MODE', 'SHADOW').toUpperCase();
+const ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS = Config.number(
+  'ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS', 3
+);
+const ADAPTIVE_GRID_SUPERVISOR_COOLDOWN_MS = Math.max(
+  Config.number('ADAPTIVE_GRID_SUPERVISOR_COOLDOWN_MINUTES', 120), 0
+) * MINUTE_MS;
+const ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT = Config.number(
+  'ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT', 90
+);
+const ADAPTIVE_GRID_SUPERVISOR_LOG_PATH = path.resolve(
+  process.cwd(), Config.get('ADAPTIVE_GRID_SUPERVISOR_LOG_FILE', 'adaptive-grid-shadow.jsonl')
+);
 
 // ------------------------------
 //  Smart Grid Range Advisor (Gemini AI)
@@ -468,6 +486,23 @@ function validateRuntimeConfiguration() {
   requireNonNegative('GRID_MIN_NET_PROFIT_PCT', GRID_MIN_NET_PROFIT_PCT);
   if (FIBONACCI_DIRECTION_ANALYZER_ENABLED && !FIBONACCI_RANGE_ADVISOR_ENABLED) {
     errors.push('FIBONACCI_DIRECTION_ANALYZER_ENABLED requires FIBONACCI_RANGE_ADVISOR_ENABLED=true');
+  }
+  if (ADAPTIVE_GRID_SUPERVISOR_ENABLED) {
+    if (!FIBONACCI_DIRECTION_ANALYZER_ENABLED) {
+      errors.push('ADAPTIVE_GRID_SUPERVISOR_ENABLED requires FIBONACCI_DIRECTION_ANALYZER_ENABLED=true');
+    }
+    if (ADAPTIVE_GRID_SUPERVISOR_MODE !== 'SHADOW') {
+      errors.push('ADAPTIVE_GRID_SUPERVISOR_MODE currently supports SHADOW only');
+    }
+    requireInteger(
+      'ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS',
+      ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS,
+      1
+    );
+    if (!(ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT > 0 &&
+        ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT <= 100)) {
+      errors.push('ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT must be greater than 0 and at most 100');
+    }
   }
   if (FIBONACCI_RANGE_ADVISOR_ENABLED) {
     if (!FIBONACCI_RANGE_ADVISOR_TIMEFRAMES.length) errors.push('FIBONACCI_RANGE_ADVISOR_TIMEFRAMES must not be empty');
@@ -1377,6 +1412,12 @@ class FuturesGridEngine {
       minimumTimeframes: FIBONACCI_DIRECTION_MIN_TIMEFRAMES,
       confirmations: FIBONACCI_DIRECTION_CONFIRMATIONS,
     });
+    this.adaptiveGridSupervisor = new AdaptiveGridSupervisor({
+      minimumConfidence: FIBONACCI_DIRECTION_MIN_CONFIDENCE,
+      profileConfirmations: ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS,
+      cooldownMs: ADAPTIVE_GRID_SUPERVISOR_COOLDOWN_MS,
+      riskExposureRatio: ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT / 100,
+    });
   }
 
   async init() {
@@ -1518,6 +1559,40 @@ class FuturesGridEngine {
     return true;
   }
 
+  async recordAdaptiveSupervisorShadow(symbol, analysis) {
+    try {
+      const exposureRatio = GRID_TOTAL_INVESTMENT_USDT > 0
+        ? this.getAllocatedInvestmentUsdt(symbol) / GRID_TOTAL_INVESTMENT_USDT
+        : 0;
+      const signalId = Object.values(analysis.timeframes || {})
+        .map(timeframe => `${timeframe.timeframe}:${timeframe.lastClosedAt}`)
+        .sort()
+        .join('|') || analysis.generatedAt;
+      const decision = this.adaptiveGridSupervisor.evaluate(symbol, {
+        analysis,
+        exposureRatio,
+        signalId,
+      });
+      if (!decision?.evaluated) return;
+      const weights = decision.recommendation.buyWeight;
+      console.log(
+        `[ADAPTIVE-SHADOW] ${symbol} profile=${decision.profile} raw=${decision.rawProfile} ` +
+        `changed=${decision.changed} exposure=${decision.exposurePct}% ` +
+        `buy-weight=${weights.upper}/${weights.middle}/${weights.lower} ` +
+        `spacing=${decision.recommendation.spacingMultiplier} reserve=${decision.recommendation.reservePct}% ` +
+        `reasons=${decision.reasons.join(',')}`
+      );
+      await fs.promises.appendFile(
+        ADAPTIVE_GRID_SUPERVISOR_LOG_PATH,
+        `${JSON.stringify(decision)}\n`,
+        'utf8'
+      );
+    } catch (err) {
+      // Shadow monitoring must never interrupt the trading path.
+      console.warn(`[ADAPTIVE-SHADOW] ${symbol} observation failed: ${err.message}`);
+    }
+  }
+
   // Completes a range reset/trailing shift that a previous process
   // instance started (and persisted a marker for, BEFORE cancelling any
   // exchange orders) but never finished. Exchange orders for the old range
@@ -1601,9 +1676,9 @@ class FuturesGridEngine {
       (FIBONACCI_RANGE_ADVISOR_APPLY_ON === 'ALWAYS' || !manualRange);
     let fibonacciDirection = null;
     let appliedDirection = 'RANGING';
-    if (fibonacciAllowed && FIBONACCI_DIRECTION_ANALYZER_ENABLED) {
+    if ((fibonacciAllowed || ADAPTIVE_GRID_SUPERVISOR_ENABLED) && FIBONACCI_DIRECTION_ANALYZER_ENABLED) {
       fibonacciDirection = await this.fibonacciDirectionAnalyzer.getAnalysis(symbol);
-      if (FIBONACCI_DIRECTION_APPLY_MODE === 'LEVEL_BIAS' &&
+      if (fibonacciAllowed && FIBONACCI_DIRECTION_APPLY_MODE === 'LEVEL_BIAS' &&
           fibonacciDirection &&
           ['BULLISH', 'BEARISH'].includes(fibonacciDirection.confirmedDirection) &&
           fibonacciDirection.confidence >= FIBONACCI_DIRECTION_MIN_CONFIDENCE) {
@@ -1620,6 +1695,9 @@ class FuturesGridEngine {
           );
           this.lastFibonacciDirectionLog.set(symbol, logKey);
         }
+      }
+      if (ADAPTIVE_GRID_SUPERVISOR_ENABLED && fibonacciDirection) {
+        await this.recordAdaptiveSupervisorShadow(symbol, fibonacciDirection);
       }
     }
     let rangeSuggestion = fibonacciAllowed
@@ -4309,6 +4387,9 @@ Multi-timeframe Fibonacci: ${FIBONACCI_RANGE_ADVISOR_ENABLED
 Fibonacci Direction (deterministic): ${FIBONACCI_DIRECTION_ANALYZER_ENABLED
       ? `ON (mode=${FIBONACCI_DIRECTION_APPLY_MODE}, timeframes=${FIBONACCI_DIRECTION_TIMEFRAMES.join(',')}, confirmations=${FIBONACCI_DIRECTION_CONFIRMATIONS}, min-confidence=${FIBONACCI_DIRECTION_MIN_CONFIDENCE}, level-bias=${FIBONACCI_DIRECTION_LEVEL_BIAS_PCT}%)`
       : 'OFF'}
+Adaptive Grid Supervisor: ${ADAPTIVE_GRID_SUPERVISOR_ENABLED
+      ? `ON (${ADAPTIVE_GRID_SUPERVISOR_MODE}; profile-confirmations=${ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS}, cooldown=${ADAPTIVE_GRID_SUPERVISOR_COOLDOWN_MS / MINUTE_MS}m)`
+      : 'OFF'}
 `);
     await this.init();
     startFuturesDashboardServer(this);
@@ -4369,6 +4450,7 @@ module.exports = {
   AIGridValidator,
   TechnicalIndicators,
   FibonacciDirectionAnalyzer,
+  AdaptiveGridSupervisor,
   bootstrap,
   validateRuntimeConfiguration,
 };

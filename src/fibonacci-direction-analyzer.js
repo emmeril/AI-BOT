@@ -82,6 +82,7 @@ function analyzeTimeframe(candleInput, timeframe, options = {}) {
   const ema20 = emaSeries(closes, 20);
   const ema50 = emaSeries(closes, 50);
   const atr14 = averageTrueRange(candles, 14);
+  const atr50 = averageTrueRange(candles, 50);
   if (!(atr14 > 0) || !ema20.length || !ema50.length) return null;
 
   const lastIndex = candles.length - 1;
@@ -179,12 +180,16 @@ function analyzeTimeframe(candleInput, timeframe, options = {}) {
   }
 
   score = roundNumber(Math.max(-4.5, Math.min(4.5, score)), 4);
+  const recentReferenceIndex = Math.max(0, lastIndex - 4);
   return {
     timeframe,
     direction: classifyScore(score),
     score,
     close: lastClose,
     atr14: roundNumber(atr14, 8),
+    atrPct: roundNumber(atr14 / lastClose * 100, 4),
+    volatilityRatio: roundNumber(atr50 > 0 ? atr14 / atr50 : 1, 4),
+    recentMoveAtr: roundNumber((lastClose - closes[recentReferenceIndex]) / atr14, 4),
     ema20: roundNumber(lastEma20, 8),
     ema50: roundNumber(lastEma50, 8),
     ema20SlopeAtr: roundNumber(ema20SlopeAtr, 4),

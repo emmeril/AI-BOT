@@ -285,6 +285,35 @@ FIBONACCI_DIRECTION_APPLY_MODE=REPORT_ONLY
 - `FIBONACCI_DIRECTION_LEVEL_BIAS_PCT`: persentase jumlah level yang dipindahkan dari sisi berlawanan ke sisi arah, rentang `0-40`. Nilai `10` membuat grid 21 level bullish berubah dari sekitar `10/11` menjadi `8/13` level bawah/atas.
 - `FIBONACCI_DIRECTION_APPLY_MODE`: `REPORT_ONLY` hanya mencatat arah tanpa mengubah grid; `LEVEL_BIAS` menerapkan distribusi level setelah confidence dan konfirmasi lolos.
 
+Backtest klasifikasi arah selama 12 bulan dapat dijalankan tanpa mengubah bot live:
+
+```bash
+npm run backtest:fibonacci-direction
+```
+
+Runner membandingkan konfigurasi saat ini, beberapa minimum alignment, dan konsensus `4h + satu timeframe lebih rendah`. Data publik Binance disimpan di `backtest-data/`, sedangkan laporan JSON dan Markdown disimpan di `backtest-results/`. Pengujian ini mengukur ketepatan arah 4 jam dan 24 jam tanpa mengklaim simulasi PnL grid, funding, likuidasi, atau urutan fill intrabar.
+
+### Adaptive grid supervisor shadow mode
+
+Supervisor adaptif menerjemahkan hasil direction analyzer menjadi profil `BULLISH`, `SIDEWAYS`, `BEARISH`, atau `RISK_OFF`. Dalam mode `SHADOW`, rekomendasi bobot BUY atas/tengah/bawah, pengali jarak grid, dan cadangan modal hanya ditulis ke log. Supervisor tidak dapat menempatkan, mengubah, atau membatalkan order.
+
+```env
+ADAPTIVE_GRID_SUPERVISOR_ENABLED=true
+ADAPTIVE_GRID_SUPERVISOR_MODE=SHADOW
+ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS=3
+ADAPTIVE_GRID_SUPERVISOR_COOLDOWN_MINUTES=120
+ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT=90
+ADAPTIVE_GRID_SUPERVISOR_LOG_FILE=adaptive-grid-shadow.jsonl
+```
+
+Backtest shadow memakai cache candle yang sama dengan backtest arah:
+
+```bash
+npm run backtest:adaptive-supervisor
+```
+
+Laporan shadow mengukur pemisahan kondisi pasar, future return, dan maximum adverse excursion selama 24 jam. Laporan ini belum mensimulasikan fill grid, fee, funding, likuidasi, atau profit sehingga hasilnya tidak boleh dipakai untuk mengaktifkan perubahan order otomatis.
+
 ## Smart Range Advisor Gemini
 
 Aktifkan dengan:

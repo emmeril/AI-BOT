@@ -24,4 +24,7 @@ bot-paused.flag
 npm-debug.log*
 pnpm-debug.log*
 *.log
+backtest-data/
+backtest-results/
+adaptive-grid-shadow*.jsonl
 futures.js
