@@ -14,6 +14,7 @@ const {
   buildAdaptiveBuyPlan,
   recommendationFor,
 } = require('./src/adaptive-grid-supervisor');
+const { GeminiAdaptiveMonitor } = require('./src/gemini-adaptive-monitor');
 const { startFuturesDashboardServer } = require('./src/futures-dashboard-server');
 const {
   deferUnreconciledSell,
@@ -225,6 +226,14 @@ const GEMINI_API_BASE_URL = Config.get(
   'GEMINI_API_BASE_URL',
   'https://generativelanguage.googleapis.com'
 );
+const GEMINI_ADAPTIVE_MONITOR_ENABLED = Config.boolean('GEMINI_ADAPTIVE_MONITOR_ENABLED', false);
+const GEMINI_ADAPTIVE_MONITOR_INTERVAL_MS = Math.max(
+  Config.number('GEMINI_ADAPTIVE_MONITOR_INTERVAL_MINUTES', 15), 1
+) * MINUTE_MS;
+const GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE = Config.number(
+  'GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE', 0.6
+);
+const GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS = Config.number('GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS', 20_000);
 const GEMINI_RANGE_ADVISOR_TIMEFRAME = Config.get('GEMINI_RANGE_ADVISOR_TIMEFRAME', '1h');
 
 // Converts a ccxt-style timeframe string (e.g. '1m', '15m', '1h', '4h', '1d')
@@ -572,6 +581,17 @@ function validateRuntimeConfiguration() {
     }
     if (!['AUTO_RANGE_ONLY', 'ALWAYS'].includes(GEMINI_RANGE_ADVISOR_APPLY_ON)) {
       errors.push('GEMINI_RANGE_ADVISOR_APPLY_ON must be AUTO_RANGE_ONLY or ALWAYS');
+    }
+  }
+  if (GEMINI_ADAPTIVE_MONITOR_ENABLED) {
+    if (!ADAPTIVE_GRID_SUPERVISOR_ENABLED) {
+      errors.push('GEMINI_ADAPTIVE_MONITOR_ENABLED requires ADAPTIVE_GRID_SUPERVISOR_ENABLED=true');
+    }
+    if (!GEMINI_API_KEY) errors.push('GEMINI_API_KEY is required when GEMINI_ADAPTIVE_MONITOR_ENABLED=true');
+    requirePositive('GEMINI_ADAPTIVE_MONITOR_INTERVAL_MINUTES', GEMINI_ADAPTIVE_MONITOR_INTERVAL_MS);
+    requirePositive('GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS', GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS);
+    if (!(GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE >= 0 && GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE <= 1)) {
+      errors.push('GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE must be between 0 and 1');
     }
   }
 
@@ -1394,7 +1414,17 @@ class FuturesGridEngine {
     this.adaptiveMinimumWarnings = new Set();
     this.adaptiveGridDecisions = new Map();
     this.lastFibonacciDirectionLog = new Map();
+    this.lastGeminiAdaptiveLog = new Map();
     this.rangeAdvisor = new GeminiRangeAdvisor(this.exchange);
+    this.geminiAdaptiveMonitor = new GeminiAdaptiveMonitor({
+      enabled: GEMINI_ADAPTIVE_MONITOR_ENABLED,
+      apiKey: GEMINI_API_KEY,
+      baseUrl: GEMINI_API_BASE_URL,
+      model: GEMINI_MODEL,
+      minimumConfidence: GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE,
+      intervalMs: GEMINI_ADAPTIVE_MONITOR_INTERVAL_MS,
+      timeoutMs: GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS,
+    });
     const targetNetRate = GRID_MIN_NET_PROFIT_PCT / 100;
     const minimumStepRatio = (1 + targetNetRate + BINANCE_FUTURES_MAKER_FEE_RATE) /
       (1 - BINANCE_FUTURES_MAKER_FEE_RATE);
@@ -1571,19 +1601,81 @@ class FuturesGridEngine {
     return true;
   }
 
-  async evaluateAdaptiveSupervisor(symbol, analysis) {
+  buildGeminiAdaptiveContext(symbol, analysis, currentPrice, exposureRatio) {
+    const symState = this.state.getSymbol(symbol);
+    const position = this.latestPositions?.get(symbol);
+    const account = incomeMetrics(
+      symState.accountIncome,
+      this.latestAccountUnrealized?.get(symbol) ?? numberOrZero(position?.unrealizedPnl)
+    );
+    return {
+      analysis,
+      currentPrice,
+      exposureRatio,
+      allocatedUsdt: this.getAllocatedInvestmentUsdt(symbol),
+      investmentLimitUsdt: GRID_TOTAL_INVESTMENT_USDT,
+      leverage: LEVERAGE,
+      marginMode: MARGIN_MODE,
+      gridCount: GRID_COUNT,
+      position: position ? {
+        contracts: numberOrZero(position.contracts ?? position.info?.positionAmt),
+        entryPrice: numberOrZero(position.entryPrice ?? position.info?.entryPrice),
+        markPrice: numberOrZero(position.markPrice ?? position.info?.markPrice),
+        liquidationPrice: numberOrZero(position.liquidationPrice ?? position.info?.liquidationPrice),
+        unrealizedPnl: numberOrZero(position.unrealizedPnl ?? position.info?.unRealizedProfit),
+      } : null,
+      performance: {
+        realizedGridProfit: numberOrZero(symState.realizedGridProfit),
+        fees: numberOrZero(account.fees),
+        funding: numberOrZero(account.funding),
+      },
+    };
+  }
+
+  scheduleGeminiAdaptiveRefresh(symbol, context) {
+    if (!this.geminiAdaptiveMonitor?.isEnabled()) return;
+    this.geminiAdaptiveMonitor.refresh(symbol, context).then(result => {
+      if (!result || this.lastGeminiAdaptiveLog?.get(symbol) === result.decisionId) return;
+      this.lastGeminiAdaptiveLog?.set(symbol, result.decisionId);
+      if (result.error) {
+        console.warn(`[GEMINI-MONITOR] ${symbol} failed; deterministic fallback remains active: ${result.error}`);
+        return;
+      }
+      const status = result.accepted ? 'accepted' : 'below-confidence';
+      const reasoning = String(result.reasoning || '').replace(/\s+/g, ' ').trim();
+      console.log(
+        `[GEMINI-MONITOR] ${symbol} profile=${result.profile} confidence=${result.confidence} ` +
+        `status=${status} model=${result.model} reasons=${result.riskFactors.join(',') || 'none'} ` +
+        `summary=${reasoning}`
+      );
+    }).catch(error => {
+      console.warn(`[GEMINI-MONITOR] ${symbol} refresh failed; deterministic fallback remains active: ${error.message}`);
+    });
+  }
+
+  async evaluateAdaptiveSupervisor(symbol, analysis, currentPrice = null) {
     try {
       const exposureRatio = GRID_TOTAL_INVESTMENT_USDT > 0
         ? this.getAllocatedInvestmentUsdt(symbol) / GRID_TOTAL_INVESTMENT_USDT
         : 0;
-      const signalId = Object.values(analysis.timeframes || {})
+      const marketSignalId = Object.values(analysis.timeframes || {})
         .map(timeframe => `${timeframe.timeframe}:${timeframe.lastClosedAt}`)
         .sort()
         .join('|') || analysis.generatedAt;
+      const monitorContext = this.buildGeminiAdaptiveContext(
+        symbol,
+        analysis,
+        currentPrice,
+        exposureRatio
+      );
+      const monitorDecision = this.geminiAdaptiveMonitor?.getDecision(symbol) || null;
+      this.scheduleGeminiAdaptiveRefresh(symbol, monitorContext);
+      const signalId = `${marketSignalId}|gemini:${monitorDecision?.decisionId || 'pending'}`;
       const decision = this.adaptiveGridSupervisor.evaluate(symbol, {
         analysis,
         exposureRatio,
         signalId,
+        monitorDecision,
       });
       if (!decision) return null;
       this.adaptiveGridDecisions.set(symbol, decision);
@@ -1591,7 +1683,7 @@ class FuturesGridEngine {
       const weights = decision.recommendation.buyWeight;
       const label = ADAPTIVE_GRID_SUPERVISOR_MODE === 'LIVE' ? 'ADAPTIVE-LIVE' : 'ADAPTIVE-SHADOW';
       console.log(
-        `[${label}] ${symbol} profile=${decision.profile} raw=${decision.rawProfile} ` +
+        `[${label}] ${symbol} profile=${decision.profile} raw=${decision.rawProfile} source=${decision.decisionSource} ` +
         `changed=${decision.changed} exposure=${decision.exposurePct}% ` +
         `buy-weight=${weights.upper}/${weights.middle}/${weights.lower} ` +
         `spacing=${decision.recommendation.spacingMultiplier} reserve=${decision.recommendation.reservePct}% ` +
@@ -1734,7 +1826,7 @@ class FuturesGridEngine {
         }
       }
       if (ADAPTIVE_GRID_SUPERVISOR_ENABLED && fibonacciDirection) {
-        await this.evaluateAdaptiveSupervisor(symbol, fibonacciDirection);
+        await this.evaluateAdaptiveSupervisor(symbol, fibonacciDirection, currentPrice);
       }
     }
     let rangeSuggestion = fibonacciAllowed
@@ -4472,6 +4564,9 @@ Fibonacci Direction (deterministic): ${FIBONACCI_DIRECTION_ANALYZER_ENABLED
 Adaptive Grid Supervisor: ${ADAPTIVE_GRID_SUPERVISOR_ENABLED
       ? `ON (${ADAPTIVE_GRID_SUPERVISOR_MODE}; profile-confirmations=${ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS}, cooldown=${ADAPTIVE_GRID_SUPERVISOR_COOLDOWN_MS / MINUTE_MS}m)`
       : 'OFF'}
+Gemini Adaptive Monitor: ${GEMINI_ADAPTIVE_MONITOR_ENABLED
+      ? `ON (model=${GEMINI_MODEL}, interval=${GEMINI_ADAPTIVE_MONITOR_INTERVAL_MS / MINUTE_MS}m, min-confidence=${GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE}; non-blocking)`
+      : 'OFF'}
 `);
     await this.init();
     startFuturesDashboardServer(this);
@@ -4529,6 +4624,7 @@ module.exports = {
   ProcessLock,
   FuturesGridEngine,
   GeminiRangeAdvisor,
+  GeminiAdaptiveMonitor,
   AIGridValidator,
   TechnicalIndicators,
   FibonacciDirectionAnalyzer,

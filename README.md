@@ -303,7 +303,9 @@ Simulator memasukkan maker fee dua sisi, funding historis, minimum notional, bat
 
 ### Adaptive grid supervisor
 
-Supervisor adaptif menerjemahkan hasil direction analyzer menjadi profil `BULLISH`, `SIDEWAYS`, `BEARISH`, atau `RISK_OFF`. Mode `SHADOW` hanya menulis rekomendasi ke log. Mode `LIVE` menerapkan bobot notional BUY per zona, jarak level BUY, dan reserve terhadap BUY baru serta refill. Posisi yang sudah terbuka tidak ditutup paksa dan SELL exit tetap mengikuti target profit grid normal.
+Supervisor adaptif menghasilkan profil `BULLISH`, `SIDEWAYS`, `BEARISH`, atau `RISK_OFF`. Tanpa Gemini monitor, profil berasal dari direction analyzer deterministik. Jika Gemini monitor aktif dan confidence-nya lolos validasi, profil Gemini menjadi input supervisor. Hard guard deterministik tetap memaksa `RISK_OFF` saat exposure atau kondisi bearish ekstrem melewati batas.
+
+Mode `SHADOW` hanya menulis rekomendasi ke log. Mode `LIVE` menerapkan bobot notional BUY per zona, jarak level BUY, dan reserve terhadap BUY baru serta refill. Posisi yang sudah terbuka tidak ditutup paksa dan SELL exit tetap mengikuti target profit grid normal.
 
 ```env
 ADAPTIVE_GRID_SUPERVISOR_ENABLED=true
@@ -312,7 +314,16 @@ ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS=3
 ADAPTIVE_GRID_SUPERVISOR_COOLDOWN_MINUTES=120
 ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT=90
 ADAPTIVE_GRID_SUPERVISOR_LOG_FILE=adaptive-grid-live.jsonl
+
+GEMINI_ADAPTIVE_MONITOR_ENABLED=true
+GEMINI_ADAPTIVE_MONITOR_INTERVAL_MINUTES=15
+GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE=0.60
+GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS=20000
+GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-3.1-flash-lite
 ```
+
+Gemini menerima ringkasan arah Fibonacci, volatilitas, exposure, posisi, liquidation price, funding, fee, dan PnL grid. Request berjalan non-blocking: order loop tidak menunggu respons Gemini. Respons memakai structured JSON, divalidasi terhadap empat profil yang diizinkan, dan baru diterapkan pada siklus berikutnya. Timeout, respons invalid, atau confidence rendah otomatis memakai klasifikasi deterministik.
 
 Backtest shadow memakai cache candle yang sama dengan backtest arah:
 
@@ -332,6 +343,8 @@ GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
 Advisor mengambil candle OHLCV, menghitung indikator teknikal lokal, lalu meminta Gemini menyarankan `lower`, `upper`, dan opsional `levels` untuk harga order grid. Rekomendasi hanya dipakai jika confidence memenuhi threshold dan range masih lolos safety clamp. Jika Gemini mengirim `levels`, jumlahnya harus tepat `GRID_COUNT + 1`, berurutan naik dari `lower` ke `upper`, tanpa duplikat, dan tetap distinct setelah precision exchange; kalau tidak valid bot fallback ke level lokal dari range.
+
+Range advisor ini terpisah dari Gemini Adaptive Monitor. Biarkan `GEMINI_RANGE_ADVISOR_ENABLED=false` jika Gemini hanya boleh menentukan profil risiko BUY dan Fibonacci tetap menjadi sumber range.
 
 - `GEMINI_API_KEY`: API key Gemini. Wajib jika advisor aktif.
 - `GEMINI_MODEL`: model Gemini yang dipakai.

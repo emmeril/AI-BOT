@@ -138,6 +138,34 @@ function classifyProfile(analysis, exposureRatio, options = {}) {
   return { profile: PROFILES.SIDEWAYS, reasons, features };
 }
 
+function classificationWithMonitor(analysis, exposureRatio, options = {}, monitorDecision = null) {
+  const deterministic = classifyProfile(analysis, exposureRatio, options);
+  if (deterministic.profile === PROFILES.RISK_OFF) {
+    return {
+      ...deterministic,
+      source: 'DETERMINISTIC_SAFETY',
+      deterministicProfile: deterministic.profile,
+    };
+  }
+  if (!monitorDecision?.accepted || !Object.values(PROFILES).includes(monitorDecision.profile)) {
+    return {
+      ...deterministic,
+      source: 'DETERMINISTIC',
+      deterministicProfile: deterministic.profile,
+    };
+  }
+  return {
+    profile: monitorDecision.profile,
+    reasons: [
+      `gemini_${monitorDecision.profile.toLowerCase()}`,
+      ...(monitorDecision.riskFactors || []).map(reason => `gemini:${reason}`),
+    ],
+    features: deterministic.features,
+    source: 'GEMINI',
+    deterministicProfile: deterministic.profile,
+  };
+}
+
 class AdaptiveGridSupervisor {
   constructor(options = {}) {
     this.options = {
@@ -165,7 +193,7 @@ class AdaptiveGridSupervisor {
     return this.states.get(symbol);
   }
 
-  evaluate(symbol, { analysis, exposureRatio = 0, now = Date.now(), signalId } = {}) {
+  evaluate(symbol, { analysis, exposureRatio = 0, now = Date.now(), signalId, monitorDecision = null } = {}) {
     if (!analysis) return null;
     const state = this.getState(symbol);
     const resolvedSignalId = String(signalId || analysis.generatedAt || now);
@@ -173,7 +201,12 @@ class AdaptiveGridSupervisor {
       return { ...state.lastDecision, evaluated: false };
     }
 
-    const classified = classifyProfile(analysis, exposureRatio, this.options);
+    const classified = classificationWithMonitor(
+      analysis,
+      exposureRatio,
+      this.options,
+      monitorDecision
+    );
     if (state.candidateProfile === classified.profile) state.candidateCount += 1;
     else {
       state.candidateProfile = classified.profile;
@@ -207,6 +240,20 @@ class AdaptiveGridSupervisor {
       confirmationsRequired,
       cooldownElapsed,
       exposurePct: round(Number(exposureRatio) * 100, 2),
+      decisionSource: classified.source,
+      deterministicProfile: classified.deterministicProfile,
+      gemini: monitorDecision ? {
+        accepted: Boolean(monitorDecision.accepted),
+        profile: monitorDecision.profile || null,
+        confidence: monitorDecision.confidence === null || monitorDecision.confidence === undefined
+          ? null
+          : round(Number(monitorDecision.confidence)),
+        reasoning: monitorDecision.reasoning || '',
+        riskFactors: monitorDecision.riskFactors || [],
+        model: monitorDecision.model || null,
+        generatedAt: monitorDecision.generatedAt || null,
+        error: monitorDecision.error || null,
+      } : null,
       reasons: classified.reasons,
       features: Object.fromEntries(
         Object.entries(classified.features).map(([key, value]) => [key, typeof value === 'number' ? round(value) : value])
@@ -224,6 +271,7 @@ module.exports = {
   PROFILE_RECOMMENDATIONS,
   AdaptiveGridSupervisor,
   classifyProfile,
+  classificationWithMonitor,
   marketFeatures,
   recommendationFor,
   zoneForRank,

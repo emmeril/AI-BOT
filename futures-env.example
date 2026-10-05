@@ -91,12 +91,18 @@ STOP_TRADING=false
 KILL_SWITCH_ENABLED=true
 KILL_SWITCH_FILE=futures-bot-paused.flag
 
-# Keep AI disabled until the futures grid is verified in Demo Trading. When
-# enabled, Gemini recommends the grid range; it does not open discretionary
-# LONG/SHORT positions or override the ROI exits.
+# Gemini monitoring classifies BUY risk asynchronously. The deterministic
+# supervisor remains the fallback and always enforces hard exposure guards.
+GEMINI_ADAPTIVE_MONITOR_ENABLED=false
+GEMINI_ADAPTIVE_MONITOR_INTERVAL_MINUTES=15
+GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE=0.60
+GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS=20000
+
+# The separate range advisor lets Gemini propose grid prices. It can stay off
+# when Gemini should monitor risk without controlling the active range.
 GEMINI_RANGE_ADVISOR_ENABLED=false
 GEMINI_API_KEY=your_gemini_api_key_here
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-3.1-flash-lite
 GEMINI_API_BASE_URL=https://generativelanguage.googleapis.com
 GEMINI_RANGE_ADVISOR_TIMEFRAME=1h
 GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_SECONDS=5

@@ -98,6 +98,48 @@ test('live decisions expose the configured execution mode', () => {
   assert.equal(result.mode, 'LIVE');
 });
 
+test('accepted Gemini monitoring drives the adaptive profile', () => {
+  const supervisor = new AdaptiveGridSupervisor({ profileConfirmations: 1, cooldownMs: 0 });
+  const result = supervisor.evaluate('TEST', {
+    analysis: analysis('RANGING'),
+    exposureRatio: 0.4,
+    now: 1,
+    signalId: 'gemini-1',
+    monitorDecision: {
+      accepted: true,
+      profile: 'BEARISH',
+      confidence: 0.82,
+      reasoning: 'Downside pressure is broadening.',
+      riskFactors: ['weak momentum'],
+      model: 'gemini-test',
+    },
+  });
+
+  assert.equal(result.profile, 'BEARISH');
+  assert.equal(result.decisionSource, 'GEMINI');
+  assert.equal(result.deterministicProfile, 'SIDEWAYS');
+  assert.equal(result.gemini.confidence, 0.82);
+});
+
+test('deterministic risk guard overrides a bullish Gemini classification', () => {
+  const supervisor = new AdaptiveGridSupervisor({ profileConfirmations: 1, cooldownMs: 0 });
+  const result = supervisor.evaluate('TEST', {
+    analysis: analysis('BULLISH'),
+    exposureRatio: 0.95,
+    now: 1,
+    signalId: 'gemini-risk',
+    monitorDecision: {
+      accepted: true,
+      profile: 'BULLISH',
+      confidence: 0.99,
+      riskFactors: [],
+    },
+  });
+
+  assert.equal(result.profile, 'RISK_OFF');
+  assert.equal(result.decisionSource, 'DETERMINISTIC_SAFETY');
+});
+
 test('risk-off live plan widens spacing and shifts size toward lower levels', () => {
   const recommendation = recommendationFor('RISK_OFF');
   const candidates = [100, 99, 98, 97, 96]
