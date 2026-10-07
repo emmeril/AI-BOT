@@ -1,12 +1,15 @@
 (() => {
   'use strict';
 
-  const state = { data: null, activeNode: 'supervisor', timer: null, controller: null, requestId: 0, loading: true, refreshSpinTimer: null, flowLayoutFrame: null };
+  const state = { data: null, activeNode: 'supervisor', timer: null, controller: null, requestId: 0, loading: true, refreshSpinTimer: null, flowLayoutFrame: null, flowBounceTimer: null, flowBounceIndex: 0, motionPreference: 'on' };
+  const MOTION_STORAGE_KEY = 'grid-flow-motion';
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   const FLOW_EDGES = [
     ['market', 'fibonacci'], ['market', 'gemini'],
     ['fibonacci', 'supervisor'], ['gemini', 'supervisor'],
     ['supervisor', 'buy'], ['buy', 'position'], ['position', 'sell'],
   ];
+  const FLOW_STAGES = [['market'], ['fibonacci', 'gemini'], ['supervisor'], ['buy'], ['position'], ['sell']];
   const byId = id => document.getElementById(id);
   const num = value => Number.isFinite(Number(value)) ? Number(value) : 0;
   const nullable = value => value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Number(value);
@@ -93,6 +96,54 @@
     if (state.flowLayoutFrame !== null) cancelAnimationFrame(state.flowLayoutFrame);
     state.flowLayoutFrame = requestAnimationFrame(layoutFlowConnections);
   }
+  function motionEnabled() {
+    if (state.motionPreference === 'on') return true;
+    if (state.motionPreference === 'off') return false;
+    return !reducedMotion.matches;
+  }
+  function clearFlowBounce() {
+    clearTimeout(state.flowBounceTimer); state.flowBounceTimer = null;
+    document.querySelectorAll('.flow-node').forEach(node => node.getAnimations().filter(animation => animation.id === 'flow-node-bounce').forEach(animation => animation.cancel()));
+  }
+  function runFlowBounce() {
+    state.flowBounceTimer = null;
+    if (!state.data?.running || !motionEnabled()) return;
+    const stage = FLOW_STAGES[state.flowBounceIndex];
+    for (const name of stage) {
+      const node = document.querySelector(`[data-node="${name}"]`);
+      if (!node) continue;
+      const animation = node.animate([
+        { transform: 'translateY(0) scale(1)' },
+        { transform: 'translateY(-5px) scale(1.01)', offset: .48 },
+        { transform: 'translateY(0) scale(1)' },
+      ], { duration: 480, easing: 'cubic-bezier(.2,.8,.3,1)' });
+      animation.id = 'flow-node-bounce';
+    }
+    state.flowBounceIndex = (state.flowBounceIndex + 1) % FLOW_STAGES.length;
+    state.flowBounceTimer = setTimeout(runFlowBounce, state.flowBounceIndex === 0 ? 1050 : 560);
+  }
+  function syncFlowBounce({ restart = false } = {}) {
+    if (restart || !state.data?.running || !motionEnabled()) clearFlowBounce();
+    if (state.data?.running && motionEnabled() && state.flowBounceTimer === null) {
+      if (restart) state.flowBounceIndex = 0;
+      state.flowBounceTimer = setTimeout(runFlowBounce, 180);
+    }
+  }
+  function savedMotionPreference() {
+    try {
+      const value = localStorage.getItem(MOTION_STORAGE_KEY);
+      return ['on', 'system', 'off'].includes(value) ? value : 'on';
+    } catch { return 'on'; }
+  }
+  function applyMotionPreference(value, { persist = false } = {}) {
+    const preference = ['on', 'system', 'off'].includes(value) ? value : 'on';
+    state.motionPreference = preference; document.documentElement.dataset.motion = preference;
+    byId('motion-select').value = preference;
+    const description = preference === 'on' ? 'Animasi dashboard aktif.' : preference === 'off' ? 'Animasi dashboard dimatikan.' : `Animasi mengikuti sistem dan saat ini ${reducedMotion.matches ? 'mati' : 'aktif'}.`;
+    text('motion-state', description); byId('motion-control').title = description;
+    if (persist) { try { localStorage.setItem(MOTION_STORAGE_KEY, preference); } catch {} }
+    syncFlowBounce({ restart: true });
+  }
   function profileCopy(profile) {
     return ({
       BULLISH: 'BUY tetap aktif dengan jarak sedikit lebih rapat.',
@@ -139,6 +190,7 @@
     setNode('position', position ? (num(data.profit?.unrealizedPnl) >= 0 ? 'positive' : 'negative') : 'accent', position ? 'LONG AKTIF' : 'TIDAK ADA POSISI', position ? compact(position.contracts) : '0', `PnL berjalan ${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`);
     setNode('sell', coverage !== null && coverage !== undefined && coverage < 99.999 ? 'negative' : 'positive', `${num(data.orders?.sellCount)} ORDER`, coverage == null ? 'Coverage N/A' : `Coverage ${percent(coverage, 0)}`, execution.uncovered > 0 ? `${compact(execution.uncovered)} kontrak belum tertutup` : 'Tidak ada posisi tanpa exit');
     queueFlowLayout();
+    syncFlowBounce();
   }
 
   function inspectorModel() {
@@ -279,6 +331,8 @@
   function bindEvents() {
     document.querySelectorAll('.flow-node').forEach(node => node.addEventListener('click', () => { state.activeNode = node.dataset.node; if (state.data) renderInspector(); }));
     byId('symbol-select').addEventListener('change', event => load({ symbol: event.target.value, announced: true })); byId('refresh-button').addEventListener('click', () => { spinRefreshButton(); load({ announced: true }); }); byId('retry-button').addEventListener('click', () => load({ announced: true }));
+    byId('motion-select').addEventListener('change', event => applyMotionPreference(event.target.value, { persist: true }));
+    reducedMotion.addEventListener?.('change', () => { if (state.motionPreference === 'system') applyMotionPreference('system'); });
     let resizeTimer; window.addEventListener('resize', () => { queueFlowLayout(); clearTimeout(resizeTimer); resizeTimer = setTimeout(drawChart, 100); });
     if ('ResizeObserver' in window) {
       const observer = new ResizeObserver(queueFlowLayout);
@@ -288,5 +342,5 @@
     document.fonts?.ready.then(queueFlowLayout);
     queueFlowLayout();
   }
-  bindEvents(); load();
+  applyMotionPreference(savedMotionPreference()); bindEvents(); load();
 })();

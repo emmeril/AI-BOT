@@ -13,8 +13,25 @@ test('dashboard pipeline keeps seven responsive animated connections', () => {
   assert.equal((html.match(/data-edge=/g) || []).length, 14);
   assert.match(script, /const FLOW_EDGES = \[/);
   assert.match(script, /ResizeObserver\(queueFlowLayout\)/);
+  assert.match(script, /const FLOW_STAGES = \[\['market'\]/);
+  assert.match(script, /animation\.id = 'flow-node-bounce'/);
   assert.doesNotMatch(css, /@media\(max-width:1180px\)[^}]*\.flow-lines\{display:none\}/);
   assert.match(css, /\.flow-map\[data-running=true\] \.flow-signal path\{animation-play-state:running\}/);
+});
+
+test('dashboard motion preference can override or follow reduced motion', () => {
+  const html = publicFile('dashboard.html');
+  const css = publicFile('dashboard.css');
+  const script = publicFile('dashboard.js');
+
+  assert.match(html, /<html lang="id" data-motion="on">/);
+  assert.match(html, /id="motion-select"/);
+  assert.match(html, /value="on">Aktif/);
+  assert.match(html, /value="system">Sistem/);
+  assert.match(html, /value="off">Mati/);
+  assert.match(css, /html:not\(\[data-motion=on\]\) \.flow-signal\{display:none\}/);
+  assert.match(css, /html\[data-motion=on\] \.refresh-icon\.fa-spin\{animation:refresh-turn/);
+  assert.match(script, /localStorage\.setItem\(MOTION_STORAGE_KEY, preference\)/);
 });
 
 test('dashboard refresh has Font Awesome and a visible loading state', () => {

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="id">
+<html lang="id" data-motion="on">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -8,8 +8,8 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/fontawesome/css/fontawesome.min.css?v=7.3.1">
   <link rel="stylesheet" href="/fontawesome/css/solid.min.css?v=7.3.1">
-  <link rel="stylesheet" href="/dashboard.css?v=20261007.6">
-  <script defer src="/dashboard.js?v=20261007.6"></script>
+  <link rel="stylesheet" href="/dashboard.css?v=20261007.8">
+  <script defer src="/dashboard.js?v=20261007.8"></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Lewati ke dashboard</a>
@@ -20,6 +20,7 @@
         <label class="sr-only" for="symbol-select">Pilih pair</label>
         <select class="pair-select mono" id="symbol-select" aria-label="Pilih pair trading"></select>
         <button class="control-button" id="refresh-button" type="button" aria-label="Perbarui data" title="Perbarui data"><i class="fa-solid fa-rotate-right refresh-icon" aria-hidden="true"></i><span class="sr-only">Perbarui</span></button>
+        <label class="motion-control" id="motion-control"><span>Animasi</span><select id="motion-select" aria-label="Pengaturan animasi"><option value="on">Aktif</option><option value="system">Sistem</option><option value="off">Mati</option></select><span class="sr-only" id="motion-state" aria-live="polite"></span></label>
         <div class="status-block" role="status" aria-live="polite"><span class="status-mark" id="status-mark"></span><span id="status-text">Menghubungkan</span></div>
         <form class="logout-form" id="logout-form" method="post" action="/logout" hidden><button class="control-button" type="submit">Keluar</button></form>
       </div>
