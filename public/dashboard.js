@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const state = { data: null, activeNode: 'supervisor', timer: null, controller: null, requestId: 0, loading: true };
+  const state = { data: null, activeNode: 'supervisor', timer: null, controller: null, requestId: 0, loading: true, refreshSpinTimer: null };
   const byId = id => document.getElementById(id);
   const num = value => Number.isFinite(Number(value)) ? Number(value) : 0;
   const nullable = value => value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Number(value);
@@ -197,9 +197,17 @@
     if (JSON.stringify(current) !== JSON.stringify(symbols)) { select.replaceChildren(); for (const symbol of symbols) { const option = document.createElement('option'); option.value = symbol; option.textContent = symbol; select.append(option); } }
     select.value = selected || symbols[0] || '';
   }
-  function setLoading(loading, initial = false) { state.loading = loading; byId('app').setAttribute('aria-busy', String(loading)); byId('refresh-button').disabled = loading; byId('loading-state').hidden = !loading || (!initial && Boolean(state.data)); if (loading && state.data) text('status-text', 'Memperbarui'); }
+  function spinRefreshButton() {
+    const button = byId('refresh-button');
+    clearTimeout(state.refreshSpinTimer);
+    button.classList.remove('is-spinning');
+    void button.offsetWidth;
+    button.classList.add('is-spinning');
+    state.refreshSpinTimer = setTimeout(() => button.classList.remove('is-spinning'), 1100);
+  }
+  function setLoading(loading, initial = false, announced = false) { state.loading = loading; byId('app').setAttribute('aria-busy', String(loading)); byId('refresh-button').disabled = loading && (initial || announced); byId('loading-state').hidden = !loading || (!initial && Boolean(state.data)); }
   async function load(options = {}) {
-    const initial = !state.data; const requestId = ++state.requestId; state.controller?.abort(); state.controller = new AbortController(); setLoading(true, initial); byId('error-notice').hidden = true; clearTimeout(state.timer);
+    const initial = !state.data; const announced = Boolean(options.announced); const requestId = ++state.requestId; state.controller?.abort(); state.controller = new AbortController(); setLoading(true, initial, announced); byId('error-notice').hidden = true; clearTimeout(state.timer);
     try {
       const selected = options.symbol ?? byId('symbol-select').value; const query = selected ? `?symbol=${encodeURIComponent(selected)}` : '';
       const response = await fetch(`/api/dashboard${query}`, { signal: state.controller.signal, cache: 'no-store' });
@@ -212,7 +220,7 @@
   }
   function bindEvents() {
     document.querySelectorAll('.flow-node').forEach(node => node.addEventListener('click', () => { state.activeNode = node.dataset.node; if (state.data) renderInspector(); }));
-    byId('symbol-select').addEventListener('change', event => load({ symbol: event.target.value })); byId('refresh-button').addEventListener('click', () => load()); byId('retry-button').addEventListener('click', () => load());
+    byId('symbol-select').addEventListener('change', event => load({ symbol: event.target.value, announced: true })); byId('refresh-button').addEventListener('click', () => { spinRefreshButton(); load({ announced: true }); }); byId('retry-button').addEventListener('click', () => load({ announced: true }));
     let resizeTimer; window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(drawChart, 100); });
   }
   bindEvents(); load();

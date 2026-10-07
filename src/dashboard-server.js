@@ -22,6 +22,9 @@ const dashboardFile = path.join(__dirname, '..', 'public', 'dashboard.html');
 const dashboardAssets = new Map([
   ['/dashboard.css', { file: path.join(__dirname, '..', 'public', 'dashboard.css'), type: 'text/css; charset=utf-8' }],
   ['/dashboard.js', { file: path.join(__dirname, '..', 'public', 'dashboard.js'), type: 'text/javascript; charset=utf-8' }],
+  ['/fontawesome/css/fontawesome.min.css', { file: path.join(__dirname, '..', 'node_modules', '@fortawesome', 'fontawesome-free', 'css', 'fontawesome.min.css'), type: 'text/css; charset=utf-8' }],
+  ['/fontawesome/css/solid.min.css', { file: path.join(__dirname, '..', 'node_modules', '@fortawesome', 'fontawesome-free', 'css', 'solid.min.css'), type: 'text/css; charset=utf-8' }],
+  ['/fontawesome/webfonts/fa-solid-900.woff2', { file: path.join(__dirname, '..', 'node_modules', '@fortawesome', 'fontawesome-free', 'webfonts', 'fa-solid-900.woff2'), type: 'font/woff2' }],
 ]);
 
 function isLoopbackHost(value) {

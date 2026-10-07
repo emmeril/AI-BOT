@@ -5,8 +5,10 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>Grid Flow Control</title>
-  <link rel="stylesheet" href="/dashboard.css">
-  <script defer src="/dashboard.js"></script>
+  <link rel="stylesheet" href="/fontawesome/css/fontawesome.min.css?v=7.3.1">
+  <link rel="stylesheet" href="/fontawesome/css/solid.min.css?v=7.3.1">
+  <link rel="stylesheet" href="/dashboard.css?v=20261007.3">
+  <script defer src="/dashboard.js?v=20261007.3"></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Lewati ke dashboard</a>
@@ -16,7 +18,7 @@
       <div class="top-actions">
         <label class="sr-only" for="symbol-select">Pilih pair</label>
         <select class="pair-select mono" id="symbol-select" aria-label="Pilih pair trading"></select>
-        <button class="control-button" id="refresh-button" type="button">Perbarui</button>
+        <button class="control-button" id="refresh-button" type="button" aria-label="Perbarui data" title="Perbarui data"><i class="fa-solid fa-rotate-right refresh-icon" aria-hidden="true"></i><span class="sr-only">Perbarui</span></button>
         <div class="status-block" role="status" aria-live="polite"><span class="status-mark" id="status-mark"></span><span id="status-text">Menghubungkan</span></div>
         <form class="logout-form" id="logout-form" method="post" action="/logout" hidden><button class="control-button" type="submit">Keluar</button></form>
       </div>
