@@ -1,7 +1,12 @@
 (() => {
   'use strict';
 
-  const state = { data: null, activeNode: 'supervisor', timer: null, controller: null, requestId: 0, loading: true, refreshSpinTimer: null };
+  const state = { data: null, activeNode: 'supervisor', timer: null, controller: null, requestId: 0, loading: true, refreshSpinTimer: null, flowLayoutFrame: null };
+  const FLOW_EDGES = [
+    ['market', 'fibonacci'], ['market', 'gemini'],
+    ['fibonacci', 'supervisor'], ['gemini', 'supervisor'],
+    ['supervisor', 'buy'], ['buy', 'position'], ['position', 'sell'],
+  ];
   const byId = id => document.getElementById(id);
   const num = value => Number.isFinite(Number(value)) ? Number(value) : 0;
   const nullable = value => value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Number(value);
@@ -50,6 +55,44 @@
     text(`${nodeId(name)}-node-value`, value);
     text(`${nodeId(name)}-node-meta`, meta);
   }
+  function flowNodeBox(name, mapBox) {
+    const box = document.querySelector(`[data-node="${name}"]`)?.getBoundingClientRect();
+    if (!box) return null;
+    return {
+      left: box.left - mapBox.left, right: box.right - mapBox.left,
+      top: box.top - mapBox.top, bottom: box.bottom - mapBox.top,
+      centerX: box.left - mapBox.left + box.width / 2,
+      centerY: box.top - mapBox.top + box.height / 2,
+    };
+  }
+  function flowConnectionPath(source, target) {
+    if (target.left - source.right >= 8) {
+      const middleX = (source.right + target.left) / 2;
+      return `M ${source.right} ${source.centerY} C ${middleX} ${source.centerY}, ${middleX} ${target.centerY}, ${target.left} ${target.centerY}`;
+    }
+    const sourceX = clamp(target.centerX, source.left + 22, source.right - 22);
+    const targetX = clamp(source.centerX, target.left + 22, target.right - 22);
+    const middleY = (source.bottom + target.top) / 2;
+    return `M ${sourceX} ${source.bottom} C ${sourceX} ${middleY}, ${targetX} ${middleY}, ${targetX} ${target.top}`;
+  }
+  function layoutFlowConnections() {
+    state.flowLayoutFrame = null;
+    const map = byId('flow-map'); const svg = map?.querySelector('.flow-lines');
+    if (!map || !svg) return;
+    const mapBox = map.getBoundingClientRect();
+    if (!(mapBox.width > 0 && mapBox.height > 0)) return;
+    svg.setAttribute('viewBox', `0 0 ${mapBox.width} ${mapBox.height}`);
+    for (const [from, to] of FLOW_EDGES) {
+      const source = flowNodeBox(from, mapBox); const target = flowNodeBox(to, mapBox);
+      if (!source || !target) continue;
+      const path = flowConnectionPath(source, target); const edge = `${from}-${to}`;
+      svg.querySelectorAll(`[data-edge="${edge}"]`).forEach(element => element.setAttribute('d', path));
+    }
+  }
+  function queueFlowLayout() {
+    if (state.flowLayoutFrame !== null) cancelAnimationFrame(state.flowLayoutFrame);
+    state.flowLayoutFrame = requestAnimationFrame(layoutFlowConnections);
+  }
   function profileCopy(profile) {
     return ({
       BULLISH: 'BUY tetap aktif dengan jarak sedikit lebih rapat.',
@@ -79,6 +122,7 @@
 
   function renderFlow() {
     const data = state.data;
+    byId('flow-map').dataset.running = String(Boolean(data.running));
     const fib = intel().fibonacci || {};
     const gemini = intel().gemini || {};
     const adaptive = intel().adaptive || {};
@@ -94,6 +138,7 @@
     setNode('buy', 'positive', `${num(data.orders?.buyCount)} ORDER`, `${money(data.orders?.buyValue, 2)} ${quote()}`, `Bobot atas/tengah/bawah ${weightText}`);
     setNode('position', position ? (num(data.profit?.unrealizedPnl) >= 0 ? 'positive' : 'negative') : 'accent', position ? 'LONG AKTIF' : 'TIDAK ADA POSISI', position ? compact(position.contracts) : '0', `PnL berjalan ${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`);
     setNode('sell', coverage !== null && coverage !== undefined && coverage < 99.999 ? 'negative' : 'positive', `${num(data.orders?.sellCount)} ORDER`, coverage == null ? 'Coverage N/A' : `Coverage ${percent(coverage, 0)}`, execution.uncovered > 0 ? `${compact(execution.uncovered)} kontrak belum tertutup` : 'Tidak ada posisi tanpa exit');
+    queueFlowLayout();
   }
 
   function inspectorModel() {
@@ -199,11 +244,24 @@
   }
   function spinRefreshButton() {
     const button = byId('refresh-button');
+    const icon = button.querySelector('.refresh-icon');
     clearTimeout(state.refreshSpinTimer);
-    button.classList.remove('is-spinning');
-    void button.offsetWidth;
-    button.classList.add('is-spinning');
-    state.refreshSpinTimer = setTimeout(() => button.classList.remove('is-spinning'), 1100);
+    icon.classList.remove('fa-spin');
+    button.classList.remove('is-refreshing');
+    void icon.offsetWidth;
+    icon.classList.add('fa-spin');
+    button.classList.add('is-refreshing');
+    button.setAttribute('aria-busy', 'true');
+    const stopWhenReady = () => {
+      if (button.disabled) {
+        state.refreshSpinTimer = setTimeout(stopWhenReady, 150);
+        return;
+      }
+      icon.classList.remove('fa-spin');
+      button.classList.remove('is-refreshing');
+      button.setAttribute('aria-busy', 'false');
+    };
+    state.refreshSpinTimer = setTimeout(stopWhenReady, 1100);
   }
   function setLoading(loading, initial = false, announced = false) { state.loading = loading; byId('app').setAttribute('aria-busy', String(loading)); byId('refresh-button').disabled = loading && (initial || announced); byId('loading-state').hidden = !loading || (!initial && Boolean(state.data)); }
   async function load(options = {}) {
@@ -221,7 +279,14 @@
   function bindEvents() {
     document.querySelectorAll('.flow-node').forEach(node => node.addEventListener('click', () => { state.activeNode = node.dataset.node; if (state.data) renderInspector(); }));
     byId('symbol-select').addEventListener('change', event => load({ symbol: event.target.value, announced: true })); byId('refresh-button').addEventListener('click', () => { spinRefreshButton(); load({ announced: true }); }); byId('retry-button').addEventListener('click', () => load({ announced: true }));
-    let resizeTimer; window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(drawChart, 100); });
+    let resizeTimer; window.addEventListener('resize', () => { queueFlowLayout(); clearTimeout(resizeTimer); resizeTimer = setTimeout(drawChart, 100); });
+    if ('ResizeObserver' in window) {
+      const observer = new ResizeObserver(queueFlowLayout);
+      observer.observe(byId('flow-map'));
+      observer.observe(byId('flow-map').querySelector('.flow-grid'));
+    }
+    document.fonts?.ready.then(queueFlowLayout);
+    queueFlowLayout();
   }
   bindEvents(); load();
 })();

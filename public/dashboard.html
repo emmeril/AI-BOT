@@ -5,10 +5,11 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>Grid Flow Control</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/fontawesome/css/fontawesome.min.css?v=7.3.1">
   <link rel="stylesheet" href="/fontawesome/css/solid.min.css?v=7.3.1">
-  <link rel="stylesheet" href="/dashboard.css?v=20261007.3">
-  <script defer src="/dashboard.js?v=20261007.3"></script>
+  <link rel="stylesheet" href="/dashboard.css?v=20261007.6">
+  <script defer src="/dashboard.js?v=20261007.6"></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Lewati ke dashboard</a>
@@ -38,8 +39,11 @@
 
       <section class="panel flow-panel" aria-labelledby="flow-title">
         <div class="panel-head"><div><p class="eyebrow">Decision pipeline</p><h2 class="panel-title" id="flow-title">Dari sinyal pasar ke exit SELL</h2><p class="panel-copy">Pilih node untuk melihat alasan, nilai input, dan keputusan yang sedang digunakan bot.</p></div><div class="legend" aria-label="Legenda koneksi"><span><i class="live"></i> Alur aktif</span><span><i class="safe"></i> Safety override</span><span><i></i> Data menunggu</span></div></div>
-        <div class="flow-map">
-          <svg class="flow-lines" viewBox="0 0 1200 400" preserveAspectRatio="none" aria-hidden="true"><path class="live" d="M190 200 C210 200 205 88 225 88"></path><path class="live" d="M190 200 C210 200 205 312 225 312"></path><path class="live" d="M390 88 C414 88 400 200 425 200"></path><path class="live" d="M390 312 C414 312 400 200 425 200"></path><path class="live" d="M590 200 L625 200"></path><path class="live" d="M790 200 L825 200"></path><path class="live" d="M990 200 L1025 200"></path></svg>
+        <div class="flow-map" id="flow-map" data-running="false">
+          <svg class="flow-lines" viewBox="0 0 1200 400" preserveAspectRatio="none" aria-hidden="true">
+            <g class="flow-track"><path data-edge="market-fibonacci"></path><path data-edge="market-gemini"></path><path data-edge="fibonacci-supervisor"></path><path data-edge="gemini-supervisor"></path><path data-edge="supervisor-buy"></path><path data-edge="buy-position"></path><path data-edge="position-sell"></path></g>
+            <g class="flow-signal"><path data-edge="market-fibonacci"></path><path data-edge="market-gemini"></path><path data-edge="fibonacci-supervisor"></path><path data-edge="gemini-supervisor"></path><path data-edge="supervisor-buy"></path><path data-edge="buy-position"></path><path data-edge="position-sell"></path></g>
+          </svg>
           <div class="flow-grid">
             <button class="flow-node node-market" type="button" data-node="market" data-tone="accent" aria-pressed="false"><span class="node-index">01 / INPUT</span><span class="node-title">Market feed</span><strong class="node-status" id="market-node-status">BINANCE LIVE</strong><span class="node-value" id="market-node-value">N/A</span><span class="node-meta" id="market-node-meta">Menunggu ticker</span></button>
             <button class="flow-node node-fibonacci" type="button" data-node="fibonacci" aria-pressed="false"><span class="node-index">02A / SIGNAL</span><span class="node-title">Fibonacci</span><strong class="node-status" id="fib-node-status">MENUNGGU</strong><span class="node-value" id="fib-node-value">Score N/A</span><span class="node-meta" id="fib-node-meta">Belum ada analisis</span></button>
