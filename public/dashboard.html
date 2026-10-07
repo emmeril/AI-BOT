@@ -3,103 +3,71 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Grid Control — Live Trading Monitor</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.7/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"></script>
-  <style>
-    :root{--ink:#10211d;--muted:#6c7b75;--paper:#f2f0e9;--surface:#fffdf7;--line:#d9d7ce;--green:#0a8f62;--red:#dc5b45;--amber:#eba83a;--navy:#163d4a}
-    [x-cloak]{display:none!important}body{background:var(--paper);color:var(--ink);font-family:Manrope,sans-serif;min-height:100vh}body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.45;background-image:radial-gradient(#9ba7a0 .65px,transparent .65px);background-size:16px 16px}.dashboard{position:relative;max-width:1480px}.brand-mark{width:43px;height:43px;border:1px solid var(--ink);border-radius:50%;display:grid;place-items:center;font:700 17px DM Mono;background:var(--amber);box-shadow:3px 3px 0 var(--ink)}.eyebrow,.label{font:500 10px DM Mono;text-transform:uppercase;letter-spacing:1.2px;color:var(--muted)}.dashboard-card{background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:0 7px 22px #314a4210}.metric{min-height:116px;position:relative;overflow:hidden}.metric:after{content:"";position:absolute;width:80px;height:80px;border:18px solid #173d4a0a;border-radius:50%;right:-35px;bottom:-38px}.metric-value{font:700 27px DM Mono;letter-spacing:-1.5px}.mono{font-family:DM Mono}.text-profit{color:var(--green)!important}.text-loss{color:var(--red)!important}.live-dot{width:8px;height:8px;background:var(--green);border-radius:50%;box-shadow:0 0 0 4px #0a8f6222;animation:pulse 2s infinite}.chart-wrap{height:355px;position:relative}.chart-wrap canvas{width:100%;height:100%}.profit-hero{background:var(--navy);color:#fff;border-radius:10px;position:relative;overflow:hidden}.profit-hero:after{content:"";position:absolute;width:150px;height:150px;border:30px solid #ffffff0a;border-radius:50%;right:-65px;top:-65px}.profit-hero .label{color:#b8c9c9}.profit-value{font:500 31px DM Mono}.mini-stat{border:1px solid var(--line);border-radius:8px}.mini-stat b{font:500 17px DM Mono}.table{--bs-table-bg:transparent;--bs-table-color:var(--ink);margin:0}.table th{font:500 9px DM Mono;text-transform:uppercase;letter-spacing:1px;color:var(--muted);border-color:var(--line)}.table td{font:400 12px DM Mono;border-color:#e8e5dd}.order-scroll{max-height:330px;overflow:auto}.badge-buy{color:var(--green);background:#0a8f6212}.badge-sell{color:var(--red);background:#dc5b4512}.form-select{background-color:var(--surface);border-color:var(--line);font:500 12px DM Mono}.progress{height:5px;background:#e6e3da}.progress-bar{background:var(--green);transition:width .7s}.status-pill{background:var(--surface);border:1px solid var(--line);font:500 10px DM Mono}.tf-badge{background:var(--navy);font:500 10px DM Mono}.error-banner{background:#fff0ed;border:1px solid #efb2a7;color:#8e2f20}@keyframes pulse{50%{box-shadow:0 0 0 7px #0a8f6200}}@media(max-width:767px){.chart-wrap{height:285px}.metric{min-height:100px}.metric-value{font-size:23px}}
-    .futures-metrics>div{min-width:0;display:flex}.futures-metrics .metric{width:100%;height:100%}.futures-metrics .metric-value{overflow-wrap:anywhere}
-    .performance-stats>div{min-width:0}.performance-stats .mini-stat b{overflow-wrap:anywhere}
-    @media(max-width:767px){
-      .futures-metrics .metric{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);align-items:center;gap:8px 12px;min-height:108px}
-      .performance-stats .mini-stat{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);align-items:center;gap:12px;min-height:72px}
-      .performance-stats .label{line-height:1.5;letter-spacing:.6px}
-      .performance-stats .mini-stat b{margin-top:0!important;text-align:right;font-size:16px;line-height:1.4}
-      .futures-metrics .label{line-height:1.5;letter-spacing:.6px}
-      .futures-metrics .metric-value{margin-top:0!important;text-align:right;font-size:clamp(16px,4.5vw,23px);letter-spacing:-.5px;line-height:1.4}
-      .futures-metrics .small{grid-column:1/-1;margin-top:0!important;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
-    }
-    .table thead,.table thead th{background-color:var(--surface);--bs-table-bg:var(--surface)}
-  </style>
+  <meta name="color-scheme" content="dark">
+  <title>Grid Flow Control</title>
+  <link rel="stylesheet" href="/dashboard.css">
+  <script defer src="/dashboard.js"></script>
 </head>
 <body>
-<main class="container-fluid dashboard py-3 py-lg-4 px-3 px-lg-4" x-data="dashboard()" x-init="init()" x-cloak>
-  <header class="d-flex flex-column flex-sm-row align-items-sm-center justify-content-between gap-3 mb-4">
-    <div class="d-flex gap-3 align-items-center"><div class="brand-mark">GC</div><div><div class="eyebrow" x-text="`${source} · Automated Trading Desk`"></div><h1 class="h5 fw-bold mb-0">Grid Control</h1></div></div>
-    <div class="d-flex gap-2"><select class="form-select" x-model="selectedSymbol" @change="load()"><template x-for="symbol in symbols"><option :value="symbol" x-text="symbol"></option></template></select><div class="status-pill rounded-2 px-3 d-flex align-items-center gap-2 text-uppercase text-nowrap"><span class="live-dot"></span><span x-text="statusText"></span></div><form method="post" action="/logout" x-show="dashboardAuthEnabled"><button class="status-pill rounded-2 px-3 h-100 text-uppercase" type="submit">Logout</button></form></div>
-  </header>
+  <a class="skip-link" href="#main-content">Lewati ke dashboard</a>
+  <div class="app-shell" id="app" aria-busy="true">
+    <header class="topbar">
+      <div class="brand"><div class="brand-mark" aria-hidden="true">GF</div><div><p class="brand-kicker" id="source-label">Binance</p><h1>Grid Flow Control</h1></div></div>
+      <div class="top-actions">
+        <label class="sr-only" for="symbol-select">Pilih pair</label>
+        <select class="pair-select mono" id="symbol-select" aria-label="Pilih pair trading"></select>
+        <button class="control-button" id="refresh-button" type="button">Perbarui</button>
+        <div class="status-block" role="status" aria-live="polite"><span class="status-mark" id="status-mark"></span><span id="status-text">Menghubungkan</span></div>
+        <form class="logout-form" id="logout-form" method="post" action="/logout" hidden><button class="control-button" type="submit">Keluar</button></form>
+      </div>
+    </header>
 
-  <div class="error-banner rounded-3 px-3 py-2 mb-3 small" x-show="error" x-text="error"></div>
+    <div class="notice" id="error-notice" role="alert" hidden><span id="error-text">Data dashboard tidak tersedia.</span><button class="control-button" id="retry-button" type="button">Coba lagi</button></div>
+    <div class="loading-state" id="loading-state" role="status" aria-live="polite"><span class="loading-bar" aria-hidden="true"></span><span>Mengambil posisi, order, dan keputusan terbaru dari bot.</span></div>
 
-  <section class="dashboard-card p-3 p-lg-4 mb-3" x-show="futures" x-cloak aria-label="Ringkasan hasil futures">
-    <h2 class="h5">PnL Futures</h2>
-    <p class="small mb-2" x-text="selectedSymbol"></p>
-    <div class="metric-value mb-2" :class="profit.net === null ? '' : profit.net >= 0 ? 'text-profit' : 'text-loss'" x-text="money(profit.net,4)+' USDT'"></div>
-    <p class="small mb-0">Realisasi + funding + posisi berjalan</p>
-  </section>
+    <main id="main-content">
+      <section class="command-strip" aria-labelledby="overview-title">
+        <div class="command-lead"><p class="eyebrow">Pair aktif</p><h2 id="overview-title">Menunggu data</h2><p id="overview-copy">Status keputusan bot akan muncul setelah sinkronisasi pertama.</p></div>
+        <div class="command-metric"><span class="metric-label">Harga Binance</span><strong class="metric-value" id="market-price">N/A</strong><span class="metric-note" id="market-change">24 jam: N/A</span></div>
+        <div class="command-metric"><span class="metric-label">Profil BUY</span><strong class="metric-value" id="active-profile">Menunggu</strong><span class="metric-note" id="profile-source">Sumber belum tersedia</span></div>
+        <div class="command-metric"><span class="metric-label">Exposure</span><strong class="metric-value" id="exposure-value">N/A</strong><span class="metric-note" id="exposure-note">Batas investasi belum tersedia</span></div>
+        <div class="command-metric"><span class="metric-label">Net PnL</span><strong class="metric-value" id="net-pnl">N/A</strong><span class="metric-note">Realisasi + funding + posisi</span></div>
+      </section>
 
-  <section class="dashboard-card p-3 p-lg-4 mb-3" aria-label="Balance akun">
-    <div class="fw-bold small">Balance Akun</div>
-    <div class="text-secondary small mb-3" x-text="futures ? 'Saldo wallet futures · USDT' : 'Saldo spot untuk aset pada pair aktif'"></div>
-    <div class="text-secondary small" x-show="!futures && !balance" x-text="loading ? 'Memuat saldo...' : 'Saldo belum tersedia'"></div>
-    <div class="row g-3">
-      <template x-for="item in balanceCards" :key="item.label">
-        <div class="col-12 col-sm-6 col-xl-4"><article class="mini-stat p-3 h-100"><div class="label" x-text="item.label"></div><div class="metric-value mt-2" style="font-size:22px;overflow-wrap:anywhere" x-text="money(item.value,item.digits)+' '+item.asset"></div></article></div>
-      </template>
-    </div>
-  </section>
+      <section class="panel flow-panel" aria-labelledby="flow-title">
+        <div class="panel-head"><div><p class="eyebrow">Decision pipeline</p><h2 class="panel-title" id="flow-title">Dari sinyal pasar ke exit SELL</h2><p class="panel-copy">Pilih node untuk melihat alasan, nilai input, dan keputusan yang sedang digunakan bot.</p></div><div class="legend" aria-label="Legenda koneksi"><span><i class="live"></i> Alur aktif</span><span><i class="safe"></i> Safety override</span><span><i></i> Data menunggu</span></div></div>
+        <div class="flow-map">
+          <svg class="flow-lines" viewBox="0 0 1200 400" preserveAspectRatio="none" aria-hidden="true"><path class="live" d="M190 200 C210 200 205 88 225 88"></path><path class="live" d="M190 200 C210 200 205 312 225 312"></path><path class="live" d="M390 88 C414 88 400 200 425 200"></path><path class="live" d="M390 312 C414 312 400 200 425 200"></path><path class="live" d="M590 200 L625 200"></path><path class="live" d="M790 200 L825 200"></path><path class="live" d="M990 200 L1025 200"></path></svg>
+          <div class="flow-grid">
+            <button class="flow-node node-market" type="button" data-node="market" data-tone="accent" aria-pressed="false"><span class="node-index">01 / INPUT</span><span class="node-title">Market feed</span><strong class="node-status" id="market-node-status">BINANCE LIVE</strong><span class="node-value" id="market-node-value">N/A</span><span class="node-meta" id="market-node-meta">Menunggu ticker</span></button>
+            <button class="flow-node node-fibonacci" type="button" data-node="fibonacci" aria-pressed="false"><span class="node-index">02A / SIGNAL</span><span class="node-title">Fibonacci</span><strong class="node-status" id="fib-node-status">MENUNGGU</strong><span class="node-value" id="fib-node-value">Score N/A</span><span class="node-meta" id="fib-node-meta">Belum ada analisis</span></button>
+            <button class="flow-node node-gemini" type="button" data-node="gemini" aria-pressed="false"><span class="node-index">02B / MONITOR</span><span class="node-title">Gemini</span><strong class="node-status" id="gemini-node-status">MENUNGGU</strong><span class="node-value" id="gemini-node-value">Confidence N/A</span><span class="node-meta" id="gemini-node-meta">Belum ada keputusan</span></button>
+            <button class="flow-node node-supervisor" type="button" data-node="supervisor" aria-pressed="true"><span class="node-index">03 / DECISION</span><span class="node-title">Adaptive supervisor</span><strong class="node-status" id="supervisor-node-status">MENUNGGU</strong><span class="node-value" id="supervisor-node-value">Exposure N/A</span><span class="node-meta" id="supervisor-node-meta">Profil belum tersedia</span></button>
+            <button class="flow-node node-buy" type="button" data-node="buy" aria-pressed="false"><span class="node-index">04 / EXECUTE</span><span class="node-title">BUY grid</span><strong class="node-status" id="buy-node-status">0 ORDER</strong><span class="node-value" id="buy-node-value">0 USDT</span><span class="node-meta" id="buy-node-meta">Bobot N/A</span></button>
+            <button class="flow-node node-position" type="button" data-node="position" aria-pressed="false"><span class="node-index">05 / HOLD</span><span class="node-title">LONG position</span><strong class="node-status" id="position-node-status">TIDAK ADA POSISI</strong><span class="node-value" id="position-node-value">0</span><span class="node-meta" id="position-node-meta">PnL berjalan 0 USDT</span></button>
+            <button class="flow-node node-sell" type="button" data-node="sell" aria-pressed="false"><span class="node-index">06 / EXIT</span><span class="node-title">SELL ladder</span><strong class="node-status" id="sell-node-status">0 ORDER</strong><span class="node-value" id="sell-node-value">Coverage N/A</span><span class="node-meta" id="sell-node-meta">Belum ada exit aktif</span></button>
+          </div>
+        </div>
+      </section>
 
-  <section class="row g-3 mb-3">
-    <div class="col-12 col-sm-6 col-xl-3"><article class="dashboard-card metric p-3 p-lg-4 h-100"><div class="label">Harga Pasar Binance</div><div class="metric-value mt-3" x-text="market.priceText+' '+quote"></div><div class="small text-secondary mt-1"><span :class="market.changePercent >= 0 ? 'text-profit' : 'text-loss'" x-text="signed(market.changePercent)+'%'"></span> dalam 24 jam</div></article></div>
-    <div class="col-12 col-sm-6 col-xl-3"><article class="dashboard-card metric p-3 p-lg-4 h-100"><div class="label" x-text="futures ? 'PnL terealisasi' : 'Profit Terealisasi'"></div><div class="metric-value mt-3" :class="profit.realized === null ? '' : profit.realized >= 0 ? 'text-profit' : 'text-loss'" x-text="money(profit.realized,4)+' '+quote"></div><div class="small text-secondary mt-1" x-text="futures ? 'Setelah fee' : 'Hasil grid simbol aktif'"></div></article></div>
-    <div class="col-12 col-sm-6 col-xl-3"><article class="dashboard-card metric p-3 p-lg-4 h-100"><div class="label">Order Aktif</div><div class="metric-value mt-3" x-text="orders.active.length"></div><div class="small text-secondary mt-1" x-text="`Buy ${orders.buyCount} · Sell ${orders.sellCount}`"></div></article></div>
-    <div class="col-12 col-sm-6 col-xl-3"><article class="dashboard-card metric p-3 p-lg-4 h-100"><div class="label">Volume 24 Jam</div><div class="metric-value mt-3" x-text="compact(market.volume)"></div><div class="small text-secondary mt-1" x-text="`High ${market.highText} · Low ${market.lowText}`"></div></article></div>
-  </section>
+      <div class="detail-layout">
+        <section class="panel inspector" aria-labelledby="inspector-title"><div class="panel-head"><div><p class="eyebrow">Node inspector</p><h2 class="panel-title" id="inspector-title">Adaptive supervisor</h2></div><span class="status-code" id="inspector-status">MENUNGGU</span></div><div class="inspector-body"><div><p class="inspector-summary" id="inspector-summary">Pilih salah satu node untuk membaca data dan alasan keputusan.</p><div class="tag-list" id="inspector-tags" aria-label="Faktor keputusan"></div></div><dl class="detail-list" id="inspector-details"></dl></div></section>
+        <section class="panel ledger" aria-labelledby="ledger-title"><div class="panel-head"><div><p class="eyebrow">Account ledger</p><h2 class="panel-title" id="ledger-title">Komposisi PnL</h2></div></div><div class="ledger-body"><div class="ledger-row"><span>Realisasi setelah fee</span><strong id="realized-pnl">N/A</strong></div><div class="ledger-row"><span>Funding</span><strong id="funding-pnl">N/A</strong></div><div class="ledger-row"><span>PnL berjalan</span><strong id="unrealized-pnl">N/A</strong></div><div class="ledger-row"><span>Fee tercatat</span><strong id="fees-value">N/A</strong></div><div class="ledger-row"><span>Profit pasangan grid</span><strong id="grid-profit">N/A</strong></div><div class="ledger-row total"><span>Net PnL</span><strong id="ledger-net">N/A</strong></div><p class="formula">Net = realisasi + funding + PnL berjalan. Fee sudah termasuk di realisasi.</p></div></section>
+      </div>
 
-  <section class="row g-3 mb-3 futures-metrics" x-show="futures" x-transition>
-    <div class="col-12 col-md-6 col-xl-3"><article class="dashboard-card metric p-3"><div class="label">Margin Posisi</div><div class="metric-value mt-3" x-text="money(futures?.positionMargin,2)+' USDT'"></div><div class="small text-secondary mt-1" x-text="`Tersedia ${money(futures?.availableBalance,2)} · Open order ${money(futures?.openOrderMargin,2)}`"></div></article></div>
-    <div class="col-12 col-md-6 col-xl-3"><article class="dashboard-card metric p-3"><div class="label">Posisi LONG</div><div class="metric-value mt-3" x-text="futures?.position ? compact(futures.position.contracts) : '0'"></div><div class="small text-secondary mt-1" x-text="`${futures?.leverage || 0}x · ${futures?.marginMode || '—'}`"></div></article></div>
-    <div class="col-12 col-md-6 col-xl-3"><article class="dashboard-card metric p-3"><div class="label">PnL berjalan</div><div class="metric-value mt-3" :class="profit.unrealizedPnl >= 0 ? 'text-profit' : 'text-loss'" x-text="money(profit.unrealizedPnl,4)+' USDT'"></div><div class="small text-secondary mt-1">Posisi terbuka</div></article></div>
-    <div class="col-12 col-md-6 col-xl-3"><article class="dashboard-card metric p-3"><div class="label">Funding</div><div class="metric-value mt-3" x-text="money(profit.accounting?.ready ? profit.funding : null,4)+' USDT'"></div><div class="small text-secondary mt-1">Sudah masuk PnL</div></article></div>
-  </section>
+      <div class="telemetry-layout">
+        <section class="panel chart-panel" aria-labelledby="chart-title"><div class="panel-head"><div><p class="eyebrow">Market trace</p><h2 class="panel-title" id="chart-title">Harga dan batas grid</h2><p class="panel-copy" id="range-copy">Range belum tersedia.</p></div><span class="status-code" id="timeframe-label">N/A</span></div><div class="chart-wrap"><canvas id="price-chart" role="img" aria-label="Grafik harga Binance dan batas grid"></canvas></div></section>
+        <section class="panel risk-panel" aria-labelledby="risk-title"><div class="panel-head"><div><p class="eyebrow">Capital state</p><h2 class="panel-title" id="risk-title">Exposure pair</h2></div></div><div class="risk-body"><div class="risk-number" id="risk-exposure">N/A</div><div class="risk-caption" id="risk-caption">Menunggu alokasi investasi.</div><div class="meter" role="meter" id="exposure-meter" aria-label="Exposure investasi" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="meter-fill" id="exposure-fill"></div><div class="meter-limit" id="exposure-limit" title="Batas risk-off"></div></div><dl class="detail-list risk-facts" id="risk-facts"></dl></div></section>
+      </div>
 
-  <section class="row g-3 mb-3 futures-metrics" x-show="futures" aria-label="Harga posisi aktif">
-    <div class="col-12 col-md-6"><article class="dashboard-card metric p-3"><div class="label">Entry LONG</div><div class="metric-value mt-3" x-text="positionPrice(futures?.position?.entryPrice)"></div><div class="small text-secondary mt-2" x-text="futures?.exits?.nearestPrice ? 'SELL terdekat: '+positionPrice(futures.exits.nearestPrice)+' ('+futures.exits.nearestLabel.toLowerCase()+')' : 'SELL terdekat: belum ada'"></div></article></div>
-    <div class="col-12 col-md-6"><article class="dashboard-card metric p-3"><div class="label">Mark price</div><div class="metric-value mt-3" x-text="positionPrice(futures?.position?.markPrice)"></div></article></div>
-  </section>
+      <section class="panel orders-panel" aria-labelledby="orders-title">
+        <div class="panel-head"><div><p class="eyebrow">Exchange state</p><h2 class="panel-title" id="orders-title">Order Binance yang dikelola bot</h2><p class="panel-copy">Urutan level, harga, jumlah, dan hubungan order dengan entry LONG.</p></div><div class="order-summary" aria-label="Ringkasan order"><span class="count-label" id="buy-count">BUY 0</span><span class="count-label" id="sell-count">SELL 0</span></div></div>
+        <div class="table-wrap"><table><thead><tr><th>Sisi</th><th>Level</th><th>Harga</th><th>Jumlah</th><th>Tersisa</th><th>Keterangan</th><th>Order ID</th></tr></thead><tbody id="orders-body"><tr class="empty-row"><td colspan="7">Mengambil order aktif dari Binance.</td></tr></tbody></table></div>
+        <div class="order-cards" id="order-cards" aria-label="Order aktif versi mobile"></div>
+      </section>
+    </main>
 
-  <section class="row g-3 mb-3">
-    <div class="col-12 col-xl-8"><article class="dashboard-card p-3 p-lg-4 h-100"><div class="d-flex justify-content-between align-items-start mb-3"><div><div class="fw-bold small">Chart Binance Live</div><div class="mono text-secondary mt-1" style="font-size:10px" x-text="range.lower ? `Grid ${range.lowerText} — ${range.upperText} ${quote}` : 'Grid range belum tersedia'"></div></div><span class="tf-badge badge p-2" x-text="market.timeframe || '—'"></span></div><div class="chart-wrap"><canvas x-ref="chart"></canvas></div></article></div>
-    <div class="col-12 col-xl-4"><aside class="dashboard-card p-3 p-lg-4 h-100"><div class="d-flex justify-content-between"><div><div class="fw-bold small">Hasil Performa</div><div class="text-secondary small" x-text="futures ? 'PnL futures dan eksekusi grid' : 'Profit dan eksekusi grid'"></div></div><span class="mono text-secondary" style="font-size:9px" x-text="updatedAt"></span></div><div class="profit-hero p-4 my-3"><div class="label" x-text="futures ? 'Net PnL Futures' : 'Total Profit Seluruh Pair'"></div><div class="profit-value mt-2" x-text="money(futures ? profit.net : profit.totalRealized,4)+' '+quote"></div></div><div class="d-flex justify-content-between mono" style="font-size:11px"><span>Rasio fill buy/sell</span><span x-text="money(fillRatio,0)+'%'"></span></div><div class="progress mt-2"><div class="progress-bar" :style="`width:${fillRatio}%`"></div></div><div class="row g-2 mt-3 performance-stats"><template x-for="item in performanceStats" :key="item.label"><div class="col-12 col-md-6"><div class="mini-stat p-3 h-100"><span class="label" x-text="item.label"></span><b class="d-block mt-1" x-text="item.value"></b></div></div></template></div></aside></div>
-  </section>
-
-  <section class="dashboard-card p-3 p-lg-4"><div class="d-flex justify-content-between mb-3"><div><div class="fw-bold small">Order Binance Aktif</div><div class="text-secondary small">Order exchange yang dikelola bot</div></div><span class="mono text-secondary small" x-text="mode.toUpperCase()"></span></div><div class="order-scroll table-responsive"><table class="table align-middle"><thead class="sticky-top"><tr><th>Sisi</th><th>Level</th><th>Harga</th><th>Jumlah</th><th class="d-none d-md-table-cell">Tersisa</th><th class="d-none d-lg-table-cell">Order ID</th></tr></thead><tbody><template x-for="order in orders.active" :key="order.id"><tr><td><span class="badge" :class="order.side === 'buy' ? 'badge-buy' : 'badge-sell'" x-text="order.side.toUpperCase()"></span></td><td x-text="`L${order.level ?? '—'}`"></td><td><span x-text="order.priceText"></span><div class="small" style="white-space:normal;max-width:200px" x-show="futures" x-text="order.entryComparison || ''"></div></td><td x-text="order.amountText"></td><td class="d-none d-md-table-cell" x-text="order.remainingText"></td><td class="d-none d-lg-table-cell" x-text="order.id"></td></tr></template><tr x-show="!loading && !orders.active.length"><td colspan="6" class="text-center text-secondary py-5">Belum ada order grid aktif</td></tr><tr x-show="loading && !orders.active.length"><td colspan="6" class="text-center text-secondary py-5">Memuat data exchange...</td></tr></tbody></table></div></section>
-</main>
-<script>
-  document.addEventListener('alpine:init',()=>Alpine.data('dashboard',()=>({
-    source:'Binance Spot',symbols:[],selectedSymbol:'',market:{price:0,priceText:'0',priceDigits:0,changePercent:0,high:0,highText:'0',low:0,lowText:'0',volume:0,candles:[]},range:{lower:0,lowerText:'0',upper:0,upperText:'0'},orders:{active:[],buyCount:0,sellCount:0,buyValue:0,sellValue:0},profit:{realized:0,totalRealized:0,filledBuys:0,filledSells:0,funding:0,fees:0,openPositionFees:0,unrealizedPnl:0,net:0},balance:null,futures:null,quote:'USDT',mode:'',tradingEnabled:false,dashboardAuthEnabled:false,loading:true,error:'',updatedAt:'—',timer:null,
-    get statusText(){return this.error?'Offline':this.tradingEnabled?'Live · Trading aktif':'Live · Order dijeda'},
-    get balanceCards(){
-      if(this.futures)return[
-        {label:'Saldo Wallet',value:this.futures.walletBalance,asset:'USDT',digits:4},
-        {label:'Tersedia',value:this.futures.availableBalance,asset:'USDT',digits:4},
-        {label:'Margin Terpakai',value:this.futures.usedMargin,asset:'USDT',digits:4}
-      ];
-      return(this.balance?.assets||[]).flatMap(item=>[
-        {label:`Saldo Total ${item.asset}`,value:item.total,asset:item.asset,digits:8},
-        {label:`Tersedia ${item.asset}`,value:item.free,asset:item.asset,digits:8},
-        {label:`Terkunci ${item.asset}`,value:item.used,asset:item.asset,digits:8}
-      ])
-    },
-    get fillRatio(){return this.profit.filledBuys?Math.min(100,this.profit.filledSells/this.profit.filledBuys*100):0},
-    get performanceStats(){return[{label:'Filled Buy',value:this.profit.filledBuys},{label:'Filled Sell',value:this.profit.filledSells},{label:'Nilai Buy Aktif',value:this.compact(this.orders.buyValue)+' '+this.quote},{label:'Nilai Sell Aktif',value:this.compact(this.orders.sellValue)+' '+this.quote}]},
-    positionPrice(value){return value != null && Number.isFinite(Number(value)) && Number(value)>0 ? this.marketPrice(value)+' '+this.quote : '—'},
-    money(n,d=2){if(n===null)return 'N/A';return new Intl.NumberFormat('id-ID',{maximumFractionDigits:d,minimumFractionDigits:d>2?2:0}).format(Number(n)||0)},marketPrice(n){const d=this.market.priceDigits||0;return new Intl.NumberFormat('id-ID',{minimumFractionDigits:d,maximumFractionDigits:d}).format(Number(n)||0)},compact(n){return new Intl.NumberFormat('id-ID',{notation:'compact',maximumFractionDigits:2}).format(Number(n)||0)},signed(n){return`${Number(n)>=0?'+':''}${this.money(n,2)}`},
-    async init(){await this.load(true);addEventListener('resize',()=>this.drawChart())},
-    async load(first=false){this.loading=true;try{const query=this.selectedSymbol?`?symbol=${encodeURIComponent(this.selectedSymbol)}`:'';const response=await fetch('/api/dashboard'+query);if(response.status===401){location.assign('/login');return}if(!response.ok)throw new Error('Data dashboard tidak tersedia');const d=await response.json();this.source=d.source;this.symbols=d.symbols;this.selectedSymbol=d.selectedSymbol;this.market=d.market;this.range=d.range;this.orders=d.orders;this.profit=d.profit;this.futures=d.futures||null;this.balance=d.balance||null;this.quote=d.profit.quoteAsset;this.mode=d.mode;this.tradingEnabled=d.tradingEnabled;this.dashboardAuthEnabled=Boolean(d.dashboardAuthEnabled);this.updatedAt=new Date(d.generatedAt).toLocaleTimeString('id-ID');this.error='';this.$nextTick(()=>this.drawChart());clearTimeout(this.timer);this.timer=setTimeout(()=>this.load(),(d.refreshSeconds||5)*1000)}catch(e){this.error=e.message;clearTimeout(this.timer);this.timer=setTimeout(()=>this.load(),5000)}finally{this.loading=false}},
-    drawChart(){const canvas=this.$refs.chart;if(!canvas||!this.market.candles.length)return;const candles=this.market.candles,box=canvas.getBoundingClientRect(),ratio=devicePixelRatio||1;canvas.width=box.width*ratio;canvas.height=box.height*ratio;const x=canvas.getContext('2d');x.scale(ratio,ratio);const w=box.width,h=box.height,p={l:10,r:78,t:12,b:25},values=candles.flatMap(c=>[c.high,c.low]).concat([this.range.lower,this.range.upper].filter(Boolean)),min=Math.min(...values),max=Math.max(...values),span=max-min||1,px=i=>p.l+i*(w-p.l-p.r)/Math.max(candles.length-1,1),py=v=>p.t+(max-v)*(h-p.t-p.b)/span;x.clearRect(0,0,w,h);x.strokeStyle='#dcd9d0';x.lineWidth=1;x.font='9px DM Mono';x.fillStyle='#718079';for(let i=0;i<5;i++){const y=p.t+i*(h-p.t-p.b)/4,val=max-i*span/4;x.beginPath();x.moveTo(p.l,y);x.lineTo(w-p.r,y);x.stroke();x.fillText(this.marketPrice(val),w-p.r+7,y+3)}[this.range.lower,this.range.upper].forEach((v,i)=>{if(!v)return;const y=py(v);x.setLineDash([5,5]);x.strokeStyle=i?'#dc5b4577':'#0a8f6277';x.beginPath();x.moveTo(p.l,y);x.lineTo(w-p.r,y);x.stroke();x.setLineDash([])});const grad=x.createLinearGradient(0,p.t,0,h-p.b);grad.addColorStop(0,'#0a8f6235');grad.addColorStop(1,'#0a8f6200');x.beginPath();candles.forEach((c,i)=>i?x.lineTo(px(i),py(c.close)):x.moveTo(px(i),py(c.close)));x.lineTo(px(candles.length-1),h-p.b);x.lineTo(px(0),h-p.b);x.closePath();x.fillStyle=grad;x.fill();x.beginPath();candles.forEach((c,i)=>i?x.lineTo(px(i),py(c.close)):x.moveTo(px(i),py(c.close)));x.strokeStyle='#087f5b';x.lineWidth=2;x.stroke()}
-  })));
-</script>
-</body></html>
+    <footer class="app-footer"><span id="updated-at">Belum diperbarui</span><span id="runtime-label">Mode dan sumber data belum tersedia</span></footer>
+  </div>
+</body>
+</html>

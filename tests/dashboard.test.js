@@ -11,6 +11,7 @@ const {
 } = require('../src/dashboard-server');
 const {
   buildFuturesDashboardSnapshot,
+  decisionSnapshot,
   isLoopbackHost,
   positionMetrics,
   validateDashboardExposure,
@@ -131,6 +132,8 @@ test('futures dashboard reports fill counts for the selected symbol', async () =
   assert.equal(snapshot.profit.filledBuys, 2);
   assert.equal(snapshot.profit.filledSells, 0);
   assert.equal(snapshot.profit.net, null);
+  assert.equal(snapshot.intelligence.execution.positionContracts, 0);
+  assert.equal(snapshot.intelligence.execution.uncovered, 0);
   states['1000PEPE/USDT:USDT'].realizedGridProfit = 999;
   states['1000PEPE/USDT:USDT'].accountIncome = {
     since: Date.now() - 10000, syncedAt: Date.now(), records: {
@@ -144,6 +147,57 @@ test('futures dashboard reports fill counts for the selected symbol', async () =
   assert.equal(accounted.profit.realized, -3.1);
   assert.equal(accounted.profit.net, -6.1);
   assert.equal(accounted.profit.gridPairProfit, 999);
+});
+
+test('futures decision snapshot exposes AI flow and SELL coverage without mutating execution', () => {
+  const previous = {
+    cap: process.env.GRID_TOTAL_INVESTMENT_USDT,
+    count: process.env.GRID_COUNT,
+    risk: process.env.ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT,
+    mode: process.env.ADAPTIVE_GRID_SUPERVISOR_MODE,
+    apply: process.env.FIBONACCI_DIRECTION_APPLY_MODE,
+  };
+  process.env.GRID_TOTAL_INVESTMENT_USDT = '150';
+  process.env.GRID_COUNT = '27';
+  process.env.ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT = '90';
+  process.env.ADAPTIVE_GRID_SUPERVISOR_MODE = 'LIVE';
+  process.env.FIBONACCI_DIRECTION_APPLY_MODE = 'LEVEL_BIAS';
+  try {
+    const symbol = 'TEST/USDT:USDT';
+    const engine = {
+      fibonacciDirectionAnalyzer: { cache: { [symbol]: { analysis: {
+        direction: 'BEARISH', confirmedDirection: 'BEARISH', score: -0.7,
+        confidence: 0.9, alignment: 1, confirmationCount: 3, confirmationsRequired: 2,
+        timeframes: { '4h': { direction: 'BEARISH', score: -1 } },
+      } } } },
+      geminiAdaptiveMonitor: {
+        isEnabled: () => true,
+        getDecision: () => ({ accepted: true, profile: 'BEARISH', confidence: 0.8, riskFactors: ['volatility'] }),
+      },
+      adaptiveGridDecisions: new Map([[symbol, {
+        mode: 'LIVE', profile: 'RISK_OFF', rawProfile: 'RISK_OFF', decisionSource: 'DETERMINISTIC_SAFETY',
+        exposurePct: 92, recommendation: { buyWeight: { upper: 0.25, middle: 0.5, lower: 1.25 }, spacingMultiplier: 1.4 },
+      }]]),
+      getAllocatedInvestmentUsdt: () => 138,
+    };
+    const result = decisionSnapshot(engine, symbol, { lastBuyByLevel: {}, lastTradeTimestamp: 10 }, [
+      { side: 'buy', price: 1, remaining: 2 },
+      { side: 'sell', price: 2, remaining: 8 },
+    ], { contracts: 10 });
+    assert.equal(result.fibonacci.appliedDirection, 'BEARISH');
+    assert.equal(result.gemini.profile, 'BEARISH');
+    assert.equal(result.adaptive.profile, 'RISK_OFF');
+    assert.equal(result.adaptive.exposurePct, 92);
+    assert.equal(result.execution.gridCount, 27);
+    assert.equal(result.execution.uncovered, 2);
+    assert.equal(result.execution.sellCoveragePct, 80);
+  } finally {
+    if (previous.cap === undefined) delete process.env.GRID_TOTAL_INVESTMENT_USDT; else process.env.GRID_TOTAL_INVESTMENT_USDT = previous.cap;
+    if (previous.count === undefined) delete process.env.GRID_COUNT; else process.env.GRID_COUNT = previous.count;
+    if (previous.risk === undefined) delete process.env.ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT; else process.env.ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT = previous.risk;
+    if (previous.mode === undefined) delete process.env.ADAPTIVE_GRID_SUPERVISOR_MODE; else process.env.ADAPTIVE_GRID_SUPERVISOR_MODE = previous.mode;
+    if (previous.apply === undefined) delete process.env.FIBONACCI_DIRECTION_APPLY_MODE; else process.env.FIBONACCI_DIRECTION_APPLY_MODE = previous.apply;
+  }
 });
 
 test('dashboard market price follows Binance symbol precision', () => {

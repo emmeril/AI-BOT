@@ -14,6 +14,10 @@ const {
 } = require('./dashboard-server');
 
 const dashboardFile = path.join(__dirname, '..', 'public', 'dashboard.html');
+const dashboardAssets = new Map([
+  ['/dashboard.css', { file: path.join(__dirname, '..', 'public', 'dashboard.css'), type: 'text/css; charset=utf-8' }],
+  ['/dashboard.js', { file: path.join(__dirname, '..', 'public', 'dashboard.js'), type: 'text/javascript; charset=utf-8' }],
+]);
 const TRUE_VALUES = new Set(['true', '1', 'yes', 'on']);
 const FALSE_VALUES = new Set(['false', '0', 'no', 'off']);
 function envBoolean(key, fallback) {
@@ -87,6 +91,104 @@ function positionMetrics(position, leverage, openPositionFees = 0) {
   };
 }
 
+function decisionSnapshot(engine, symbol, symState, orders, position) {
+  const fibonacci = engine.fibonacciDirectionAnalyzer?.cache?.[symbol]?.analysis || null;
+  const gemini = engine.geminiAdaptiveMonitor?.getDecision?.(symbol) || null;
+  const adaptive = engine.adaptiveGridDecisions?.get?.(symbol) || null;
+  const investmentCap = numberOrZero(process.env.GRID_TOTAL_INVESTMENT_USDT);
+  let allocatedInvestment = 0;
+  if (typeof engine.getAllocatedInvestmentUsdt === 'function') {
+    try {
+      allocatedInvestment = numberOrZero(engine.getAllocatedInvestmentUsdt(symbol));
+    } catch {
+      allocatedInvestment = 0;
+    }
+  }
+  if (!(allocatedInvestment > 0)) {
+    allocatedInvestment = Object.values(symState.lastBuyByLevel || {})
+      .reduce((sum, buy) => sum + numberOrZero(buy?.totalCostQuote), 0);
+    allocatedInvestment += orders
+      .filter(order => order.side === 'buy')
+      .reduce((sum, order) => sum + numberOrZero(order.price) * numberOrZero(order.remaining), 0);
+  }
+  const exposurePct = investmentCap > 0
+    ? (allocatedInvestment / investmentCap) * 100
+    : numberOrZero(adaptive?.exposurePct);
+  const minConfidence = numberOrZero(process.env.FIBONACCI_DIRECTION_MIN_CONFIDENCE || 0.65);
+  const applyMode = String(process.env.FIBONACCI_DIRECTION_APPLY_MODE || 'REPORT_ONLY').toUpperCase();
+  const appliedDirection = applyMode === 'LEVEL_BIAS' &&
+    ['BULLISH', 'BEARISH'].includes(fibonacci?.confirmedDirection) &&
+    numberOrZero(fibonacci?.confidence) >= minConfidence
+    ? fibonacci.confirmedDirection
+    : 'RANGING';
+  const contracts = numberOrZero(position?.contracts);
+  const reservedSell = orders
+    .filter(order => order.side === 'sell')
+    .reduce((sum, order) => sum + numberOrZero(order.remaining), 0);
+  const uncovered = Math.max(0, contracts - reservedSell);
+
+  return {
+    fibonacci: {
+      available: Boolean(fibonacci),
+      direction: fibonacci?.direction || 'UNKNOWN',
+      confirmedDirection: fibonacci?.confirmedDirection || 'RANGING',
+      appliedDirection,
+      score: fibonacci?.score ?? null,
+      confidence: fibonacci?.confidence ?? null,
+      alignment: fibonacci?.alignment ?? null,
+      confirmationCount: numberOrZero(fibonacci?.confirmationCount),
+      confirmationsRequired: numberOrZero(fibonacci?.confirmationsRequired),
+      generatedAt: fibonacci?.generatedAt || null,
+      timeframes: Object.fromEntries(Object.entries(fibonacci?.timeframes || {}).map(([key, value]) => [key, {
+        direction: value?.direction || 'UNKNOWN',
+        score: value?.score ?? null,
+        atrPct: value?.atrPct ?? null,
+        volatilityRatio: value?.volatilityRatio ?? null,
+      }])),
+    },
+    gemini: {
+      enabled: Boolean(engine.geminiAdaptiveMonitor?.isEnabled?.()),
+      available: Boolean(gemini),
+      accepted: Boolean(gemini?.accepted),
+      profile: gemini?.profile || null,
+      confidence: gemini?.confidence ?? null,
+      model: gemini?.model || null,
+      reasoning: gemini?.reasoning || '',
+      riskFactors: Array.isArray(gemini?.riskFactors) ? gemini.riskFactors : [],
+      generatedAt: gemini?.generatedAt || null,
+      error: gemini?.error || null,
+    },
+    adaptive: {
+      available: Boolean(adaptive),
+      mode: adaptive?.mode || String(process.env.ADAPTIVE_GRID_SUPERVISOR_MODE || 'OFF').toUpperCase(),
+      profile: adaptive?.profile || 'SIDEWAYS',
+      rawProfile: adaptive?.rawProfile || null,
+      source: adaptive?.decisionSource || 'PENDING',
+      changed: Boolean(adaptive?.changed),
+      candidateCount: numberOrZero(adaptive?.candidateCount),
+      confirmationsRequired: numberOrZero(adaptive?.confirmationsRequired || process.env.ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS),
+      cooldownElapsed: adaptive?.cooldownElapsed ?? null,
+      exposurePct,
+      allocatedInvestment,
+      investmentCap,
+      riskExposurePct: numberOrZero(process.env.ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT || 90),
+      recommendation: adaptive?.recommendation || null,
+      reasons: Array.isArray(adaptive?.reasons) ? adaptive.reasons : [],
+      generatedAt: adaptive?.generatedAt || null,
+    },
+    execution: {
+      gridCount: numberOrZero(process.env.GRID_COUNT),
+      buyCount: orders.filter(order => order.side === 'buy').length,
+      sellCount: orders.filter(order => order.side === 'sell').length,
+      positionContracts: contracts,
+      reservedSell,
+      uncovered,
+      sellCoveragePct: contracts > 0 ? Math.min(100, (reservedSell / contracts) * 100) : null,
+      lastTradeTimestamp: numberOrZero(symState.lastTradeTimestamp),
+    },
+  };
+}
+
 async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
   const symbols = engine.constructor.SYMBOLS || String(process.env.SYMBOLS || '').split(',').filter(Boolean);
   const symbol = symbols.includes(requestedSymbol) ? requestedSymbol : symbols[0];
@@ -124,6 +226,7 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
   const openOrderMargin = numberOrZero(walletInfo.totalOpenOrderInitialMargin);
   const usedMargin = numberOrZero(walletInfo.totalInitialMargin ?? balance?.used?.USDT);
   const net = account.net;
+  const intelligence = decisionSnapshot(engine, symbol, symState, orders, position);
   return {
     generatedAt: new Date().toISOString(), refreshSeconds, dashboardAuthEnabled: authEnabled,
     source: 'Binance USDⓈ-M Futures',
@@ -139,6 +242,7 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
     },
     range: { lower: numberOrZero(symState.config?.lower), lowerText: marketPriceText(engine, symbol, symState.config?.lower), upper: numberOrZero(symState.config?.upper), upperText: marketPriceText(engine, symbol, symState.config?.upper) },
     advisor: symState.config?.rangeAdvisor || null,
+    intelligence,
     orders: {
       active: orders, buyCount: orders.filter(order => order.side === 'buy').length, sellCount: orders.filter(order => order.side === 'sell').length,
       buyValue: orders.filter(order => order.side === 'buy').reduce((sum, order) => sum + order.price * order.remaining, 0),
@@ -192,6 +296,12 @@ function startFuturesDashboardServer(engine) {
         sendJson(response, 200, await buildFuturesDashboardSnapshot(engine, url.searchParams.get('symbol')));
         return;
       }
+      if (request.method === 'GET' && dashboardAssets.has(url.pathname)) {
+        const asset = dashboardAssets.get(url.pathname);
+        response.writeHead(200, { 'Content-Type': asset.type, 'Cache-Control': 'no-cache' });
+        fs.createReadStream(asset.file).pipe(response);
+        return;
+      }
       if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/dashboard')) {
         response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
         fs.createReadStream(dashboardFile).pipe(response);
@@ -213,6 +323,7 @@ function startFuturesDashboardServer(engine) {
 
 module.exports = {
   buildFuturesDashboardSnapshot,
+  decisionSnapshot,
   isLoopbackHost,
   positionMetrics,
   startFuturesDashboardServer,

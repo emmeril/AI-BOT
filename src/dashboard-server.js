@@ -19,6 +19,10 @@ const { createDashboardAuth } = require('./dashboard-auth');
 const { retry, numberOrZero } = require('./utils');
 
 const dashboardFile = path.join(__dirname, '..', 'public', 'dashboard.html');
+const dashboardAssets = new Map([
+  ['/dashboard.css', { file: path.join(__dirname, '..', 'public', 'dashboard.css'), type: 'text/css; charset=utf-8' }],
+  ['/dashboard.js', { file: path.join(__dirname, '..', 'public', 'dashboard.js'), type: 'text/javascript; charset=utf-8' }],
+]);
 
 function isLoopbackHost(value) {
   const normalized = String(value || '').trim().toLowerCase().replace(/^\[(.*)\]$/, '$1');
@@ -189,6 +193,12 @@ function startDashboardServer(engine) {
       if (!auth.requireAuthentication(request, response, url)) return;
       if (request.method === 'GET' && url.pathname === '/api/dashboard') {
         sendJson(response, 200, await buildDashboardSnapshot(engine, url.searchParams.get('symbol')));
+        return;
+      }
+      if (request.method === 'GET' && dashboardAssets.has(url.pathname)) {
+        const asset = dashboardAssets.get(url.pathname);
+        response.writeHead(200, { 'Content-Type': asset.type, 'Cache-Control': 'no-cache' });
+        fs.createReadStream(asset.file).pipe(response);
         return;
       }
       if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/dashboard')) {
