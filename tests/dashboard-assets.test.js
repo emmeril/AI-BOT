@@ -15,8 +15,14 @@ test('dashboard pipeline keeps seven responsive animated connections', () => {
   assert.match(script, /ResizeObserver\(queueFlowLayout\)/);
   assert.match(script, /const FLOW_STAGES = \[\['market'\]/);
   assert.match(script, /animation\.id = 'flow-node-bounce'/);
+  assert.match(script, /node\.dataset\.flowState === 'safety'/);
+  assert.doesNotMatch(script, /translateY\(-5px\) scale\(1\.01\)/);
   assert.doesNotMatch(css, /@media\(max-width:1180px\)[^}]*\.flow-lines\{display:none\}/);
-  assert.match(css, /\.flow-map\[data-running=true\] \.flow-signal path\{animation-play-state:running\}/);
+  assert.match(css, /\.flow-signal path\[data-state=safety\]\{stroke:var\(--warning\)/);
+  assert.match(css, /\.flow-signal path\[data-state=error\]\{stroke:var\(--negative\)/);
+  assert.match(css, /\.flow-map\[data-running=true\] \.flow-signal path\[data-state=active\]/);
+  assert.match(script, /setFlowEdge\('supervisor', 'buy', safetyOverride/);
+  assert.match(script, /setFlowEdge\('position', 'sell', sellNeedsAttention/);
 });
 
 test('dashboard motion preference can override or follow reduced motion', () => {
@@ -29,6 +35,7 @@ test('dashboard motion preference can override or follow reduced motion', () => 
   assert.match(html, /value="on">Aktif/);
   assert.match(html, /value="system">Sistem/);
   assert.match(html, /value="off">Mati/);
+  assert.match(css, /\.motion-control option\{color:var\(--text\);background:var\(--surface\)\}/);
   assert.match(css, /html:not\(\[data-motion=on\]\) \.flow-signal\{display:none\}/);
   assert.match(css, /html\[data-motion=on\] \.refresh-icon\.fa-spin\{animation:refresh-turn/);
   assert.match(script, /localStorage\.setItem\(MOTION_STORAGE_KEY, preference\)/);

@@ -58,6 +58,13 @@
     text(`${nodeId(name)}-node-value`, value);
     text(`${nodeId(name)}-node-meta`, meta);
   }
+  function setFlowNodeState(name, flowState) {
+    const node = document.querySelector(`[data-node="${name}"]`);
+    if (node) node.dataset.flowState = flowState;
+  }
+  function setFlowEdge(from, to, flowState) {
+    document.querySelector(`.flow-signal [data-edge="${from}-${to}"]`)?.setAttribute('data-state', flowState);
+  }
   function flowNodeBox(name, mapBox) {
     const box = document.querySelector(`[data-node="${name}"]`)?.getBoundingClientRect();
     if (!box) return null;
@@ -112,10 +119,13 @@
     for (const name of stage) {
       const node = document.querySelector(`[data-node="${name}"]`);
       if (!node) continue;
+      if (!['active', 'safety'].includes(node.dataset.flowState)) continue;
+      const style = getComputedStyle(node);
+      const pulseColor = node.dataset.flowState === 'safety' ? '#ffbe66' : '#c6f36f';
       const animation = node.animate([
-        { transform: 'translateY(0) scale(1)' },
-        { transform: 'translateY(-5px) scale(1.01)', offset: .48 },
-        { transform: 'translateY(0) scale(1)' },
+        { borderColor: style.borderColor, boxShadow: style.boxShadow },
+        { borderColor: pulseColor, boxShadow: `0 0 0 4px ${node.dataset.flowState === 'safety' ? 'rgba(255,190,102,.24)' : 'rgba(198,243,111,.24)'}`, offset: .48 },
+        { borderColor: style.borderColor, boxShadow: style.boxShadow },
       ], { duration: 480, easing: 'cubic-bezier(.2,.8,.3,1)' });
       animation.id = 'flow-node-bounce';
     }
@@ -182,6 +192,17 @@
     const weights = adaptive.recommendation?.buyWeight;
     const weightText = weights ? `${weights.upper}/${weights.middle}/${weights.lower}` : 'N/A';
     const coverage = execution.sellCoveragePct;
+    const marketAvailable = Boolean(data.running && num(data.market?.price) > 0);
+    const fibonacciAvailable = Boolean(marketAvailable && fib.available);
+    const geminiError = Boolean(gemini.error);
+    const geminiAvailable = Boolean(marketAvailable && gemini.available && !geminiError);
+    const adaptiveAvailable = Boolean(data.running && adaptive.available);
+    const safetyOverride = Boolean(adaptiveAvailable && (String(adaptive.profile).toUpperCase() === 'RISK_OFF' || String(adaptive.source).toUpperCase().includes('SAFETY')));
+    const adaptiveBuyAvailable = Boolean(adaptiveAvailable && String(adaptive.mode).toUpperCase() === 'LIVE');
+    const buyAvailable = Boolean(data.running && (data.tradingEnabled || num(data.orders?.buyCount) > 0));
+    const positionAvailable = Boolean(data.running && position && num(position.contracts) > 0);
+    const sellNeedsAttention = Boolean(positionAvailable && num(execution.uncovered) > 0);
+    const sellAvailable = Boolean(positionAvailable && !sellNeedsAttention && coverage !== null && coverage !== undefined && num(coverage) >= 99.999);
     setNode('market', 'accent', String(data.mode || 'LIVE').toUpperCase(), `${data.market?.priceText || price(data.market?.price)} ${quote()}`, `${signed(data.market?.changePercent, 2)}% dalam 24 jam`);
     setNode('fibonacci', toneFor(fib.direction), fib.direction || 'MENUNGGU', `Score ${fib.score ?? 'N/A'}`, fib.available ? `Applied ${fib.appliedDirection} · conf ${percent(num(fib.confidence) * 100, 1)}` : 'Belum ada analisis');
     setNode('gemini', gemini.error ? 'negative' : toneFor(gemini.profile), gemini.profile || (gemini.enabled ? 'MENUNGGU' : 'OFF'), `Confidence ${gemini.confidence == null ? 'N/A' : percent(num(gemini.confidence) * 100, 0)}`, gemini.error || gemini.model || 'Belum ada keputusan');
@@ -189,6 +210,20 @@
     setNode('buy', 'positive', `${num(data.orders?.buyCount)} ORDER`, `${money(data.orders?.buyValue, 2)} ${quote()}`, `Bobot atas/tengah/bawah ${weightText}`);
     setNode('position', position ? (num(data.profit?.unrealizedPnl) >= 0 ? 'positive' : 'negative') : 'accent', position ? 'LONG AKTIF' : 'TIDAK ADA POSISI', position ? compact(position.contracts) : '0', `PnL berjalan ${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`);
     setNode('sell', coverage !== null && coverage !== undefined && coverage < 99.999 ? 'negative' : 'positive', `${num(data.orders?.sellCount)} ORDER`, coverage == null ? 'Coverage N/A' : `Coverage ${percent(coverage, 0)}`, execution.uncovered > 0 ? `${compact(execution.uncovered)} kontrak belum tertutup` : 'Tidak ada posisi tanpa exit');
+    setFlowNodeState('market', marketAvailable ? 'active' : 'waiting');
+    setFlowNodeState('fibonacci', fibonacciAvailable ? 'active' : 'waiting');
+    setFlowNodeState('gemini', geminiError ? 'error' : geminiAvailable ? 'active' : 'waiting');
+    setFlowNodeState('supervisor', safetyOverride ? 'safety' : adaptiveAvailable ? 'active' : 'waiting');
+    setFlowNodeState('buy', safetyOverride && adaptiveBuyAvailable ? 'safety' : buyAvailable ? 'active' : 'waiting');
+    setFlowNodeState('position', positionAvailable ? 'active' : 'waiting');
+    setFlowNodeState('sell', sellNeedsAttention ? 'error' : sellAvailable ? 'active' : 'waiting');
+    setFlowEdge('market', 'fibonacci', fibonacciAvailable ? 'active' : 'waiting');
+    setFlowEdge('market', 'gemini', geminiError ? 'error' : geminiAvailable ? 'active' : 'waiting');
+    setFlowEdge('fibonacci', 'supervisor', fibonacciAvailable && adaptiveAvailable ? 'active' : 'waiting');
+    setFlowEdge('gemini', 'supervisor', geminiError ? 'error' : geminiAvailable && adaptiveAvailable ? 'active' : 'waiting');
+    setFlowEdge('supervisor', 'buy', safetyOverride && adaptiveBuyAvailable ? 'safety' : adaptiveBuyAvailable ? 'active' : 'waiting');
+    setFlowEdge('buy', 'position', positionAvailable ? 'active' : 'waiting');
+    setFlowEdge('position', 'sell', sellNeedsAttention ? 'error' : sellAvailable ? 'active' : 'waiting');
     queueFlowLayout();
     syncFlowBounce();
   }

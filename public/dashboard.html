@@ -8,8 +8,8 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/fontawesome/css/fontawesome.min.css?v=7.3.1">
   <link rel="stylesheet" href="/fontawesome/css/solid.min.css?v=7.3.1">
-  <link rel="stylesheet" href="/dashboard.css?v=20261007.8">
-  <script defer src="/dashboard.js?v=20261007.8"></script>
+  <link rel="stylesheet" href="/dashboard.css?v=20261007.10">
+  <script defer src="/dashboard.js?v=20261007.10"></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Lewati ke dashboard</a>
@@ -39,7 +39,7 @@
       </section>
 
       <section class="panel flow-panel" aria-labelledby="flow-title">
-        <div class="panel-head"><div><p class="eyebrow">Decision pipeline</p><h2 class="panel-title" id="flow-title">Dari sinyal pasar ke exit SELL</h2><p class="panel-copy">Pilih node untuk melihat alasan, nilai input, dan keputusan yang sedang digunakan bot.</p></div><div class="legend" aria-label="Legenda koneksi"><span><i class="live"></i> Alur aktif</span><span><i class="safe"></i> Safety override</span><span><i></i> Data menunggu</span></div></div>
+        <div class="panel-head"><div><p class="eyebrow">Decision pipeline</p><h2 class="panel-title" id="flow-title">Dari sinyal pasar ke exit SELL</h2><p class="panel-copy">Pilih node untuk melihat alasan, nilai input, dan keputusan yang sedang digunakan bot.</p></div><div class="legend" aria-label="Legenda koneksi"><span><i class="live"></i> Alur aktif</span><span><i class="safe"></i> Safety override</span><span><i class="waiting"></i> Data menunggu</span><span><i class="error"></i> Perlu perhatian</span></div></div>
         <div class="flow-map" id="flow-map" data-running="false">
           <svg class="flow-lines" viewBox="0 0 1200 400" preserveAspectRatio="none" aria-hidden="true">
             <g class="flow-track"><path data-edge="market-fibonacci"></path><path data-edge="market-gemini"></path><path data-edge="fibonacci-supervisor"></path><path data-edge="gemini-supervisor"></path><path data-edge="supervisor-buy"></path><path data-edge="buy-position"></path><path data-edge="position-sell"></path></g>
