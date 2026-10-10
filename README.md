@@ -105,6 +105,13 @@ Referensi resmi Binance:
 
 Saat berjalan, bot akan validasi konfigurasi, membersihkan temp file state, mengambil process lock, lalu sinkronisasi order dan fill setiap `INTERVAL_MINUTES`.
 
+Futures dapat memakai Binance User Data WebSocket untuk menerima fill tanpa menunggu siklus REST berikutnya. Event eksekusi didebounce per simbol lalu masuk ke jalur rekonsiliasi yang sama dan tetap dilindungi symbol lock. Polling REST tetap berjalan sebagai sumber recovery jika WebSocket terputus atau ada event yang terlewat.
+
+- `FUTURES_USER_STREAM_ENABLED`: aktifkan stream order/fill futures. Default `true`.
+- `FUTURES_USER_STREAM_RECONCILE_DEBOUNCE_MS`: waktu singkat untuk menggabungkan beberapa event fill dari simbol yang sama. Default `750` ms.
+- `FUTURES_USER_STREAM_KEEPALIVE_MINUTES`: interval perpanjangan listen key Binance. Default `45` menit.
+- `FUTURES_USER_STREAM_RECONNECT_MAX_SECONDS`: batas maksimum exponential reconnect delay. Default `30` detik.
+
 ### Dashboard Live
 
 Dashboard berbasis Bootstrap dan Alpine.js aktif secara default. Alamat awalnya `http://127.0.0.1:3000` setelah bot selesai melakukan inisialisasi. Jika port tersebut sudah dipakai, server otomatis mencoba `3001`, `3002`, dan seterusnya sampai menemukan port kosong; alamat yang terpilih ditampilkan pada log `[DASHBOARD]`. Data chart, order, dan profit diambil langsung dari engine serta exchange, lalu diperbarui otomatis tanpa perlu refresh halaman.
@@ -324,6 +331,14 @@ GEMINI_MODEL=gemini-3.1-flash-lite
 ```
 
 Gemini menerima ringkasan arah Fibonacci, volatilitas, exposure, posisi, liquidation price, funding, fee, dan PnL grid. Request berjalan non-blocking: order loop tidak menunggu respons Gemini. Respons memakai structured JSON, divalidasi terhadap empat profil yang diizinkan, dan baru diterapkan pada siklus berikutnya. Timeout, respons invalid, atau confidence rendah otomatis memakai klasifikasi deterministik.
+
+Semua request Gemini Adaptive Monitor melewati satu antrean agar beberapa simbol tidak mengirim burst bersamaan. HTTP `429`, error server `5xx`, timeout, dan error jaringan sementara dicoba ulang dengan exponential backoff. Jika seluruh percobaan gagal, keputusan accepted terakhir masih boleh dipakai sampai melewati stale TTL; setelah itu supervisor kembali ke klasifikasi deterministik.
+
+- `GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS`: jarak minimum awal request dalam antrean. Default `5000` ms atau maksimal sekitar 12 request/menit.
+- `GEMINI_ADAPTIVE_MONITOR_REQUEST_JITTER_MS`: jitter tambahan agar request tidak selalu jatuh pada detik yang sama. Default `250` ms.
+- `GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS`: jumlah maksimum percobaan untuk error sementara. Default `3`.
+- `GEMINI_ADAPTIVE_MONITOR_RETRY_BASE_MS` dan `GEMINI_ADAPTIVE_MONITOR_RETRY_MAX_MS`: backoff awal dan batas maksimum backoff.
+- `GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MINUTES`: batas umur keputusan accepted terakhir saat provider gagal. Default `60` menit.
 
 Backtest shadow memakai cache candle yang sama dengan backtest arah:
 

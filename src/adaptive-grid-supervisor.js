@@ -242,6 +242,8 @@ class AdaptiveGridSupervisor {
         riskFactors: monitorDecision.riskFactors || [],
         model: monitorDecision.model || null,
         generatedAt: monitorDecision.generatedAt || null,
+        stale: Boolean(monitorDecision.stale),
+        staleAgeMs: Number(monitorDecision.staleAgeMs) || 0,
         error: monitorDecision.error || null,
       } : null,
       reasons: classified.reasons,

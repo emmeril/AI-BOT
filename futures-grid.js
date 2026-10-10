@@ -14,6 +14,7 @@ const {
   recommendationFor,
 } = require('./src/adaptive-grid-supervisor');
 const { GeminiAdaptiveMonitor } = require('./src/gemini-adaptive-monitor');
+const { BinanceFuturesUserStream } = require('./src/binance-futures-user-stream');
 const { startFuturesDashboardServer } = require('./src/futures-dashboard-server');
 const {
   deferUnreconciledSell,
@@ -112,6 +113,22 @@ const MARGIN_MODE = Config.get('MARGIN_MODE', 'ISOLATED').toUpperCase();
 const POSITION_SIDE = 'LONG';
 const INTERVAL_MINUTES = Config.number('INTERVAL_MINUTES', 1);
 const INTERVAL_MS = INTERVAL_MINUTES * MINUTE_MS;
+const FUTURES_USER_STREAM_ENABLED = Config.boolean('FUTURES_USER_STREAM_ENABLED', true);
+const FUTURES_USER_STREAM_RECONCILE_DEBOUNCE_MS = Math.max(
+  Config.number('FUTURES_USER_STREAM_RECONCILE_DEBOUNCE_MS', 750), 0
+);
+const FUTURES_USER_STREAM_KEEPALIVE_MS = Math.max(
+  Config.number('FUTURES_USER_STREAM_KEEPALIVE_MINUTES', 45), 1
+) * MINUTE_MS;
+const FUTURES_USER_STREAM_RECONNECT_MAX_MS = Math.max(
+  Config.number('FUTURES_USER_STREAM_RECONNECT_MAX_SECONDS', 30), 1
+) * 1000;
+const FUTURES_USER_STREAM_WS_URL = Config.get(
+  'FUTURES_USER_STREAM_WS_URL',
+  EXCHANGE_MODE === 'testnet'
+    ? 'wss://demo-fstream.binance.com/ws'
+    : 'wss://fstream.binance.com/ws'
+);
 const TELEGRAM_COMMAND_POLL_INTERVAL_MS = Math.max(
   Config.number('FUTURES_TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS', 2),
   1
@@ -233,6 +250,22 @@ const GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE = Config.number(
   'GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE', 0.6
 );
 const GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS = Config.number('GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS', 20_000);
+const GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS = Math.max(
+  Config.number('GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS', 5000), 0
+);
+const GEMINI_ADAPTIVE_MONITOR_REQUEST_JITTER_MS = Math.max(
+  Config.number('GEMINI_ADAPTIVE_MONITOR_REQUEST_JITTER_MS', 250), 0
+);
+const GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS = Config.number('GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS', 3);
+const GEMINI_ADAPTIVE_MONITOR_RETRY_BASE_MS = Math.max(
+  Config.number('GEMINI_ADAPTIVE_MONITOR_RETRY_BASE_MS', 2000), 0
+);
+const GEMINI_ADAPTIVE_MONITOR_RETRY_MAX_MS = Math.max(
+  Config.number('GEMINI_ADAPTIVE_MONITOR_RETRY_MAX_MS', 15000), 0
+);
+const GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MS = Math.max(
+  Config.number('GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MINUTES', 60), 0
+) * MINUTE_MS;
 const GEMINI_RANGE_ADVISOR_TIMEFRAME = Config.get('GEMINI_RANGE_ADVISOR_TIMEFRAME', '1h');
 
 // Converts a ccxt-style timeframe string (e.g. '1m', '15m', '1h', '4h', '1d')
@@ -494,6 +527,9 @@ function validateRuntimeConfiguration() {
   requireInteger('GRID_MAX_REFILLS', GRID_MAX_REFILLS, 0);
   requireInteger('GRID_AGGREGATED_EXIT_LADDER_MAX_ORDERS', GRID_AGGREGATED_EXIT_LADDER_MAX_ORDERS, 2);
   requireNonNegative('BOT_LOCK_STALE_GRACE_MS', BOT_LOCK_STALE_GRACE_MS);
+  requireNonNegative('FUTURES_USER_STREAM_RECONCILE_DEBOUNCE_MS', FUTURES_USER_STREAM_RECONCILE_DEBOUNCE_MS);
+  requirePositive('FUTURES_USER_STREAM_KEEPALIVE_MINUTES', FUTURES_USER_STREAM_KEEPALIVE_MS);
+  requirePositive('FUTURES_USER_STREAM_RECONNECT_MAX_SECONDS', FUTURES_USER_STREAM_RECONNECT_MAX_MS);
   requirePositive('TELEGRAM_TIMEOUT_MS', TELEGRAM_TIMEOUT_MS);
   requirePositive('LEVERAGE', LEVERAGE);
   requireNonNegative('BINANCE_FUTURES_MAKER_FEE_RATE', BINANCE_FUTURES_MAKER_FEE_RATE);
@@ -589,6 +625,15 @@ function validateRuntimeConfiguration() {
     if (!GEMINI_API_KEY) errors.push('GEMINI_API_KEY is required when GEMINI_ADAPTIVE_MONITOR_ENABLED=true');
     requirePositive('GEMINI_ADAPTIVE_MONITOR_INTERVAL_MINUTES', GEMINI_ADAPTIVE_MONITOR_INTERVAL_MS);
     requirePositive('GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS', GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS);
+    requireNonNegative(
+      'GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS',
+      GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS
+    );
+    requireNonNegative('GEMINI_ADAPTIVE_MONITOR_REQUEST_JITTER_MS', GEMINI_ADAPTIVE_MONITOR_REQUEST_JITTER_MS);
+    requireInteger('GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS', GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS, 1);
+    requireNonNegative('GEMINI_ADAPTIVE_MONITOR_RETRY_BASE_MS', GEMINI_ADAPTIVE_MONITOR_RETRY_BASE_MS);
+    requireNonNegative('GEMINI_ADAPTIVE_MONITOR_RETRY_MAX_MS', GEMINI_ADAPTIVE_MONITOR_RETRY_MAX_MS);
+    requireNonNegative('GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MINUTES', GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MS);
     if (!(GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE >= 0 && GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE <= 1)) {
       errors.push('GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE must be between 0 and 1');
     }
@@ -1406,6 +1451,8 @@ class FuturesGridEngine {
     this.telegramStatusTimer = null;
     this.telegramCommandTimer = null;
     this.telegramCommandProcessing = false;
+    this.userStreamReconcileTimers = new Map();
+    this.userStreamSymbolMap = new Map();
     this.circuitBreaker = { errors: 0, pausedUntil: 0 };
     // for stuck investment warning deduplication
     this.stuckInvestmentWarned = new Set();
@@ -1423,6 +1470,20 @@ class FuturesGridEngine {
       minimumConfidence: GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE,
       intervalMs: GEMINI_ADAPTIVE_MONITOR_INTERVAL_MS,
       timeoutMs: GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS,
+      minimumRequestIntervalMs: GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS,
+      requestJitterMs: GEMINI_ADAPTIVE_MONITOR_REQUEST_JITTER_MS,
+      maxAttempts: GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS,
+      retryBaseDelayMs: GEMINI_ADAPTIVE_MONITOR_RETRY_BASE_MS,
+      retryMaxDelayMs: GEMINI_ADAPTIVE_MONITOR_RETRY_MAX_MS,
+      staleTtlMs: GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MS,
+    });
+    this.futuresUserStream = new BinanceFuturesUserStream({
+      exchange: this.exchange,
+      enabled: FUTURES_USER_STREAM_ENABLED,
+      wsBaseUrl: FUTURES_USER_STREAM_WS_URL,
+      keepaliveMs: FUTURES_USER_STREAM_KEEPALIVE_MS,
+      reconnectMaxMs: FUTURES_USER_STREAM_RECONNECT_MAX_MS,
+      onEvent: event => this.handleUserStreamEvent(event),
     });
     const targetNetRate = GRID_MIN_NET_PROFIT_PCT / 100;
     const minimumStepRatio = (1 + targetNetRate + BINANCE_FUTURES_MAKER_FEE_RATE) /
@@ -1463,6 +1524,10 @@ class FuturesGridEngine {
 
   async init() {
     await retry(() => this.exchange.loadMarkets());
+    this.userStreamSymbolMap = new Map(SYMBOLS.map(symbol => [
+      String(this.exchange.markets[symbol]?.id || '').toUpperCase(),
+      symbol,
+    ]).filter(([marketId]) => marketId));
     await this.setupHedgeMode();
     for (const symbol of SYMBOLS) {
       try {
@@ -1636,6 +1701,13 @@ class FuturesGridEngine {
     this.geminiAdaptiveMonitor.refresh(symbol, context).then(result => {
       if (!result || this.lastGeminiAdaptiveLog?.get(symbol) === result.decisionId) return;
       this.lastGeminiAdaptiveLog?.set(symbol, result.decisionId);
+      if (result.source === 'GEMINI_STALE') {
+        console.warn(
+          `[GEMINI-MONITOR] ${symbol} request failed after retries; using last accepted ` +
+          `${result.profile} decision (${Math.round(result.staleAgeMs / 1000)}s old): ${result.error}`
+        );
+        return;
+      }
       if (result.error) {
         console.warn(`[GEMINI-MONITOR] ${symbol} failed; deterministic fallback remains active: ${result.error}`);
         return;
@@ -4344,6 +4416,63 @@ class FuturesGridEngine {
     return result;
   }
 
+  resolveUserStreamSymbol(marketId) {
+    return this.userStreamSymbolMap.get(String(marketId || '').toUpperCase()) || null;
+  }
+
+  scheduleUserStreamReconcile(symbol, event) {
+    const existing = this.userStreamReconcileTimers.get(symbol);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.userStreamReconcileTimers.delete(symbol);
+      this.reconcileSymbol(symbol).catch(error => {
+        console.warn(`[USER-STREAM] ${symbol} reconciliation failed: ${error.message}`);
+        this.recordError();
+      });
+    }, FUTURES_USER_STREAM_RECONCILE_DEBOUNCE_MS);
+    timer.unref?.();
+    this.userStreamReconcileTimers.set(symbol, timer);
+    const order = event?.o || {};
+    console.log(
+      `[USER-STREAM] ${symbol} execution=${order.x || 'TRADE'} status=${order.X || 'unknown'} ` +
+      `order=${order.i ?? 'unknown'} trade=${order.t ?? 'unknown'}; reconciliation queued`
+    );
+  }
+
+  async handleUserStreamEvent(event) {
+    if (event?.e === 'ORDER_TRADE_UPDATE') {
+      const executionType = String(event.o?.x || '').toUpperCase();
+      if (!['TRADE', 'CALCULATED'].includes(executionType)) return;
+      const symbol = this.resolveUserStreamSymbol(event.o?.s);
+      if (symbol) this.scheduleUserStreamReconcile(symbol, event);
+      return;
+    }
+    if (event?.e !== 'MARGIN_CALL') return;
+    const positions = Array.isArray(event.p) ? event.p : [];
+    const details = positions.map(position => {
+      const symbol = this.resolveUserStreamSymbol(position.s) || position.s || 'unknown';
+      return `${symbol} maintMargin=${position.mm ?? 'unknown'} unrealized=${position.up ?? 'unknown'}`;
+    });
+    const message = ['[FUTURES MARGIN CALL]', '', ...details].join('\n');
+    console.warn(message.replace(/\n/g, ' | '));
+    await this.sendAlert(message);
+  }
+
+  async startUserStream() {
+    if (!FUTURES_USER_STREAM_ENABLED) return;
+    try {
+      await this.futuresUserStream.start();
+    } catch (error) {
+      console.warn(`[USER-STREAM] Disabled after startup failure: ${error.message}`);
+    }
+  }
+
+  stopAuxiliaryServices() {
+    this.futuresUserStream?.stop();
+    for (const timer of this.userStreamReconcileTimers.values()) clearTimeout(timer);
+    this.userStreamReconcileTimers.clear();
+  }
+
   async executeCycle() {
     if (this.isRunning) return;
     this.isRunning = true;
@@ -4547,6 +4676,9 @@ Aggregated Exit Ladder: ${GRID_AGGREGATED_EXIT_LADDER_ENABLED
       : 'OFF'}
 Recreate On Start: ${GRID_RECREATE_ON_START ? 'ON' : 'OFF'}
 Post Only (Maker): ${GRID_POST_ONLY ? 'ON' : 'OFF'}
+Binance User Data WebSocket: ${FUTURES_USER_STREAM_ENABLED
+      ? `ON (fill debounce=${FUTURES_USER_STREAM_RECONCILE_DEBOUNCE_MS}ms, REST reconciliation retained)`
+      : 'OFF'}
 Smart Range Advisor (Gemini): ${GEMINI_RANGE_ADVISOR_ENABLED
       ? `ON (model=${GEMINI_MODEL}, timeframe=${GEMINI_RANGE_ADVISOR_TIMEFRAME} [candle-close aligned], min-range-width=${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}%, applies-to=${GEMINI_RANGE_ADVISOR_APPLY_ON})`
       : 'OFF'}
@@ -4560,10 +4692,11 @@ Adaptive Grid Supervisor: ${ADAPTIVE_GRID_SUPERVISOR_ENABLED
       ? `ON (${ADAPTIVE_GRID_SUPERVISOR_MODE}; profile-confirmations=${ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS}, cooldown=${ADAPTIVE_GRID_SUPERVISOR_COOLDOWN_MS / MINUTE_MS}m)`
       : 'OFF'}
 Gemini Adaptive Monitor: ${GEMINI_ADAPTIVE_MONITOR_ENABLED
-      ? `ON (model=${GEMINI_MODEL}, interval=${GEMINI_ADAPTIVE_MONITOR_INTERVAL_MS / MINUTE_MS}m, min-confidence=${GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE}; non-blocking)`
+      ? `ON (model=${GEMINI_MODEL}, interval=${GEMINI_ADAPTIVE_MONITOR_INTERVAL_MS / MINUTE_MS}m, min-confidence=${GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE}, queue=${GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS}ms, attempts=${GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS}; non-blocking)`
       : 'OFF'}
 `);
     await this.init();
+    await this.startUserStream();
     startFuturesDashboardServer(this);
     this.startTelegramCommandProcessing();
     this.startTelegramStatusReports();
@@ -4589,8 +4722,10 @@ async function bootstrap() {
 
   const lock = new ProcessLock(BOT_LOCK_PATH);
   lock.acquire();
+  let engine = null;
   const shutdown = signal => {
     console.log(`[SHUTDOWN] ${signal}`);
+    engine?.stopAuxiliaryServices();
     lock.release();
     process.exit(0);
   };
@@ -4599,9 +4734,10 @@ async function bootstrap() {
   process.once('exit', () => lock.release());
 
   try {
-    const engine = new FuturesGridEngine();
+    engine = new FuturesGridEngine();
     await engine.start();
   } finally {
+    engine?.stopAuxiliaryServices();
     lock.release();
   }
 }

@@ -44,6 +44,24 @@ test('STOP_TRADING still allows futures executeCycle to reconcile symbols', asyn
   assert.equal(engine.isRunning, false);
 });
 
+test('futures user stream reconciles trade executions but ignores ordinary order updates', async () => {
+  const engine = Object.create(FuturesGridEngine.prototype);
+  engine.userStreamSymbolMap = new Map([['BTCUSDT', 'BTC/USDT:USDT']]);
+  const queued = [];
+  engine.scheduleUserStreamReconcile = (symbol, event) => queued.push([symbol, event.o.x]);
+
+  await engine.handleUserStreamEvent({
+    e: 'ORDER_TRADE_UPDATE',
+    o: { s: 'BTCUSDT', x: 'NEW', X: 'NEW' },
+  });
+  await engine.handleUserStreamEvent({
+    e: 'ORDER_TRADE_UPDATE',
+    o: { s: 'BTCUSDT', x: 'TRADE', X: 'FILLED' },
+  });
+
+  assert.deepEqual(queued, [['BTC/USDT:USDT', 'TRADE']]);
+});
+
 test('initial futures trade reconciliation omits zero since watermark', async () => {
   const engine = Object.create(FuturesGridEngine.prototype);
   const calls = [];

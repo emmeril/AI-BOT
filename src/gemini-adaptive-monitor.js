@@ -1,6 +1,61 @@
 const https = require('https');
 
 const VALID_PROFILES = new Set(['BULLISH', 'SIDEWAYS', 'BEARISH', 'RISK_OFF']);
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEDOUT', 'EAI_AGAIN',
+]);
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+class GeminiRequestQueue {
+  constructor(options = {}) {
+    this.minimumIntervalMs = Math.max(0, Number(options.minimumIntervalMs) || 0);
+    this.jitterMs = Math.max(0, Number(options.jitterMs) || 0);
+    this.sleep = options.sleep || sleep;
+    this.now = options.now || Date.now;
+    this.random = options.random || Math.random;
+    this.pending = [];
+    this.running = false;
+    this.lastStartedAt = 0;
+  }
+
+  enqueue(task) {
+    return new Promise((resolve, reject) => {
+      this.pending.push({ task, resolve, reject });
+      this.drain();
+    });
+  }
+
+  async drain() {
+    if (this.running) return;
+    this.running = true;
+    try {
+      while (this.pending.length) {
+        const item = this.pending.shift();
+        const earliest = this.lastStartedAt + this.minimumIntervalMs;
+        const spacingDelay = Math.max(0, earliest - this.now());
+        const jitter = this.jitterMs > 0 ? Math.floor(this.random() * (this.jitterMs + 1)) : 0;
+        if (spacingDelay + jitter > 0) await this.sleep(spacingDelay + jitter);
+        this.lastStartedAt = this.now();
+        try {
+          item.resolve(await item.task());
+        } catch (error) {
+          item.reject(error);
+        }
+      }
+    } finally {
+      this.running = false;
+      if (this.pending.length) this.drain();
+    }
+  }
+}
+
+function isTransientGeminiError(error) {
+  const statusCode = Number(error?.statusCode);
+  if (statusCode === 429 || statusCode >= 500) return true;
+  if (TRANSIENT_NETWORK_CODES.has(error?.code)) return true;
+  return /timed?\s*out|socket hang up|network error/i.test(String(error?.message || ''));
+}
 
 function round(value, digits = 4) {
   const number = Number(value);
@@ -155,7 +210,11 @@ function requestGemini({ apiKey, baseUrl, model, timeoutMs, prompt }) {
       response.on('data', chunk => { raw += chunk; });
       response.on('end', () => {
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          reject(new Error(`Gemini API returned HTTP ${response.statusCode}: ${raw.slice(0, 300)}`));
+          const error = new Error(`Gemini API returned HTTP ${response.statusCode}: ${raw.slice(0, 300)}`);
+          error.statusCode = response.statusCode;
+          const retryAfter = Number(response.headers?.['retry-after']);
+          if (Number.isFinite(retryAfter) && retryAfter >= 0) error.retryAfterMs = retryAfter * 1000;
+          reject(error);
           return;
         }
         try {
@@ -187,11 +246,26 @@ class GeminiAdaptiveMonitor {
       minimumConfidence: 0.6,
       intervalMs: 15 * 60 * 1000,
       timeoutMs: 20_000,
+      minimumRequestIntervalMs: 5000,
+      requestJitterMs: 250,
+      maxAttempts: 3,
+      retryBaseDelayMs: 2000,
+      retryMaxDelayMs: 15_000,
+      staleTtlMs: 60 * 60 * 1000,
       ...options,
     };
     this.cache = new Map();
+    this.lastAccepted = new Map();
     this.inFlight = new Map();
     this.provider = options.provider || (input => requestGemini(input));
+    this.sleep = options.sleep || sleep;
+    this.requestQueue = options.requestQueue || new GeminiRequestQueue({
+      minimumIntervalMs: this.options.minimumRequestIntervalMs,
+      jitterMs: this.options.requestJitterMs,
+      sleep: this.sleep,
+      now: options.queueNow,
+      random: options.random,
+    });
   }
 
   isEnabled() {
@@ -207,6 +281,44 @@ class GeminiAdaptiveMonitor {
     return Math.floor(now / intervalMs);
   }
 
+  async requestWithRetry(input) {
+    const maximum = Math.max(1, Math.floor(Number(this.options.maxAttempts) || 1));
+    let lastError;
+    for (let attempt = 1; attempt <= maximum; attempt++) {
+      try {
+        const raw = await this.requestQueue.enqueue(() => this.provider(input));
+        return { raw, attempts: attempt };
+      } catch (error) {
+        lastError = error;
+        if (attempt >= maximum || !isTransientGeminiError(error)) break;
+        const exponential = Math.min(
+          Math.max(0, Number(this.options.retryMaxDelayMs) || 0),
+          Math.max(0, Number(this.options.retryBaseDelayMs) || 0) * (2 ** (attempt - 1))
+        );
+        const delay = Math.max(exponential, Number(error?.retryAfterMs) || 0);
+        if (delay > 0) await this.sleep(delay);
+      }
+    }
+    throw lastError;
+  }
+
+  staleDecision(symbol, intervalId, now, error) {
+    const previous = this.lastAccepted.get(symbol);
+    if (!previous) return null;
+    const ageMs = Math.max(0, now - previous.acceptedAt);
+    if (ageMs > Math.max(0, Number(this.options.staleTtlMs) || 0)) return null;
+    return {
+      ...previous.decision,
+      source: 'GEMINI_STALE',
+      stale: true,
+      staleAgeMs: ageMs,
+      fallbackAt: new Date(now).toISOString(),
+      decisionId: `${intervalId}:STALE:${previous.decision.profile}:${previous.decision.confidence}`,
+      intervalId,
+      error: String(error?.message || error).slice(0, 500),
+    };
+  }
+
   async refresh(symbol, context = {}, now = Date.now()) {
     if (!this.isEnabled()) return null;
     const intervalId = this.intervalId(now);
@@ -216,7 +328,7 @@ class GeminiAdaptiveMonitor {
 
     const task = (async () => {
       try {
-        const raw = await this.provider({
+        const { raw, attempts } = await this.requestWithRetry({
           apiKey: this.options.apiKey,
           baseUrl: this.options.baseUrl,
           model: this.options.model,
@@ -232,12 +344,15 @@ class GeminiAdaptiveMonitor {
           generatedAt: new Date(now).toISOString(),
           decisionId: `${intervalId}:${normalized.profile}:${normalized.confidence}`,
           intervalId,
+          attempts,
+          stale: false,
           error: null,
         };
         this.cache.set(symbol, { intervalId, decision });
+        if (decision.accepted) this.lastAccepted.set(symbol, { acceptedAt: now, decision });
         return decision;
       } catch (error) {
-        const decision = {
+        const decision = this.staleDecision(symbol, intervalId, now, error) || {
           source: 'GEMINI_ERROR',
           symbol,
           model: this.options.model,
@@ -264,8 +379,10 @@ class GeminiAdaptiveMonitor {
 
 module.exports = {
   VALID_PROFILES,
+  GeminiRequestQueue,
   GeminiAdaptiveMonitor,
   buildPrompt,
+  isTransientGeminiError,
   normalizeDecision,
   requestGemini,
 };
