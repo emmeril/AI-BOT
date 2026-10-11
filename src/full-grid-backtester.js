@@ -34,6 +34,12 @@ const DEFAULT_OPTIONS = Object.freeze({
   rangeRebuildCooldownMs: 120 * MINUTE_MS,
   directionMinimumConfidence: 0.65,
   directionLevelBiasPct: 10,
+  riskCautionExposureRatio: 0.75,
+  riskExposureRatio: 0.9,
+  riskLossWarningPct: 5,
+  riskLossRiskOffPct: 10,
+  riskCautionConfirmations: 2,
+  riskRecoveryConfirmations: 3,
 });
 
 function round(value, digits = 6) {
@@ -102,6 +108,7 @@ function createMetrics() {
     exposureSamples: 0,
     exposureAbove90Samples: 0,
     profileSamples: { BULLISH: 0, SIDEWAYS: 0, BEARISH: 0, RISK_OFF: 0 },
+    riskStateSamples: { NORMAL: 0, CAUTION: 0, RISK_OFF: 0 },
   };
 }
 
@@ -145,15 +152,24 @@ class FullGridBacktester {
     });
   }
 
-  simulate({ symbol, rows, fundingRates = [], start, end, adaptive = false }) {
+  simulate({ symbol, rows, fundingRates = [], start, end, adaptive = false, riskStateMachine = false }) {
     const options = this.options;
+    const adaptiveEnabled = adaptive || riskStateMachine;
     const series = this.prepareSeries(rows);
     const rangeAdvisor = this.createRangeAdvisor();
     const supervisor = new AdaptiveGridSupervisor({
       minimumConfidence: options.directionMinimumConfidence,
       profileConfirmations: 3,
       cooldownMs: 120 * MINUTE_MS,
-      riskExposureRatio: 0.9,
+      riskExposureRatio: options.riskExposureRatio,
+      riskStateMachineEnabled: riskStateMachine,
+      riskStateMachineMode: 'LIVE',
+      cautionExposureRatio: options.riskCautionExposureRatio,
+      riskStateExposureRatio: options.riskExposureRatio,
+      lossWarningPct: options.riskLossWarningPct,
+      lossRiskOffPct: options.riskLossRiskOffPct,
+      cautionConfirmations: options.riskCautionConfirmations,
+      recoveryConfirmations: options.riskRecoveryConfirmations,
     });
     const directionConfirmation = { candidate: 'RANGING', count: 0 };
     const indices = Object.fromEntries(RANGE_TIMEFRAMES.map(timeframe => [timeframe, -1]));
@@ -231,7 +247,7 @@ class FullGridBacktester {
 
     const placeBuyOrders = (currentPrice, now) => {
       if (!activeSuggestion?.levels?.length) return;
-      const recommendation = adaptive && lastDecision
+      const recommendation = adaptiveEnabled && lastDecision
         ? lastDecision.recommendation
         : { buyWeight: { upper: 1, middle: 1, lower: 1 }, spacingMultiplier: 1 };
       const cap = options.totalInvestment;
@@ -352,13 +368,21 @@ class FullGridBacktester {
       const inventoryMarketNotional = positionQuantity() * close;
       const exposureRatio = (inventoryMarketNotional + pendingNotional()) / options.totalInvestment;
       if (lastAnalysis) {
+        const entryNotional = inventoryEntryNotional();
+        const estimatedExitFee = inventoryMarketNotional * options.makerFeeRate;
+        const unrealizedPnlPct = entryNotional > 0
+          ? ((inventoryMarketNotional - entryNotional - estimatedExitFee) / entryNotional) * 100
+          : null;
         lastDecision = supervisor.evaluate(symbol, {
           analysis: lastAnalysis,
           exposureRatio,
+          riskContext: { unrealizedPnlPct },
           now: evaluationTime,
           signalId: timestamp,
         });
         metrics.profileSamples[lastDecision.profile]++;
+        if (lastDecision.riskState) metrics.riskStateSamples[lastDecision.riskState]++;
+        if (riskStateMachine && lastDecision.riskState === 'RISK_OFF') pendingBuys.clear();
       }
 
       const direction = lastAnalysis?.confidence >= options.directionMinimumConfidence &&
@@ -419,7 +443,7 @@ class FullGridBacktester {
     const durationDays = firstEvaluationAt ? Math.max(0, (Math.min(end, rows.at(-1)[0] + BASE_TIMEFRAME_MS) - firstEvaluationAt) / 86_400_000) : 0;
     return {
       symbol,
-      variant: adaptive ? 'adaptive' : 'baseline',
+      variant: riskStateMachine ? 'risk-state-machine' : adaptive ? 'adaptive' : 'baseline',
       start: firstEvaluationAt ? new Date(firstEvaluationAt).toISOString() : null,
       end: new Date(end).toISOString(),
       durationDays: round(durationDays, 2),
@@ -456,6 +480,10 @@ class FullGridBacktester {
       skippedByReserve: metrics.skippedByReserve,
       profileCoveragePct: Object.fromEntries(Object.entries(metrics.profileSamples).map(([profile, count]) => [
         profile,
+        metrics.exposureSamples ? round(count / metrics.exposureSamples * 100, 2) : 0,
+      ])),
+      riskStateCoveragePct: Object.fromEntries(Object.entries(metrics.riskStateSamples).map(([state, count]) => [
+        state,
         metrics.exposureSamples ? round(count / metrics.exposureSamples * 100, 2) : 0,
       ])),
     };

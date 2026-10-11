@@ -1,6 +1,7 @@
 const https = require('https');
 
 const VALID_PROFILES = new Set(['BULLISH', 'SIDEWAYS', 'BEARISH', 'RISK_OFF']);
+const VALID_MARKET_REGIMES = new Set(['BULLISH', 'SIDEWAYS', 'BEARISH', 'RISK_OFF']);
 const TRANSIENT_NETWORK_CODES = new Set([
   'ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEDOUT', 'EAI_AGAIN',
 ]);
@@ -118,7 +119,7 @@ function buildPrompt(symbol, context) {
   };
 
   return `You monitor risk regimes for a live long-only futures grid bot.
-Classify the conditions for NEW BUY and refill allocation only. Never suggest an order, price target, leverage change, position close, or SELL change.
+Classify the conditions for NEW BUY and refill allocation only. Never suggest an order, price target, leverage change, position close, SELL change, or modification to safety limits. Your scorecard is advisory telemetry and cannot control orders directly.
 
 Profiles:
 - BULLISH: broad confirmed strength with controlled volatility.
@@ -128,8 +129,82 @@ Profiles:
 
 Use RISK_OFF when evidence is materially dangerous, not merely because one timeframe is weak. Treat high exposure and liquidation proximity as serious risk. Return a concise reason grounded only in the supplied data.
 
+Scorecard:
+- marketRegime: BULLISH, SIDEWAYS, BEARISH, or RISK_OFF.
+- riskScore: 0 means low risk and 100 means extreme risk.
+- buyIntensity: advisory value from 0 (avoid new BUY) to 1 (normal/full BUY appetite).
+- spacingMultiplier: advisory grid spacing from 0.75 (tighter) to 2 (wider).
+- validForMinutes: 5 to 60 minutes.
+- invalidationSignals: up to 3 observable conditions that would invalidate the assessment.
+
+Keep profile and marketRegime logically consistent. These fields will be logged in SHADOW mode and evaluated against future prices; they must not override deterministic safety rules.
+
 Input:
 ${JSON.stringify(payload)}`;
+}
+
+function defaultScorecard(profile) {
+  const defaults = {
+    BULLISH: { riskScore: 25, buyIntensity: 1, spacingMultiplier: 0.95 },
+    SIDEWAYS: { riskScore: 45, buyIntensity: 1, spacingMultiplier: 1 },
+    BEARISH: { riskScore: 70, buyIntensity: 0.5, spacingMultiplier: 1.2 },
+    RISK_OFF: { riskScore: 90, buyIntensity: 0.25, spacingMultiplier: 1.4 },
+  };
+  return {
+    marketRegime: profile,
+    ...defaults[profile],
+    validForMinutes: 15,
+    invalidationSignals: [],
+    source: 'PROFILE_DEFAULT',
+  };
+}
+
+function numericScorecardField(raw, name, minimum, maximum, fallback) {
+  if (raw?.[name] === undefined || raw?.[name] === null) return fallback;
+  const value = Number(raw[name]);
+  if (!Number.isFinite(value) || value < minimum || value > maximum) {
+    throw new Error(`invalid Gemini ${name}: ${raw[name]}`);
+  }
+  return value;
+}
+
+function normalizeScorecard(raw, profile) {
+  const fallback = defaultScorecard(profile);
+  const hasScorecard = raw?.marketRegime !== undefined || raw?.riskScore !== undefined ||
+    raw?.buyIntensity !== undefined || raw?.spacingMultiplier !== undefined ||
+    raw?.validForMinutes !== undefined || raw?.invalidationSignals !== undefined;
+  const marketRegime = String(raw?.marketRegime || fallback.marketRegime).trim().toUpperCase();
+  if (!VALID_MARKET_REGIMES.has(marketRegime)) {
+    throw new Error(`invalid Gemini marketRegime: ${raw?.marketRegime}`);
+  }
+  const directionalConflict = (profile === 'BULLISH' && marketRegime === 'BEARISH') ||
+    (profile === 'BEARISH' && marketRegime === 'BULLISH');
+  if (directionalConflict) {
+    throw new Error(`Gemini marketRegime ${marketRegime} conflicts with profile ${profile}`);
+  }
+  const validForMinutes = numericScorecardField(
+    raw, 'validForMinutes', 5, 60, fallback.validForMinutes
+  );
+  if (!Number.isInteger(validForMinutes)) {
+    throw new Error(`invalid Gemini validForMinutes: ${raw?.validForMinutes}`);
+  }
+  const invalidationSignals = Array.isArray(raw?.invalidationSignals)
+    ? raw.invalidationSignals
+      .filter(value => typeof value === 'string' && value.trim())
+      .slice(0, 3)
+      .map(value => value.trim().slice(0, 160))
+    : [];
+  return {
+    marketRegime,
+    riskScore: round(numericScorecardField(raw, 'riskScore', 0, 100, fallback.riskScore), 2),
+    buyIntensity: round(numericScorecardField(raw, 'buyIntensity', 0, 1, fallback.buyIntensity), 4),
+    spacingMultiplier: round(numericScorecardField(
+      raw, 'spacingMultiplier', 0.75, 2, fallback.spacingMultiplier
+    ), 4),
+    validForMinutes,
+    invalidationSignals,
+    source: hasScorecard ? 'GEMINI' : fallback.source,
+  };
 }
 
 function normalizeDecision(raw, options = {}) {
@@ -146,11 +221,13 @@ function normalizeDecision(raw, options = {}) {
       .slice(0, 5)
       .map(value => value.trim().slice(0, 120))
     : [];
+  const scorecard = normalizeScorecard(raw, profile);
   return {
     profile,
     confidence: round(confidence),
     reasoning: typeof raw?.reasoning === 'string' ? raw.reasoning.trim().slice(0, 500) : '',
     riskFactors,
+    scorecard,
     accepted: confidence >= minimumConfidence,
   };
 }
@@ -180,15 +257,53 @@ function requestGemini({ apiKey, baseUrl, model, timeoutMs, prompt }) {
         maxItems: 5,
         description: 'Short names for the strongest risk factors.',
       },
+      marketRegime: {
+        type: 'string',
+        enum: [...VALID_MARKET_REGIMES],
+        description: 'Observed market regime for the shadow scorecard.',
+      },
+      riskScore: {
+        type: 'number',
+        minimum: 0,
+        maximum: 100,
+        description: 'Risk score where 0 is low and 100 is extreme.',
+      },
+      buyIntensity: {
+        type: 'number',
+        minimum: 0,
+        maximum: 1,
+        description: 'Advisory appetite for new BUY allocation.',
+      },
+      spacingMultiplier: {
+        type: 'number',
+        minimum: 0.75,
+        maximum: 2,
+        description: 'Advisory multiplier for BUY grid spacing.',
+      },
+      validForMinutes: {
+        type: 'integer',
+        minimum: 5,
+        maximum: 60,
+        description: 'How long this assessment should remain valid.',
+      },
+      invalidationSignals: {
+        type: 'array',
+        items: { type: 'string' },
+        maxItems: 3,
+        description: 'Observable conditions that invalidate this assessment.',
+      },
     },
-    required: ['profile', 'confidence', 'reasoning', 'riskFactors'],
+    required: [
+      'profile', 'confidence', 'reasoning', 'riskFactors', 'marketRegime', 'riskScore',
+      'buyIntensity', 'spacingMultiplier', 'validForMinutes', 'invalidationSignals',
+    ],
     additionalProperties: false,
   };
   const payload = JSON.stringify({
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     generationConfig: {
       temperature: 0.1,
-      maxOutputTokens: 512,
+      maxOutputTokens: 768,
       responseFormat: {
         text: { mimeType: 'APPLICATION_JSON', schema },
       },
@@ -364,6 +479,7 @@ class GeminiAdaptiveMonitor {
           confidence: null,
           reasoning: '',
           riskFactors: [],
+          scorecard: null,
           error: String(error?.message || error).slice(0, 500),
         };
         this.cache.set(symbol, { intervalId, decision });
@@ -379,10 +495,12 @@ class GeminiAdaptiveMonitor {
 
 module.exports = {
   VALID_PROFILES,
+  VALID_MARKET_REGIMES,
   GeminiRequestQueue,
   GeminiAdaptiveMonitor,
   buildPrompt,
   isTransientGeminiError,
   normalizeDecision,
+  normalizeScorecard,
   requestGemini,
 };

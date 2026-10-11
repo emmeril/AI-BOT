@@ -14,11 +14,26 @@ test('Gemini monitor validates and accepts a confident structured classification
     confidence: 0.81,
     reasoning: 'Momentum is weakening across timeframes.',
     riskFactors: ['weak momentum', 'higher volatility'],
+    marketRegime: 'BEARISH',
+    riskScore: 78,
+    buyIntensity: 0.35,
+    spacingMultiplier: 1.3,
+    validForMinutes: 15,
+    invalidationSignals: ['4h trend turns bullish'],
   }, { minimumConfidence: 0.6 });
 
   assert.equal(decision.profile, 'BEARISH');
   assert.equal(decision.accepted, true);
   assert.deepEqual(decision.riskFactors, ['weak momentum', 'higher volatility']);
+  assert.deepEqual(decision.scorecard, {
+    marketRegime: 'BEARISH',
+    riskScore: 78,
+    buyIntensity: 0.35,
+    spacingMultiplier: 1.3,
+    validForMinutes: 15,
+    invalidationSignals: ['4h trend turns bullish'],
+    source: 'GEMINI',
+  });
 });
 
 test('Gemini monitor rejects malformed or low-confidence output', () => {
@@ -26,6 +41,25 @@ test('Gemini monitor rejects malformed or low-confidence output', () => {
   assert.equal(normalizeDecision({
     profile: 'SIDEWAYS', confidence: 0.4, reasoning: '', riskFactors: [],
   }, { minimumConfidence: 0.6 }).accepted, false);
+  assert.throws(() => normalizeDecision({
+    profile: 'BEARISH', confidence: 0.8, riskScore: 101,
+  }), /invalid Gemini riskScore/);
+  assert.throws(() => normalizeDecision({
+    profile: 'BEARISH', confidence: 0.8, marketRegime: 'BULLISH',
+  }), /conflicts with profile/);
+  assert.doesNotThrow(() => normalizeDecision({
+    profile: 'RISK_OFF', confidence: 0.8, marketRegime: 'SIDEWAYS',
+  }));
+});
+
+test('Gemini monitor supplies conservative scorecard defaults for legacy provider responses', () => {
+  const decision = normalizeDecision({
+    profile: 'RISK_OFF', confidence: 0.9, reasoning: 'risk', riskFactors: [],
+  });
+  assert.equal(decision.scorecard.marketRegime, 'RISK_OFF');
+  assert.equal(decision.scorecard.riskScore, 90);
+  assert.equal(decision.scorecard.buyIntensity, 0.25);
+  assert.equal(decision.scorecard.source, 'PROFILE_DEFAULT');
 });
 
 test('Gemini monitor calls its provider once per interval and caches failures', async () => {
@@ -188,4 +222,6 @@ test('Gemini prompt contains monitoring context and forbids direct order control
   assert.match(prompt, /LONG_ONLY/);
   assert.match(prompt, /Existing SELL exits are never changed/);
   assert.match(prompt, /"exposurePct":50/);
+  assert.match(prompt, /riskScore: 0 means low risk and 100 means extreme risk/);
+  assert.match(prompt, /cannot control orders directly/);
 });

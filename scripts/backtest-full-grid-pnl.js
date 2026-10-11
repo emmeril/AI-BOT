@@ -42,11 +42,25 @@ function loadCachedRows(cacheDirectory, symbol) {
 }
 
 async function fetchFundingRates(exchange, symbol, since, until, cacheDirectory) {
+  const prefix = `${safeName(symbol)}-funding-`;
   const cachePath = path.join(
     cacheDirectory,
-    `${safeName(symbol)}-funding-${new Date(since).toISOString().slice(0, 10)}-${new Date(until).toISOString().slice(0, 10)}.json`
+    `${prefix}${new Date(since).toISOString().slice(0, 10)}-${new Date(until).toISOString().slice(0, 10)}.json`
   );
   if (fs.existsSync(cachePath)) return JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+  const sinceDate = new Date(since).toISOString().slice(0, 10);
+  const untilDate = new Date(until).toISOString().slice(0, 10);
+  const coveringCache = fs.existsSync(cacheDirectory)
+    ? fs.readdirSync(cacheDirectory).find(name => {
+      if (!name.startsWith(prefix) || !name.endsWith('.json')) return false;
+      const dates = name.slice(prefix.length, -5).match(/^(\d{4}-\d{2}-\d{2})-(\d{4}-\d{2}-\d{2})$/);
+      return dates && dates[1] <= sinceDate && dates[2] >= untilDate;
+    })
+    : null;
+  if (coveringCache) {
+    return JSON.parse(fs.readFileSync(path.join(cacheDirectory, coveringCache), 'utf8'))
+      .filter(item => Number(item.timestamp) >= since && Number(item.timestamp) < until);
+  }
   const records = new Map();
   let cursor = since;
   try {
@@ -100,16 +114,16 @@ function aggregate(results, options) {
   };
 }
 
-function comparison(baseline, adaptive) {
+function comparison(baseline, candidate) {
   return {
-    netPnlDelta: round(adaptive.netLiquidationPnl - baseline.netLiquidationPnl),
+    netPnlDelta: round(candidate.netLiquidationPnl - baseline.netLiquidationPnl),
     netPnlDeltaPct: baseline.netLiquidationPnl
-      ? round((adaptive.netLiquidationPnl / baseline.netLiquidationPnl - 1) * 100, 2)
+      ? round((candidate.netLiquidationPnl / baseline.netLiquidationPnl - 1) * 100, 2)
       : null,
-    feeDelta: round(adaptive.fees - baseline.fees),
-    fundingDelta: round(adaptive.fundingPnl - baseline.fundingPnl),
-    drawdownDelta: round(adaptive.sumOfPerSymbolMaximumDrawdowns - baseline.sumOfPerSymbolMaximumDrawdowns),
-    cycleDelta: adaptive.gridCycles - baseline.gridCycles,
+    feeDelta: round(candidate.fees - baseline.fees),
+    fundingDelta: round(candidate.fundingPnl - baseline.fundingPnl),
+    drawdownDelta: round(candidate.sumOfPerSymbolMaximumDrawdowns - baseline.sumOfPerSymbolMaximumDrawdowns),
+    cycleDelta: candidate.gridCycles - baseline.gridCycles,
   };
 }
 
@@ -119,7 +133,7 @@ function format(value, suffix = '') {
 
 function renderMarkdown(report) {
   const lines = [
-    '# Full-grid PnL Backtest',
+    '# Risk State Machine Backtest',
     '',
     `Period: ${report.period.start} to ${report.period.end}`,
     '',
@@ -129,10 +143,10 @@ function renderMarkdown(report) {
     '|---|---|---:|---:|---:|---:|---:|---:|---:|',
   ];
   for (const scope of ['full', 'outOfSample']) {
-    for (const variant of ['baseline', 'adaptive']) {
+    for (const variant of ['baseline', 'stateMachine']) {
       const item = report[scope].aggregate[variant];
       lines.push(
-        `| ${scope === 'full' ? 'Full period' : 'Out-of-sample'} | ${variant} | ` +
+        `| ${scope === 'full' ? 'Full period' : 'Out-of-sample'} | ${variant === 'stateMachine' ? 'risk-state-machine' : variant} | ` +
         `${format(item.netLiquidationPnl, ' USDT')} | ${format(item.returnOnNotionalPct, '%')} | ` +
         `${format(item.returnOnInitialMarginPct, '%')} | ${format(item.fees, ' USDT')} | ` +
         `${format(item.fundingPnl, ' USDT')} | ${item.gridCycles} | ` +
@@ -142,7 +156,7 @@ function renderMarkdown(report) {
   }
   lines.push(
     '',
-    '## Adaptive versus baseline',
+    '## Risk state machine versus baseline',
     '',
     `- Full-period net PnL difference: ${report.full.comparison.netPnlDelta} USDT.`,
     `- Out-of-sample net PnL difference: ${report.outOfSample.comparison.netPnlDelta} USDT.`,
@@ -150,16 +164,16 @@ function renderMarkdown(report) {
     '',
     '## Full-period per symbol',
     '',
-    '| Symbol | Baseline net | Adaptive net | Delta | Baseline cycles | Adaptive cycles | Baseline max DD | Adaptive max DD |',
+    '| Symbol | Baseline net | State machine net | Delta | Baseline cycles | State machine cycles | Baseline max DD | State machine max DD |',
     '|---|---:|---:|---:|---:|---:|---:|---:|'
   );
   for (const symbol of report.symbols) {
     const baseline = report.full.perSymbol[symbol].baseline;
-    const adaptive = report.full.perSymbol[symbol].adaptive;
+    const stateMachine = report.full.perSymbol[symbol].stateMachine;
     lines.push(
-      `| ${symbol} | ${baseline.netLiquidationPnl} | ${adaptive.netLiquidationPnl} | ` +
-      `${round(adaptive.netLiquidationPnl - baseline.netLiquidationPnl)} | ${baseline.gridCycles} | ` +
-      `${adaptive.gridCycles} | ${baseline.maximumDrawdown} | ${adaptive.maximumDrawdown} |`
+      `| ${symbol} | ${baseline.netLiquidationPnl} | ${stateMachine.netLiquidationPnl} | ` +
+      `${round(stateMachine.netLiquidationPnl - baseline.netLiquidationPnl)} | ${baseline.gridCycles} | ` +
+      `${stateMachine.gridCycles} | ${baseline.maximumDrawdown} | ${stateMachine.maximumDrawdown} |`
     );
   }
   lines.push('', '## Assumptions and limitations', '');
@@ -194,6 +208,14 @@ async function main() {
     maxRefills: Number(process.env.GRID_MAX_REFILLS) || 2,
     makerFeeRate: Number(process.env.BINANCE_FUTURES_MAKER_FEE_RATE) || 0.0002,
     minimumNetProfitPct: Number(process.env.GRID_MIN_NET_PROFIT_PCT) || 0.05,
+    riskCautionExposureRatio:
+      (Number(process.env.ADAPTIVE_RISK_STATE_MACHINE_CAUTION_EXPOSURE_PCT) || 75) / 100,
+    riskExposureRatio:
+      (Number(process.env.ADAPTIVE_RISK_STATE_MACHINE_RISK_EXPOSURE_PCT) || 90) / 100,
+    riskLossWarningPct: Number(process.env.ADAPTIVE_RISK_STATE_MACHINE_LOSS_WARNING_PCT) || 5,
+    riskLossRiskOffPct: Number(process.env.ADAPTIVE_RISK_STATE_MACHINE_LOSS_RISK_OFF_PCT) || 10,
+    riskCautionConfirmations: Number(process.env.ADAPTIVE_RISK_STATE_MACHINE_CAUTION_CONFIRMATIONS) || 2,
+    riskRecoveryConfirmations: Number(process.env.ADAPTIVE_RISK_STATE_MACHINE_RECOVERY_CONFIRMATIONS) || 3,
   };
   const full = { perSymbol: {} };
   const outOfSample = { perSymbol: {} };
@@ -212,15 +234,17 @@ async function main() {
       const simulator = new FullGridBacktester(exchange, { ...options, minimumNotional });
       full.perSymbol[symbol] = {
         baseline: simulator.simulate({ symbol, rows, fundingRates: funding, start, end, adaptive: false }),
-        adaptive: simulator.simulate({ symbol, rows, fundingRates: funding, start, end, adaptive: true }),
+        stateMachine: simulator.simulate({ symbol, rows, fundingRates: funding, start, end, riskStateMachine: true }),
       };
       outOfSample.perSymbol[symbol] = {
         baseline: simulator.simulate({ symbol, rows, fundingRates: funding, start: splitAt, end, adaptive: false }),
-        adaptive: simulator.simulate({ symbol, rows, fundingRates: funding, start: splitAt, end, adaptive: true }),
+        stateMachine: simulator.simulate({
+          symbol, rows, fundingRates: funding, start: splitAt, end, riskStateMachine: true,
+        }),
       };
       console.log(
         `[BACKTEST] ${symbol}: baseline=${full.perSymbol[symbol].baseline.netLiquidationPnl} ` +
-        `adaptive=${full.perSymbol[symbol].adaptive.netLiquidationPnl} USDT`
+        `state-machine=${full.perSymbol[symbol].stateMachine.netLiquidationPnl} USDT`
       );
     }
   } finally {
@@ -230,9 +254,9 @@ async function main() {
   for (const scope of [full, outOfSample]) {
     scope.aggregate = {
       baseline: aggregate(symbols.map(symbol => scope.perSymbol[symbol].baseline), options),
-      adaptive: aggregate(symbols.map(symbol => scope.perSymbol[symbol].adaptive), options),
+      stateMachine: aggregate(symbols.map(symbol => scope.perSymbol[symbol].stateMachine), options),
     };
-    scope.comparison = comparison(scope.aggregate.baseline, scope.aggregate.adaptive);
+    scope.comparison = comparison(scope.aggregate.baseline, scope.aggregate.stateMachine);
   }
 
   const report = {
@@ -248,14 +272,16 @@ async function main() {
       'Both entry and exit maker fees, historical funding, minimum notional, exposure caps, two refills, range resets, and final mark-to-market liquidation are included.',
       'Existing inventory survives range resets and receives a newly profitable exit target. Exact live aggregation/partial-fill sequencing cannot be reconstructed from OHLC data.',
       'Liquidation and maintenance-margin tiers are not simulated. Return on 5x margin is informational, not a liquidation-safe equity model.',
-      'The adaptive variant applies zone sizing and spacing recommendations; both variants keep the configured investment cap unchanged.',
+      'The state-machine variant reduces BUY placement in CAUTION and stops/cancels pending BUY orders in RISK_OFF; SELL exits remain active.',
+      'Historical liquidation distance and margin-call events are unavailable, so the replay evaluates exposure, Fibonacci direction, volatility, and unrealized PnL rules only.',
+      'Both variants keep the configured investment cap unchanged.',
     ],
     full,
     outOfSample,
   };
   fs.mkdirSync(resultsDirectory, { recursive: true });
-  const jsonPath = path.join(resultsDirectory, 'full-grid-pnl-backtest.json');
-  const markdownPath = path.join(resultsDirectory, 'full-grid-pnl-backtest.md');
+  const jsonPath = path.join(resultsDirectory, 'risk-state-machine-backtest.json');
+  const markdownPath = path.join(resultsDirectory, 'risk-state-machine-backtest.md');
   fs.writeFileSync(jsonPath, JSON.stringify(report, null, 2));
   fs.writeFileSync(markdownPath, renderMarkdown(report));
   console.log(renderMarkdown(report));

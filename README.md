@@ -300,13 +300,15 @@ npm run backtest:fibonacci-direction
 
 Runner membandingkan konfigurasi saat ini, beberapa minimum alignment, dan konsensus `4h + satu timeframe lebih rendah`. Data publik Binance disimpan di `backtest-data/`, sedangkan laporan JSON dan Markdown disimpan di `backtest-results/`. Pengujian ini mengukur ketepatan arah 4 jam dan 24 jam tanpa mengklaim simulasi PnL grid, funding, likuidasi, atau urutan fill intrabar.
 
-Full-grid PnL backtest membandingkan grid live sebagai baseline dengan rekomendasi adaptive supervisor yang benar-benar diterapkan di simulator:
+Full-grid PnL backtest membandingkan grid live sebagai baseline dengan Risk State Machine yang diterapkan di simulator:
 
 ```bash
 npm run backtest:full-grid-pnl
+# atau nama yang lebih spesifik
+npm run backtest:risk-state-machine
 ```
 
-Simulator memasukkan maker fee dua sisi, funding historis, minimum notional, batas exposure, refill, reset range, dan mark-to-market posisi tersisa. Fill memakai OHLC 15 menit secara konservatif: SELL yang dibuat setelah BUY fill baru boleh terisi mulai candle berikutnya. Kandidat range dihitung setiap 120 menit sesuai cooldown konfigurasi, atau langsung saat harga keluar dari range aktif. Laporan tersimpan sebagai `backtest-results/full-grid-pnl-backtest.{json,md}`. Ini bukan replay tick/orderbook dan tidak memodelkan antrean maker atau likuidasi.
+Simulator memasukkan maker fee dua sisi, funding historis, minimum notional, batas exposure, refill, reset range, dan mark-to-market posisi tersisa. Fill memakai OHLC 15 menit secara konservatif: SELL yang dibuat setelah BUY fill baru boleh terisi mulai candle berikutnya. Kandidat range dihitung setiap 120 menit sesuai cooldown konfigurasi, atau langsung saat harga keluar dari range aktif. Laporan tersimpan sebagai `backtest-results/risk-state-machine-backtest.{json,md}`. Data lama dapat menguji exposure, arah Fibonacci, volatilitas, dan unrealized PnL, tetapi tidak memiliki riwayat margin call maupun tier likuidasi. Ini bukan replay tick/orderbook dan tidak memodelkan antrean maker.
 
 ### Adaptive grid supervisor
 
@@ -322,17 +324,43 @@ ADAPTIVE_GRID_SUPERVISOR_COOLDOWN_MINUTES=120
 ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT=90
 ADAPTIVE_GRID_SUPERVISOR_LOG_FILE=adaptive-grid-live.jsonl
 
+ADAPTIVE_RISK_STATE_MACHINE_ENABLED=true
+ADAPTIVE_RISK_STATE_MACHINE_MODE=SHADOW
+ADAPTIVE_RISK_STATE_MACHINE_CAUTION_EXPOSURE_PCT=75
+ADAPTIVE_RISK_STATE_MACHINE_RISK_EXPOSURE_PCT=90
+ADAPTIVE_RISK_STATE_MACHINE_LOSS_WARNING_PCT=5
+ADAPTIVE_RISK_STATE_MACHINE_LOSS_RISK_OFF_PCT=10
+ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_WARNING_PCT=12
+ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_CRITICAL_PCT=8
+ADAPTIVE_RISK_STATE_MACHINE_CAUTION_CONFIRMATIONS=2
+ADAPTIVE_RISK_STATE_MACHINE_RECOVERY_CONFIRMATIONS=3
+ADAPTIVE_RISK_STATE_MACHINE_MARGIN_CALL_HOLD_MINUTES=60
+
 GEMINI_ADAPTIVE_MONITOR_ENABLED=true
 GEMINI_ADAPTIVE_MONITOR_INTERVAL_MINUTES=15
 GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE=0.60
 GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS=20000
+ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED=true
+ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_MODE=SHADOW
+ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_LOG_FILE=adaptive-supervisor-outcomes.jsonl
+ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE=adaptive-supervisor-outcomes-state.json
 GEMINI_API_KEY=your_gemini_api_key_here
 GEMINI_MODEL=gemini-3.1-flash-lite
 ```
 
+Risk State Machine terpisah dari profil pasar. `NORMAL` memakai rekomendasi profil biasa. `CAUTION` mengurangi BUY dan memperlebar jarak level. `RISK_OFF` menghentikan BUY baru serta membatalkan BUY tertunda, tetapi tidak membatalkan SELL exit. Pemicu keselamatan berasal dari kombinasi exposure dan bearish Fibonacci, unrealized loss, jarak likuidasi, serta event margin call dari User Data WebSocket. Gemini tidak dapat menurunkan status keselamatan ini.
+
+Gunakan `ADAPTIVE_RISK_STATE_MACHINE_MODE=SHADOW` untuk observasi awal. Dalam mode ini status dan alasannya masuk ke log adaptive tanpa mengubah order. Peralihan ke `LIVE` harus dilakukan setelah hasil backtest dan log shadow ditinjau.
+
 Gemini menerima ringkasan arah Fibonacci, volatilitas, exposure, posisi, liquidation price, funding, fee, dan PnL grid. Request berjalan non-blocking: order loop tidak menunggu respons Gemini. Respons memakai structured JSON, divalidasi terhadap empat profil yang diizinkan, dan baru diterapkan pada siklus berikutnya. Timeout, respons invalid, atau confidence rendah otomatis memakai klasifikasi deterministik.
 
 Semua request Gemini Adaptive Monitor melewati satu antrean agar beberapa simbol tidak mengirim burst bersamaan. HTTP `429`, error server `5xx`, timeout, dan error jaringan sementara dicoba ulang dengan exponential backoff. Jika seluruh percobaan gagal, keputusan accepted terakhir masih boleh dipakai sampai melewati stale TTL; setelah itu supervisor kembali ke klasifikasi deterministik.
+
+Decision Scorecard memakai request Gemini Adaptive Monitor yang sama, jadi tidak menambah jumlah request API. Gemini mengembalikan `marketRegime`, `riskScore` (0-100), `buyIntensity` (0-1), `spacingMultiplier` (0.75-2), masa berlaku, dan sinyal invalidasi. Nilai ini menjadi saran terstruktur untuk Supervisor dan tidak mengendalikan order secara langsung.
+
+Adaptive Supervisor Outcome Journal mencatat kesimpulan akhir Supervisor, bukan hanya saran Gemini. Setiap event keputusan berisi ringkasan Fibonacci, saran dan scorecard Gemini, sumber keputusan, profil final, safety override, exposure, serta BUY weight dan spacing yang benar-benar dipilih Supervisor. Harga pada horizon 4 jam dan 24 jam kemudian dicatat sebagai event outcome.
+
+Mode jurnal yang didukung saat ini hanya `SHADOW`: jurnal mengamati keputusan Supervisor tanpa mengubah order, leverage, SELL exit, modal, atau hard safety guard. Pending outcome dipulihkan dari `ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE` setelah restart.
 
 - `GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS`: jarak minimum awal request dalam antrean. Default `5000` ms atau maksimal sekitar 12 request/menit.
 - `GEMINI_ADAPTIVE_MONITOR_REQUEST_JITTER_MS`: jitter tambahan agar request tidak selalu jatuh pada detik yang sama. Default `250` ms.

@@ -10,6 +10,7 @@
     "backtest:fibonacci-direction": "node scripts/backtest-fibonacci-direction.js",
     "backtest:adaptive-supervisor": "node scripts/backtest-adaptive-grid-supervisor.js",
     "backtest:full-grid-pnl": "node scripts/backtest-full-grid-pnl.js",
+    "backtest:risk-state-machine": "node scripts/backtest-full-grid-pnl.js",
     "reconcile:inventory": "node scripts/reconcile-spot-inventory.js",
     "test": "node --test"
   },

@@ -9,11 +9,14 @@ const { FibonacciRangeAdvisor } = require('./src/fibonacci-range-advisor');
 const { FibonacciDirectionAnalyzer } = require('./src/fibonacci-direction-analyzer');
 const {
   PROFILES,
+  RISK_STATES,
   AdaptiveGridSupervisor,
   buildAdaptiveBuyPlan,
   recommendationFor,
+  recommendationForRiskState,
 } = require('./src/adaptive-grid-supervisor');
 const { GeminiAdaptiveMonitor } = require('./src/gemini-adaptive-monitor');
+const { AdaptiveSupervisorOutcomeJournal } = require('./src/adaptive-supervisor-outcome-journal');
 const { BinanceFuturesUserStream } = require('./src/binance-futures-user-stream');
 const { startFuturesDashboardServer } = require('./src/futures-dashboard-server');
 const {
@@ -231,6 +234,35 @@ const ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT = Config.number(
 const ADAPTIVE_GRID_SUPERVISOR_LOG_PATH = path.resolve(
   process.cwd(), Config.get('ADAPTIVE_GRID_SUPERVISOR_LOG_FILE', 'adaptive-grid-shadow.jsonl')
 );
+const ADAPTIVE_RISK_STATE_MACHINE_ENABLED = Config.boolean('ADAPTIVE_RISK_STATE_MACHINE_ENABLED', false);
+const ADAPTIVE_RISK_STATE_MACHINE_MODE = Config.get('ADAPTIVE_RISK_STATE_MACHINE_MODE', 'SHADOW').toUpperCase();
+const ADAPTIVE_RISK_STATE_MACHINE_CAUTION_EXPOSURE_PCT = Config.number(
+  'ADAPTIVE_RISK_STATE_MACHINE_CAUTION_EXPOSURE_PCT', 75
+);
+const ADAPTIVE_RISK_STATE_MACHINE_RISK_EXPOSURE_PCT = Config.number(
+  'ADAPTIVE_RISK_STATE_MACHINE_RISK_EXPOSURE_PCT', 90
+);
+const ADAPTIVE_RISK_STATE_MACHINE_LOSS_WARNING_PCT = Config.number(
+  'ADAPTIVE_RISK_STATE_MACHINE_LOSS_WARNING_PCT', 5
+);
+const ADAPTIVE_RISK_STATE_MACHINE_LOSS_RISK_OFF_PCT = Config.number(
+  'ADAPTIVE_RISK_STATE_MACHINE_LOSS_RISK_OFF_PCT', 10
+);
+const ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_WARNING_PCT = Config.number(
+  'ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_WARNING_PCT', 12
+);
+const ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_CRITICAL_PCT = Config.number(
+  'ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_CRITICAL_PCT', 8
+);
+const ADAPTIVE_RISK_STATE_MACHINE_CAUTION_CONFIRMATIONS = Config.number(
+  'ADAPTIVE_RISK_STATE_MACHINE_CAUTION_CONFIRMATIONS', 2
+);
+const ADAPTIVE_RISK_STATE_MACHINE_RECOVERY_CONFIRMATIONS = Config.number(
+  'ADAPTIVE_RISK_STATE_MACHINE_RECOVERY_CONFIRMATIONS', 3
+);
+const ADAPTIVE_RISK_STATE_MACHINE_MARGIN_CALL_HOLD_MS = Math.max(
+  Config.number('ADAPTIVE_RISK_STATE_MACHINE_MARGIN_CALL_HOLD_MINUTES', 60), 1
+) * MINUTE_MS;
 
 // ------------------------------
 //  Smart Grid Range Advisor (Gemini AI)
@@ -266,6 +298,18 @@ const GEMINI_ADAPTIVE_MONITOR_RETRY_MAX_MS = Math.max(
 const GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MS = Math.max(
   Config.number('GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MINUTES', 60), 0
 ) * MINUTE_MS;
+const ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED = Config.boolean(
+  'ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED', false
+);
+const ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_MODE = Config.get(
+  'ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_MODE', 'SHADOW'
+).toUpperCase();
+const ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_LOG_FILE = Config.get(
+  'ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_LOG_FILE', 'adaptive-supervisor-outcomes.jsonl'
+);
+const ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE = Config.get(
+  'ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE', 'adaptive-supervisor-outcomes-state.json'
+);
 const GEMINI_RANGE_ADVISOR_TIMEFRAME = Config.get('GEMINI_RANGE_ADVISOR_TIMEFRAME', '1h');
 
 // Converts a ccxt-style timeframe string (e.g. '1m', '15m', '1h', '4h', '1d')
@@ -557,6 +601,51 @@ function validateRuntimeConfiguration() {
       errors.push('ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT must be greater than 0 and at most 100');
     }
   }
+  if (ADAPTIVE_RISK_STATE_MACHINE_ENABLED) {
+    if (!ADAPTIVE_GRID_SUPERVISOR_ENABLED) {
+      errors.push('ADAPTIVE_RISK_STATE_MACHINE_ENABLED requires ADAPTIVE_GRID_SUPERVISOR_ENABLED=true');
+    }
+    if (!['SHADOW', 'LIVE'].includes(ADAPTIVE_RISK_STATE_MACHINE_MODE)) {
+      errors.push('ADAPTIVE_RISK_STATE_MACHINE_MODE must be SHADOW or LIVE');
+    }
+    if (ADAPTIVE_RISK_STATE_MACHINE_MODE === 'LIVE' && ADAPTIVE_GRID_SUPERVISOR_MODE !== 'LIVE') {
+      errors.push('ADAPTIVE_RISK_STATE_MACHINE_MODE=LIVE requires ADAPTIVE_GRID_SUPERVISOR_MODE=LIVE');
+    }
+    if (!(ADAPTIVE_RISK_STATE_MACHINE_CAUTION_EXPOSURE_PCT > 0 &&
+        ADAPTIVE_RISK_STATE_MACHINE_CAUTION_EXPOSURE_PCT <= 100)) {
+      errors.push('ADAPTIVE_RISK_STATE_MACHINE_CAUTION_EXPOSURE_PCT must be greater than 0 and at most 100');
+    }
+    if (!(ADAPTIVE_RISK_STATE_MACHINE_RISK_EXPOSURE_PCT >= ADAPTIVE_RISK_STATE_MACHINE_CAUTION_EXPOSURE_PCT &&
+        ADAPTIVE_RISK_STATE_MACHINE_RISK_EXPOSURE_PCT <= 100)) {
+      errors.push('ADAPTIVE_RISK_STATE_MACHINE_RISK_EXPOSURE_PCT must be at least the caution threshold and at most 100');
+    }
+    requirePositive('ADAPTIVE_RISK_STATE_MACHINE_LOSS_WARNING_PCT', ADAPTIVE_RISK_STATE_MACHINE_LOSS_WARNING_PCT);
+    if (!(ADAPTIVE_RISK_STATE_MACHINE_LOSS_RISK_OFF_PCT > ADAPTIVE_RISK_STATE_MACHINE_LOSS_WARNING_PCT)) {
+      errors.push('ADAPTIVE_RISK_STATE_MACHINE_LOSS_RISK_OFF_PCT must exceed the loss warning threshold');
+    }
+    requirePositive(
+      'ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_CRITICAL_PCT',
+      ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_CRITICAL_PCT
+    );
+    if (!(ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_WARNING_PCT >
+        ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_CRITICAL_PCT)) {
+      errors.push('ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_WARNING_PCT must exceed the critical threshold');
+    }
+    requireInteger(
+      'ADAPTIVE_RISK_STATE_MACHINE_CAUTION_CONFIRMATIONS',
+      ADAPTIVE_RISK_STATE_MACHINE_CAUTION_CONFIRMATIONS,
+      1
+    );
+    requireInteger(
+      'ADAPTIVE_RISK_STATE_MACHINE_RECOVERY_CONFIRMATIONS',
+      ADAPTIVE_RISK_STATE_MACHINE_RECOVERY_CONFIRMATIONS,
+      1
+    );
+    requirePositive(
+      'ADAPTIVE_RISK_STATE_MACHINE_MARGIN_CALL_HOLD_MINUTES',
+      ADAPTIVE_RISK_STATE_MACHINE_MARGIN_CALL_HOLD_MS
+    );
+  }
   if (FIBONACCI_RANGE_ADVISOR_ENABLED) {
     if (!FIBONACCI_RANGE_ADVISOR_TIMEFRAMES.length) errors.push('FIBONACCI_RANGE_ADVISOR_TIMEFRAMES must not be empty');
     if (!FIBONACCI_RANGE_ADVISOR_RATIOS.length ||
@@ -636,6 +725,20 @@ function validateRuntimeConfiguration() {
     requireNonNegative('GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MINUTES', GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MS);
     if (!(GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE >= 0 && GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE <= 1)) {
       errors.push('GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE must be between 0 and 1');
+    }
+  }
+  if (ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED) {
+    if (!ADAPTIVE_GRID_SUPERVISOR_ENABLED) {
+      errors.push('ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED requires ADAPTIVE_GRID_SUPERVISOR_ENABLED=true');
+    }
+    if (ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_MODE !== 'SHADOW') {
+      errors.push('ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_MODE currently supports SHADOW only');
+    }
+    if (!ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_LOG_FILE) {
+      errors.push('ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_LOG_FILE must not be empty');
+    }
+    if (!ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE) {
+      errors.push('ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE must not be empty');
     }
   }
 
@@ -1453,6 +1556,7 @@ class FuturesGridEngine {
     this.telegramCommandProcessing = false;
     this.userStreamReconcileTimers = new Map();
     this.userStreamSymbolMap = new Map();
+    this.marginCallUntil = new Map();
     this.circuitBreaker = { errors: 0, pausedUntil: 0 };
     // for stuck investment warning deduplication
     this.stuckInvestmentWarned = new Set();
@@ -1476,6 +1580,12 @@ class FuturesGridEngine {
       retryBaseDelayMs: GEMINI_ADAPTIVE_MONITOR_RETRY_BASE_MS,
       retryMaxDelayMs: GEMINI_ADAPTIVE_MONITOR_RETRY_MAX_MS,
       staleTtlMs: GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MS,
+    });
+    this.adaptiveSupervisorOutcomeJournal = new AdaptiveSupervisorOutcomeJournal({
+      enabled: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED,
+      mode: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_MODE,
+      logPath: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_LOG_FILE,
+      statePath: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE,
     });
     this.futuresUserStream = new BinanceFuturesUserStream({
       exchange: this.exchange,
@@ -1518,6 +1628,16 @@ class FuturesGridEngine {
       profileConfirmations: ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS,
       cooldownMs: ADAPTIVE_GRID_SUPERVISOR_COOLDOWN_MS,
       riskExposureRatio: ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT / 100,
+      riskStateMachineEnabled: ADAPTIVE_RISK_STATE_MACHINE_ENABLED,
+      riskStateMachineMode: ADAPTIVE_RISK_STATE_MACHINE_MODE,
+      cautionExposureRatio: ADAPTIVE_RISK_STATE_MACHINE_CAUTION_EXPOSURE_PCT / 100,
+      riskStateExposureRatio: ADAPTIVE_RISK_STATE_MACHINE_RISK_EXPOSURE_PCT / 100,
+      lossWarningPct: ADAPTIVE_RISK_STATE_MACHINE_LOSS_WARNING_PCT,
+      lossRiskOffPct: ADAPTIVE_RISK_STATE_MACHINE_LOSS_RISK_OFF_PCT,
+      liquidationWarningPct: ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_WARNING_PCT,
+      liquidationCriticalPct: ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_CRITICAL_PCT,
+      cautionConfirmations: ADAPTIVE_RISK_STATE_MACHINE_CAUTION_CONFIRMATIONS,
+      recoveryConfirmations: ADAPTIVE_RISK_STATE_MACHINE_RECOVERY_CONFIRMATIONS,
       mode: ADAPTIVE_GRID_SUPERVISOR_MODE,
     });
   }
@@ -1696,6 +1816,27 @@ class FuturesGridEngine {
     };
   }
 
+  buildAdaptiveRiskContext(symbol, currentPrice, now = Date.now()) {
+    const position = this.latestPositions?.get(symbol);
+    const contracts = Math.abs(numberOrZero(position?.contracts ?? position?.info?.positionAmt));
+    const entryPrice = numberOrZero(position?.entryPrice ?? position?.info?.entryPrice);
+    const markPrice = numberOrZero(position?.markPrice ?? position?.info?.markPrice) || numberOrZero(currentPrice);
+    const liquidationPrice = numberOrZero(position?.liquidationPrice ?? position?.info?.liquidationPrice);
+    const unrealizedPnl = numberOrZero(position?.unrealizedPnl ?? position?.info?.unRealizedProfit);
+    const entryNotional = contracts * entryPrice;
+    const unrealizedPnlPct = entryNotional > 0 ? (unrealizedPnl / entryNotional) * 100 : null;
+    const liquidationDistancePct = markPrice > 0 && liquidationPrice > 0
+      ? Math.max(0, ((markPrice - liquidationPrice) / markPrice) * 100)
+      : null;
+    const marginCallUntil = Number(this.marginCallUntil?.get(symbol)) || 0;
+    if (marginCallUntil > 0 && marginCallUntil <= now) this.marginCallUntil.delete(symbol);
+    return {
+      unrealizedPnlPct,
+      liquidationDistancePct,
+      marginCallActive: marginCallUntil > now,
+    };
+  }
+
   scheduleGeminiAdaptiveRefresh(symbol, context) {
     if (!this.geminiAdaptiveMonitor?.isEnabled()) return;
     this.geminiAdaptiveMonitor.refresh(symbol, context).then(result => {
@@ -1714,9 +1855,15 @@ class FuturesGridEngine {
       }
       const status = result.accepted ? 'accepted' : 'below-confidence';
       const reasoning = String(result.reasoning || '').replace(/\s+/g, ' ').trim();
+      const scorecard = result.scorecard;
+      const scorecardSummary = scorecard
+        ? ` regime=${scorecard.marketRegime} risk=${scorecard.riskScore} ` +
+          `buy=${scorecard.buyIntensity} spacing=${scorecard.spacingMultiplier}`
+        : '';
       console.log(
         `[GEMINI-MONITOR] ${symbol} profile=${result.profile} confidence=${result.confidence} ` +
-        `status=${status} model=${result.model} reasons=${result.riskFactors.join(',') || 'none'} ` +
+        `status=${status} model=${result.model}${scorecardSummary} ` +
+        `reasons=${result.riskFactors.join(',') || 'none'} ` +
         `summary=${reasoning}`
       );
     }).catch(error => {
@@ -1726,6 +1873,9 @@ class FuturesGridEngine {
 
   async evaluateAdaptiveSupervisor(symbol, analysis, currentPrice = null) {
     try {
+      this.adaptiveSupervisorOutcomeJournal?.observePrice(symbol, currentPrice).catch(error => {
+        console.warn(`[ADAPTIVE-OUTCOME] ${symbol} outcome write failed: ${error.message}`);
+      });
       const exposureRatio = GRID_TOTAL_INVESTMENT_USDT > 0
         ? this.getAllocatedInvestmentUsdt(symbol) / GRID_TOTAL_INVESTMENT_USDT
         : 0;
@@ -1741,30 +1891,63 @@ class FuturesGridEngine {
       );
       const monitorDecision = this.geminiAdaptiveMonitor?.getDecision(symbol) || null;
       this.scheduleGeminiAdaptiveRefresh(symbol, monitorContext);
-      const signalId = `${marketSignalId}|gemini:${monitorDecision?.decisionId || 'pending'}`;
+      const riskContext = this.buildAdaptiveRiskContext(symbol, currentPrice);
+      const lossBand = riskContext.unrealizedPnlPct !== null &&
+        riskContext.unrealizedPnlPct <= -ADAPTIVE_RISK_STATE_MACHINE_LOSS_RISK_OFF_PCT
+        ? 'critical'
+        : riskContext.unrealizedPnlPct !== null &&
+          riskContext.unrealizedPnlPct <= -ADAPTIVE_RISK_STATE_MACHINE_LOSS_WARNING_PCT
+          ? 'warning'
+          : 'normal';
+      const liquidationBand = riskContext.liquidationDistancePct !== null &&
+        riskContext.liquidationDistancePct <= ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_CRITICAL_PCT
+        ? 'critical'
+        : riskContext.liquidationDistancePct !== null &&
+          riskContext.liquidationDistancePct <= ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_WARNING_PCT
+          ? 'warning'
+          : 'normal';
+      const riskSignal = ADAPTIVE_RISK_STATE_MACHINE_ENABLED && ADAPTIVE_RISK_STATE_MACHINE_MODE === 'LIVE'
+        ? `|risk:${lossBand}:${liquidationBand}:${riskContext.marginCallActive ? 'margin-call' : 'clear'}`
+        : '';
+      const signalId = `${marketSignalId}|gemini:${monitorDecision?.decisionId || 'pending'}${riskSignal}`;
       const decision = this.adaptiveGridSupervisor.evaluate(symbol, {
         analysis,
         exposureRatio,
+        riskContext,
         signalId,
         monitorDecision,
       });
       if (!decision) return null;
       this.adaptiveGridDecisions.set(symbol, decision);
       if (!decision.evaluated) return decision;
+      try {
+        await this.adaptiveSupervisorOutcomeJournal?.recordDecision(decision, {
+          currentPrice,
+          analysis,
+          investmentLimitUsdt: GRID_TOTAL_INVESTMENT_USDT,
+        });
+      } catch (error) {
+        console.warn(`[ADAPTIVE-OUTCOME] ${symbol} decision write failed: ${error.message}`);
+      }
       const weights = decision.recommendation.buyWeight;
       const label = ADAPTIVE_GRID_SUPERVISOR_MODE === 'LIVE' ? 'ADAPTIVE-LIVE' : 'ADAPTIVE-SHADOW';
       console.log(
         `[${label}] ${symbol} profile=${decision.profile} raw=${decision.rawProfile} source=${decision.decisionSource} ` +
         `changed=${decision.changed} exposure=${decision.exposurePct}% ` +
+        `${decision.riskState ? `risk=${decision.riskState}->${decision.riskTargetState} ` : ''}` +
         `buy-weight=${weights.upper}/${weights.middle}/${weights.lower} ` +
         `spacing=${decision.recommendation.spacingMultiplier} investment-cap=${GRID_TOTAL_INVESTMENT_USDT}USDT ` +
-        `reasons=${decision.reasons.join(',')}`
+        `reasons=${decision.reasons.join(',')} ` +
+        `${decision.riskReasons?.length ? `risk-reasons=${decision.riskReasons.join(',')}` : ''}`
       );
       await fs.promises.appendFile(
         ADAPTIVE_GRID_SUPERVISOR_LOG_PATH,
         `${JSON.stringify(decision)}\n`,
         'utf8'
       );
+      if (ADAPTIVE_RISK_STATE_MACHINE_MODE === 'LIVE' && decision.riskState === RISK_STATES.RISK_OFF) {
+        await this.cancelManagedBuyOrders(symbol, `risk-state ${decision.riskReasons.join(',') || 'RISK_OFF'}`);
+      }
       return decision;
     } catch (err) {
       console.warn(`[ADAPTIVE-${ADAPTIVE_GRID_SUPERVISOR_MODE}] ${symbol} evaluation failed: ${err.message}`);
@@ -1774,6 +1957,21 @@ class FuturesGridEngine {
 
   getAdaptiveRecommendation(symbol) {
     if (!ADAPTIVE_GRID_SUPERVISOR_ENABLED || ADAPTIVE_GRID_SUPERVISOR_MODE !== 'LIVE') return null;
+    if (ADAPTIVE_RISK_STATE_MACHINE_ENABLED && ADAPTIVE_RISK_STATE_MACHINE_MODE === 'LIVE') {
+      const decision = this.adaptiveGridDecisions?.get(symbol);
+      if (decision?.recommendation) {
+        return {
+          ...decision.recommendation,
+          profile: decision.profile,
+          riskState: decision.riskState,
+        };
+      }
+      return {
+        ...recommendationForRiskState(RISK_STATES.RISK_OFF, recommendationFor(PROFILES.SIDEWAYS)),
+        profile: PROFILES.SIDEWAYS,
+        riskState: RISK_STATES.RISK_OFF,
+      };
+    }
     const allocated = this.getAllocatedInvestmentUsdt(symbol);
     const exposureRatio = GRID_TOTAL_INVESTMENT_USDT > 0 ? allocated / GRID_TOTAL_INVESTMENT_USDT : 0;
     if (exposureRatio >= ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT / 100) {
@@ -1790,6 +1988,7 @@ class FuturesGridEngine {
     const candidates = this.getNearestLevels(levels, currentPrice, 'buy', levels.length);
     const recommendation = this.getAdaptiveRecommendation(symbol);
     if (!recommendation) return candidates.slice(0, limit);
+    if (recommendation.riskState === RISK_STATES.RISK_OFF) return [];
     return buildAdaptiveBuyPlan(candidates, recommendation, limit);
   }
 
@@ -2807,6 +3006,8 @@ class FuturesGridEngine {
       retry(() => this.exchange.fetchPositions([symbol])),
     ]);
     const currentPrice = Number(ticker.last);
+    if (!this.latestPositions) this.latestPositions = new Map();
+    this.latestPositions.set(symbol, this.getActiveLongPosition(positions, symbol));
     const range = await this.buildRange(symbol, currentPrice);
     const { lower, upper } = range;
     const levels = Array.isArray(range.levels)
@@ -2881,6 +3082,26 @@ class FuturesGridEngine {
       } catch (err) {
         result.failed.push({ id: String(order.id), error: err });
         console.warn(`[CANCEL] Failed to cancel ${symbol} order ${order.id}: ${err.message}`);
+      }
+    }
+    return result;
+  }
+
+  async cancelManagedBuyOrders(symbol, reason) {
+    const result = { cancelled: [], failed: [] };
+    if (!this.exchange?.fetchOpenOrders || !this.exchange?.cancelOrder) return result;
+    const openOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+    const managed = await this.getManagedOpenOrders(symbol, openOrders);
+    for (const order of managed) {
+      if (String(order.side).toLowerCase() !== 'buy') continue;
+      try {
+        await retry(() => this.exchange.cancelOrder(order.id, symbol));
+        await this.state.forgetOrder(symbol, order.id);
+        result.cancelled.push(String(order.id));
+        console.log(`[CANCEL] ${symbol} buy ${order.id} | ${reason}; SELL exits preserved`);
+      } catch (err) {
+        result.failed.push({ id: String(order.id), error: err });
+        console.warn(`[CANCEL] Failed to cancel ${symbol} BUY order ${order.id}: ${err.message}`);
       }
     }
     return result;
@@ -3583,7 +3804,8 @@ class FuturesGridEngine {
         );
         return;
       }
-      const weight = Number(adaptiveLevel?.weight) || 1;
+      const adaptiveWeight = Number(adaptiveLevel?.weight);
+      const weight = Number.isFinite(adaptiveWeight) ? adaptiveWeight : 1;
       const remainingInvestmentUsdt = this.getRemainingInvestmentUsdt(symbol);
       let amountToBuy = this.amountForBuy(symbol, buyPrice, remainingInvestmentUsdt, weight);
       let cost = amountToBuy * buyPrice;
@@ -4132,7 +4354,8 @@ class FuturesGridEngine {
         ? 0
         : Math.max(0, Number(previousRefillCount) || 0) + 1;
       if (refillCount > GRID_MAX_REFILLS) continue;
-      const weight = Number(level.weight) || 1;
+      const adaptiveWeight = Number(level.weight);
+      const weight = Number.isFinite(adaptiveWeight) ? adaptiveWeight : 1;
       let amount = this.amountForBuy(symbol, level.price, remainingInvestmentUsdt, weight);
       let cost = amount * level.price;
       if (!(amount > 0)) {
@@ -4449,8 +4672,17 @@ class FuturesGridEngine {
     }
     if (event?.e !== 'MARGIN_CALL') return;
     const positions = Array.isArray(event.p) ? event.p : [];
+    this.marginCallUntil ||= new Map();
+    const holdUntil = Date.now() + ADAPTIVE_RISK_STATE_MACHINE_MARGIN_CALL_HOLD_MS;
     const details = positions.map(position => {
-      const symbol = this.resolveUserStreamSymbol(position.s) || position.s || 'unknown';
+      const configuredSymbol = this.resolveUserStreamSymbol(position.s);
+      const symbol = configuredSymbol || position.s || 'unknown';
+      if (configuredSymbol) {
+        this.marginCallUntil.set(configuredSymbol, holdUntil);
+        this.scheduleUserStreamReconcile(configuredSymbol, {
+          o: { x: 'MARGIN_CALL', X: 'warning', i: 'account', t: event.E || Date.now() },
+        });
+      }
       return `${symbol} maintMargin=${position.mm ?? 'unknown'} unrealized=${position.up ?? 'unknown'}`;
     });
     const message = ['[FUTURES MARGIN CALL]', '', ...details].join('\n');
@@ -4691,8 +4923,14 @@ Fibonacci Direction (deterministic): ${FIBONACCI_DIRECTION_ANALYZER_ENABLED
 Adaptive Grid Supervisor: ${ADAPTIVE_GRID_SUPERVISOR_ENABLED
       ? `ON (${ADAPTIVE_GRID_SUPERVISOR_MODE}; profile-confirmations=${ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS}, cooldown=${ADAPTIVE_GRID_SUPERVISOR_COOLDOWN_MS / MINUTE_MS}m)`
       : 'OFF'}
+Adaptive Risk State Machine: ${ADAPTIVE_RISK_STATE_MACHINE_ENABLED
+      ? `ON (${ADAPTIVE_RISK_STATE_MACHINE_MODE}; caution-exposure=${ADAPTIVE_RISK_STATE_MACHINE_CAUTION_EXPOSURE_PCT}%, risk-exposure=${ADAPTIVE_RISK_STATE_MACHINE_RISK_EXPOSURE_PCT}%, loss=${ADAPTIVE_RISK_STATE_MACHINE_LOSS_WARNING_PCT}/${ADAPTIVE_RISK_STATE_MACHINE_LOSS_RISK_OFF_PCT}%, liquidation=${ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_WARNING_PCT}/${ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_CRITICAL_PCT}%)`
+      : 'OFF'}
 Gemini Adaptive Monitor: ${GEMINI_ADAPTIVE_MONITOR_ENABLED
       ? `ON (model=${GEMINI_MODEL}, interval=${GEMINI_ADAPTIVE_MONITOR_INTERVAL_MS / MINUTE_MS}m, min-confidence=${GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE}, queue=${GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS}ms, attempts=${GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS}; non-blocking)`
+      : 'OFF'}
+Adaptive Supervisor Outcome Journal: ${ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED
+      ? `ON (${ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_MODE}; outcomes=4h/24h; observation only)`
       : 'OFF'}
 `);
     await this.init();
@@ -4756,6 +4994,7 @@ module.exports = {
   FuturesGridEngine,
   GeminiRangeAdvisor,
   GeminiAdaptiveMonitor,
+  AdaptiveSupervisorOutcomeJournal,
   AIGridValidator,
   TechnicalIndicators,
   FibonacciDirectionAnalyzer,

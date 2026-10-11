@@ -2,6 +2,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   AdaptiveGridSupervisor,
+  RiskStateMachine,
+  assessRiskState,
   buildAdaptiveBuyPlan,
   classifyProfile,
   recommendationFor,
@@ -109,6 +111,7 @@ test('accepted Gemini monitoring drives the adaptive profile', () => {
       confidence: 0.82,
       reasoning: 'Downside pressure is broadening.',
       riskFactors: ['weak momentum'],
+      scorecard: { marketRegime: 'BEARISH', riskScore: 70 },
       model: 'gemini-test',
     },
   });
@@ -117,6 +120,7 @@ test('accepted Gemini monitoring drives the adaptive profile', () => {
   assert.equal(result.decisionSource, 'GEMINI');
   assert.equal(result.deterministicProfile, 'SIDEWAYS');
   assert.equal(result.gemini.confidence, 0.82);
+  assert.equal(result.gemini.scorecard.riskScore, 70);
 });
 
 test('deterministic risk guard overrides a bullish Gemini classification', () => {
@@ -146,4 +150,105 @@ test('risk-off live plan widens spacing and shifts size toward lower levels', ()
 
   assert.deepEqual(plan.map(level => level.price), [100, 98, 96]);
   assert.deepEqual(plan.map(level => level.weight), [0.25, 0.5, 1.25]);
+});
+
+test('risk state assessment does not treat full exposure alone as unsafe', () => {
+  const result = assessRiskState(analysis('BULLISH'), 1, {});
+  assert.equal(result.targetState, 'NORMAL');
+  assert.deepEqual(result.reasons, []);
+});
+
+test('risk state machine enters caution after confirmed bearish exposure persists', () => {
+  const machine = new RiskStateMachine({ cautionConfirmations: 2 });
+  const first = machine.evaluate('TEST', {
+    analysis: analysis('BEARISH'), exposureRatio: 0.8, signalId: 'a', now: 1,
+  });
+  const duplicate = machine.evaluate('TEST', {
+    analysis: analysis('BEARISH'), exposureRatio: 0.8, signalId: 'a', now: 2,
+  });
+  const second = machine.evaluate('TEST', {
+    analysis: analysis('BEARISH'), exposureRatio: 0.8, signalId: 'b', now: 3,
+  });
+
+  assert.equal(first.state, 'NORMAL');
+  assert.equal(first.targetState, 'CAUTION');
+  assert.equal(duplicate.evaluated, false);
+  assert.equal(second.state, 'CAUTION');
+  assert.equal(second.changed, true);
+});
+
+test('critical loss enters risk-off immediately and recovers through caution', () => {
+  const machine = new RiskStateMachine({ recoveryConfirmations: 3 });
+  const riskOff = machine.evaluate('TEST', {
+    analysis: analysis('BULLISH'),
+    exposureRatio: 0.5,
+    riskContext: { unrealizedPnlPct: -11 },
+    signalId: 'risk',
+    now: 1,
+  });
+  assert.equal(riskOff.state, 'RISK_OFF');
+  assert.ok(riskOff.reasons.includes('unrealized_loss_critical'));
+
+  for (let index = 1; index <= 3; index++) {
+    machine.evaluate('TEST', {
+      analysis: analysis('BULLISH'), exposureRatio: 0.5, signalId: `healthy-${index}`, now: index + 1,
+    });
+  }
+  assert.equal(machine.getState('TEST').activeState, 'CAUTION');
+
+  for (let index = 4; index <= 6; index++) {
+    machine.evaluate('TEST', {
+      analysis: analysis('BULLISH'), exposureRatio: 0.5, signalId: `healthy-${index}`, now: index + 1,
+    });
+  }
+  assert.equal(machine.getState('TEST').activeState, 'NORMAL');
+});
+
+test('margin call and critical liquidation distance are independent risk-off guards', () => {
+  const marginCall = assessRiskState(analysis('BULLISH'), 0.2, { marginCallActive: true });
+  const liquidation = assessRiskState(
+    analysis('BULLISH'), 0.2, { liquidationDistancePct: 7.5 }
+  );
+  assert.equal(marginCall.targetState, 'RISK_OFF');
+  assert.equal(liquidation.targetState, 'RISK_OFF');
+});
+
+test('live risk state overrides Gemini market profile and stops all buys', () => {
+  const supervisor = new AdaptiveGridSupervisor({
+    profileConfirmations: 1,
+    cooldownMs: 0,
+    riskStateMachineEnabled: true,
+    riskStateMachineMode: 'LIVE',
+  });
+  const result = supervisor.evaluate('TEST', {
+    analysis: analysis('BULLISH'),
+    exposureRatio: 0.5,
+    riskContext: { unrealizedPnlPct: -12 },
+    signalId: 'critical',
+    now: 1,
+    monitorDecision: { accepted: true, profile: 'BULLISH', confidence: 0.99 },
+  });
+
+  assert.equal(result.profile, 'BULLISH');
+  assert.equal(result.riskState, 'RISK_OFF');
+  assert.deepEqual(result.recommendation.buyWeight, { upper: 0, middle: 0, lower: 0 });
+});
+
+test('shadow risk state records the decision without changing buy weights', () => {
+  const supervisor = new AdaptiveGridSupervisor({
+    profileConfirmations: 1,
+    cooldownMs: 0,
+    riskStateMachineEnabled: true,
+    riskStateMachineMode: 'SHADOW',
+  });
+  const result = supervisor.evaluate('TEST', {
+    analysis: analysis('BULLISH'),
+    exposureRatio: 0.5,
+    riskContext: { unrealizedPnlPct: -12 },
+    signalId: 'critical',
+    now: 1,
+  });
+
+  assert.equal(result.riskState, 'RISK_OFF');
+  assert.deepEqual(result.recommendation.buyWeight, { upper: 1, middle: 1, lower: 1 });
 });

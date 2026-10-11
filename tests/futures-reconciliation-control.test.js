@@ -62,6 +62,64 @@ test('futures user stream reconciles trade executions but ignores ordinary order
   assert.deepEqual(queued, [['BTC/USDT:USDT', 'TRADE']]);
 });
 
+test('margin call latches risk state and queues reconciliation for configured symbols', async () => {
+  const engine = Object.create(FuturesGridEngine.prototype);
+  engine.userStreamSymbolMap = new Map([['BTCUSDT', 'BTC/USDT:USDT']]);
+  engine.marginCallUntil = new Map();
+  const queued = [];
+  engine.scheduleUserStreamReconcile = (symbol, event) => queued.push([symbol, event.o.x]);
+  engine.sendAlert = async () => {};
+  const before = Date.now();
+
+  await engine.handleUserStreamEvent({
+    e: 'MARGIN_CALL',
+    E: before,
+    p: [{ s: 'BTCUSDT', mm: '1.25', up: '-4.5' }],
+  });
+
+  assert.ok(engine.marginCallUntil.get('BTC/USDT:USDT') > before);
+  assert.deepEqual(queued, [['BTC/USDT:USDT', 'MARGIN_CALL']]);
+});
+
+test('adaptive risk context derives loss and liquidation distance from the active long', () => {
+  const engine = Object.create(FuturesGridEngine.prototype);
+  engine.latestPositions = new Map([['BTC/USDT:USDT', {
+    contracts: 2,
+    entryPrice: 100,
+    markPrice: 90,
+    liquidationPrice: 81,
+    unrealizedPnl: -20,
+  }]]);
+  engine.marginCallUntil = new Map([['BTC/USDT:USDT', 2_000]]);
+
+  const context = engine.buildAdaptiveRiskContext('BTC/USDT:USDT', 90, 1_000);
+
+  assert.equal(context.unrealizedPnlPct, -10);
+  assert.equal(context.liquidationDistancePct, 10);
+  assert.equal(context.marginCallActive, true);
+});
+
+test('risk-off cancellation removes managed BUY orders and preserves SELL exits', async () => {
+  const engine = Object.create(FuturesGridEngine.prototype);
+  const cancelled = [];
+  const forgotten = [];
+  engine.exchange = {
+    fetchOpenOrders: async () => [
+      { id: 'buy-1', side: 'buy' },
+      { id: 'sell-1', side: 'sell' },
+    ],
+    cancelOrder: async id => { cancelled.push(id); },
+  };
+  engine.getManagedOpenOrders = async (_symbol, orders) => orders;
+  engine.state = { forgetOrder: async (_symbol, id) => { forgotten.push(id); } };
+
+  const result = await engine.cancelManagedBuyOrders('BTC/USDT:USDT', 'test risk-off');
+
+  assert.deepEqual(cancelled, ['buy-1']);
+  assert.deepEqual(forgotten, ['buy-1']);
+  assert.deepEqual(result.cancelled, ['buy-1']);
+});
+
 test('initial futures trade reconciliation omits zero since watermark', async () => {
   const engine = Object.create(FuturesGridEngine.prototype);
   const calls = [];

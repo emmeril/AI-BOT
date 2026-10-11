@@ -27,4 +27,8 @@ pnpm-debug.log*
 backtest-data/
 backtest-results/
 adaptive-grid-*.jsonl
+gemini-decision-scorecard-*.jsonl
+gemini-decision-scorecard-state.json
+adaptive-supervisor-outcomes.jsonl
+adaptive-supervisor-outcomes-state.json
 futures.js
