@@ -16,6 +16,7 @@ const {
   recommendationForRiskState,
 } = require('./src/adaptive-grid-supervisor');
 const { GeminiAdaptiveMonitor } = require('./src/gemini-adaptive-monitor');
+const { GeminiApiKeyPool, createGeminiHttpError } = require('./src/gemini-api-keys');
 const { AdaptiveSupervisorOutcomeJournal } = require('./src/adaptive-supervisor-outcome-journal');
 const { AdaptiveSupervisorLearner } = require('./src/adaptive-supervisor-learner');
 const { BinanceFuturesUserStream } = require('./src/binance-futures-user-stream');
@@ -270,6 +271,8 @@ const ADAPTIVE_RISK_STATE_MACHINE_MARGIN_CALL_HOLD_MS = Math.max(
 // ------------------------------
 const GEMINI_RANGE_ADVISOR_ENABLED = Config.boolean('GEMINI_RANGE_ADVISOR_ENABLED', false);
 const GEMINI_API_KEY = Config.get('GEMINI_API_KEY', '');
+const GEMINI_API_KEYS = [...new Set([GEMINI_API_KEY, ...Config.list('GEMINI_API_KEYS', '')].filter(Boolean))];
+const GEMINI_API_KEY_POOL = new GeminiApiKeyPool({ apiKeys: GEMINI_API_KEYS });
 const GEMINI_MODEL = Config.get('GEMINI_MODEL', 'gemini-2.5-flash');
 const GEMINI_API_BASE_URL = Config.get(
   'GEMINI_API_BASE_URL',
@@ -752,7 +755,9 @@ function validateRuntimeConfiguration() {
     errors.push('TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required when TELEGRAM_ENABLED=true');
   }
   if (GEMINI_RANGE_ADVISOR_ENABLED) {
-    if (!GEMINI_API_KEY) errors.push('GEMINI_API_KEY is required when GEMINI_RANGE_ADVISOR_ENABLED=true');
+    if (!GEMINI_API_KEYS.length) {
+      errors.push('GEMINI_API_KEY or GEMINI_API_KEYS is required when GEMINI_RANGE_ADVISOR_ENABLED=true');
+    }
     requirePositive('GEMINI_RANGE_ADVISOR_CANDLE_LIMIT', GEMINI_RANGE_ADVISOR_CANDLE_LIMIT);
     requirePositive('GEMINI_RANGE_ADVISOR_TIMEOUT_MS', GEMINI_RANGE_ADVISOR_TIMEOUT_MS);
     requireNonNegative('GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS', GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS);
@@ -767,7 +772,9 @@ function validateRuntimeConfiguration() {
     if (!ADAPTIVE_GRID_SUPERVISOR_ENABLED) {
       errors.push('GEMINI_ADAPTIVE_MONITOR_ENABLED requires ADAPTIVE_GRID_SUPERVISOR_ENABLED=true');
     }
-    if (!GEMINI_API_KEY) errors.push('GEMINI_API_KEY is required when GEMINI_ADAPTIVE_MONITOR_ENABLED=true');
+    if (!GEMINI_API_KEYS.length) {
+      errors.push('GEMINI_API_KEY or GEMINI_API_KEYS is required when GEMINI_ADAPTIVE_MONITOR_ENABLED=true');
+    }
     requirePositive('GEMINI_ADAPTIVE_MONITOR_INTERVAL_MINUTES', GEMINI_ADAPTIVE_MONITOR_INTERVAL_MS);
     requirePositive('GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS', GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS);
     requireNonNegative(
@@ -1441,7 +1448,7 @@ class GeminiRangeAdvisor {
   }
 
   isEnabled() {
-    return GEMINI_RANGE_ADVISOR_ENABLED && Boolean(GEMINI_API_KEY);
+    return GEMINI_RANGE_ADVISOR_ENABLED && GEMINI_API_KEY_POOL.size > 0;
   }
 
   /**
@@ -1561,14 +1568,14 @@ Respond with ONLY a single valid JSON object, no markdown fences, no commentary,
     // logged by default infra and is Google's documented alternative to ?key=.
     const url = `${GEMINI_API_BASE_URL}/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
-    const text = await withTimeout(
+    const text = await GEMINI_API_KEY_POOL.run(apiKey => withTimeout(
       new Promise((resolve, reject) => {
         const req = https.request(url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(payload),
-            'x-goog-api-key': GEMINI_API_KEY,
+            'x-goog-api-key': apiKey,
           },
         }, response => {
           let raw = '';
@@ -1576,7 +1583,7 @@ Respond with ONLY a single valid JSON object, no markdown fences, no commentary,
           response.on('data', chunk => { raw += chunk; });
           response.on('end', () => {
             if (response.statusCode < 200 || response.statusCode >= 300) {
-              reject(new Error(`Gemini API returned HTTP ${response.statusCode}: ${raw.slice(0, 300)}`));
+              reject(createGeminiHttpError(response.statusCode, raw, response.headers));
               return;
             }
             try {
@@ -1598,7 +1605,7 @@ Respond with ONLY a single valid JSON object, no markdown fences, no commentary,
       }),
       GEMINI_RANGE_ADVISOR_TIMEOUT_MS,
       `Gemini API call timed out after ${GEMINI_RANGE_ADVISOR_TIMEOUT_MS}ms`
-    );
+    ));
 
     const cleaned = text.replace(/```json|```/g, '').trim();
     let parsed;
@@ -1682,7 +1689,7 @@ class FuturesGridEngine {
     this.rangeAdvisor = new GeminiRangeAdvisor(this.exchange);
     this.geminiAdaptiveMonitor = new GeminiAdaptiveMonitor({
       enabled: GEMINI_ADAPTIVE_MONITOR_ENABLED,
-      apiKey: GEMINI_API_KEY,
+      apiKeyPool: GEMINI_API_KEY_POOL,
       baseUrl: GEMINI_API_BASE_URL,
       model: GEMINI_MODEL,
       minimumConfidence: GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE,
@@ -5054,7 +5061,7 @@ Binance User Data WebSocket: ${FUTURES_USER_STREAM_ENABLED
       ? `ON (fill debounce=${FUTURES_USER_STREAM_RECONCILE_DEBOUNCE_MS}ms, REST reconciliation retained)`
       : 'OFF'}
 Smart Range Advisor (Gemini): ${GEMINI_RANGE_ADVISOR_ENABLED
-      ? `ON (model=${GEMINI_MODEL}, timeframe=${GEMINI_RANGE_ADVISOR_TIMEFRAME} [candle-close aligned], min-range-width=${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}%, applies-to=${GEMINI_RANGE_ADVISOR_APPLY_ON})`
+      ? `ON (model=${GEMINI_MODEL}, accounts=${GEMINI_API_KEYS.length}, timeframe=${GEMINI_RANGE_ADVISOR_TIMEFRAME} [candle-close aligned], min-range-width=${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}%, applies-to=${GEMINI_RANGE_ADVISOR_APPLY_ON})`
       : 'OFF'}
 Multi-timeframe Fibonacci: ${FIBONACCI_RANGE_ADVISOR_ENABLED
       ? `ON (timeframes=${FIBONACCI_RANGE_ADVISOR_TIMEFRAMES.join(',')}, min-range-width=${FIBONACCI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}%, trailing=${FIBONACCI_RANGE_ADVISOR_ALLOW_TRAILING ? 'allowed' : 'paused while active'})`
@@ -5069,7 +5076,7 @@ Adaptive Risk State Machine: ${ADAPTIVE_RISK_STATE_MACHINE_ENABLED
       ? `ON (${ADAPTIVE_RISK_STATE_MACHINE_MODE}; caution-exposure=${ADAPTIVE_RISK_STATE_MACHINE_CAUTION_EXPOSURE_PCT}%, risk-exposure=${ADAPTIVE_RISK_STATE_MACHINE_RISK_EXPOSURE_PCT}%, loss=${ADAPTIVE_RISK_STATE_MACHINE_LOSS_WARNING_PCT}/${ADAPTIVE_RISK_STATE_MACHINE_LOSS_RISK_OFF_PCT}%, liquidation=${ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_WARNING_PCT}/${ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_CRITICAL_PCT}%)`
       : 'OFF'}
 Gemini Adaptive Monitor: ${GEMINI_ADAPTIVE_MONITOR_ENABLED
-      ? `ON (model=${GEMINI_MODEL}, interval=${GEMINI_ADAPTIVE_MONITOR_INTERVAL_MS / MINUTE_MS}m, min-confidence=${GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE}, queue=${GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS}ms, attempts=${GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS}; non-blocking)`
+      ? `ON (model=${GEMINI_MODEL}, accounts=${GEMINI_API_KEYS.length}, interval=${GEMINI_ADAPTIVE_MONITOR_INTERVAL_MS / MINUTE_MS}m, min-confidence=${GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE}, queue=${GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS}ms, attempts=${GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS}; non-blocking)`
       : 'OFF'}
 Adaptive Supervisor Outcome Journal: ${ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED
       ? `ON (${ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_MODE}; outcomes=4h/24h; observation only)`

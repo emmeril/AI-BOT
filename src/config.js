@@ -161,6 +161,7 @@ const FIBONACCI_RANGE_ADVISOR_STATE_PATH = path.resolve(
 // ------------------------------
 const GEMINI_RANGE_ADVISOR_ENABLED = Config.boolean('GEMINI_RANGE_ADVISOR_ENABLED', false);
 const GEMINI_API_KEY = Config.get('GEMINI_API_KEY', '');
+const GEMINI_API_KEYS = [...new Set([GEMINI_API_KEY, ...Config.list('GEMINI_API_KEYS', '')].filter(Boolean))];
 const GEMINI_MODEL = Config.get('GEMINI_MODEL', 'gemini-2.5-flash');
 const GEMINI_API_BASE_URL = Config.get(
   'GEMINI_API_BASE_URL',
@@ -388,7 +389,9 @@ function validateRuntimeConfiguration() {
     errors.push('TELEGRAM_ENABLED=true is required when Telegram status reports or commands are enabled');
   }
   if (GEMINI_RANGE_ADVISOR_ENABLED) {
-    if (!GEMINI_API_KEY) errors.push('GEMINI_API_KEY is required when GEMINI_RANGE_ADVISOR_ENABLED=true');
+    if (!GEMINI_API_KEYS.length) {
+      errors.push('GEMINI_API_KEY or GEMINI_API_KEYS is required when GEMINI_RANGE_ADVISOR_ENABLED=true');
+    }
     requirePositive('GEMINI_RANGE_ADVISOR_CANDLE_LIMIT', GEMINI_RANGE_ADVISOR_CANDLE_LIMIT);
     requirePositive('GEMINI_RANGE_ADVISOR_TIMEOUT_MS', GEMINI_RANGE_ADVISOR_TIMEOUT_MS);
     requireNonNegative('GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS', GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS);
@@ -472,6 +475,7 @@ module.exports = {
   FIBONACCI_RANGE_ADVISOR_STATE_PATH,
   GEMINI_RANGE_ADVISOR_ENABLED,
   GEMINI_API_KEY,
+  GEMINI_API_KEYS,
   GEMINI_MODEL,
   GEMINI_API_BASE_URL,
   GEMINI_RANGE_ADVISOR_TIMEFRAME,

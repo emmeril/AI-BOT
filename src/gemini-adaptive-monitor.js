@@ -1,4 +1,9 @@
 const https = require('https');
+const {
+  GeminiApiKeyPool,
+  createGeminiHttpError,
+  isGeminiDailyQuotaError,
+} = require('./gemini-api-keys');
 
 const VALID_PROFILES = new Set(['BULLISH', 'SIDEWAYS', 'BEARISH', 'RISK_OFF']);
 const VALID_MARKET_REGIMES = new Set(['BULLISH', 'SIDEWAYS', 'BEARISH', 'RISK_OFF']);
@@ -52,6 +57,7 @@ class GeminiRequestQueue {
 }
 
 function isTransientGeminiError(error) {
+  if (isGeminiDailyQuotaError(error)) return false;
   const statusCode = Number(error?.statusCode);
   if (statusCode === 429 || statusCode >= 500) return true;
   if (TRANSIENT_NETWORK_CODES.has(error?.code)) return true;
@@ -325,11 +331,7 @@ function requestGemini({ apiKey, baseUrl, model, timeoutMs, prompt }) {
       response.on('data', chunk => { raw += chunk; });
       response.on('end', () => {
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          const error = new Error(`Gemini API returned HTTP ${response.statusCode}: ${raw.slice(0, 300)}`);
-          error.statusCode = response.statusCode;
-          const retryAfter = Number(response.headers?.['retry-after']);
-          if (Number.isFinite(retryAfter) && retryAfter >= 0) error.retryAfterMs = retryAfter * 1000;
-          reject(error);
+          reject(createGeminiHttpError(response.statusCode, raw, response.headers));
           return;
         }
         try {
@@ -374,6 +376,11 @@ class GeminiAdaptiveMonitor {
     this.inFlight = new Map();
     this.provider = options.provider || (input => requestGemini(input));
     this.sleep = options.sleep || sleep;
+    this.apiKeyPool = options.apiKeyPool || new GeminiApiKeyPool({
+      apiKey: this.options.apiKey,
+      apiKeys: this.options.apiKeys,
+      now: options.keyPoolNow,
+    });
     this.requestQueue = options.requestQueue || new GeminiRequestQueue({
       minimumIntervalMs: this.options.minimumRequestIntervalMs,
       jitterMs: this.options.requestJitterMs,
@@ -384,7 +391,7 @@ class GeminiAdaptiveMonitor {
   }
 
   isEnabled() {
-    return Boolean(this.options.enabled && this.options.apiKey);
+    return Boolean(this.options.enabled && this.apiKeyPool.size);
   }
 
   getDecision(symbol) {
@@ -401,7 +408,9 @@ class GeminiAdaptiveMonitor {
     let lastError;
     for (let attempt = 1; attempt <= maximum; attempt++) {
       try {
-        const raw = await this.requestQueue.enqueue(() => this.provider(input));
+        const raw = await this.requestQueue.enqueue(() =>
+          this.apiKeyPool.run(apiKey => this.provider({ ...input, apiKey }))
+        );
         return { raw, attempts: attempt };
       } catch (error) {
         lastError = error;
@@ -444,7 +453,6 @@ class GeminiAdaptiveMonitor {
     const task = (async () => {
       try {
         const { raw, attempts } = await this.requestWithRetry({
-          apiKey: this.options.apiKey,
           baseUrl: this.options.baseUrl,
           model: this.options.model,
           timeoutMs: this.options.timeoutMs,

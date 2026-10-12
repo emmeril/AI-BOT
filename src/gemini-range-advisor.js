@@ -2,7 +2,7 @@ const fs = require('fs');
 const https = require('https');
 const {
   GEMINI_RANGE_ADVISOR_ENABLED,
-  GEMINI_API_KEY,
+  GEMINI_API_KEYS,
   GEMINI_MODEL,
   GEMINI_API_BASE_URL,
   GEMINI_RANGE_ADVISOR_TIMEFRAME,
@@ -19,6 +19,7 @@ const {
 } = require('./config');
 const { AtomicFileWriter } = require('./atomic-file-writer');
 const { retry, roundNumber, isPlainObject, withTimeout } = require('./utils');
+const { GeminiApiKeyPool, createGeminiHttpError } = require('./gemini-api-keys');
 
 //
 // Re-evaluated every cycle (cheap local checks), but only actually calls the
@@ -93,6 +94,7 @@ class TechnicalIndicators {
 class GeminiRangeAdvisor {
   constructor(exchange) {
     this.exchange = exchange;
+    this.apiKeyPool = new GeminiApiKeyPool({ apiKeys: GEMINI_API_KEYS });
     this.cache = this.loadCache();
   }
 
@@ -112,7 +114,7 @@ class GeminiRangeAdvisor {
   }
 
   isEnabled() {
-    return GEMINI_RANGE_ADVISOR_ENABLED && Boolean(GEMINI_API_KEY);
+    return GEMINI_RANGE_ADVISOR_ENABLED && this.apiKeyPool.size > 0;
   }
 
   /**
@@ -248,14 +250,14 @@ Respond with ONLY a single valid JSON object, no markdown fences, no commentary,
     // logged by default infra and is Google's documented alternative to ?key=.
     const url = `${GEMINI_API_BASE_URL}/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
-    const text = await withTimeout(
+    const text = await this.apiKeyPool.run(apiKey => withTimeout(
       new Promise((resolve, reject) => {
         const req = https.request(url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(payload),
-            'x-goog-api-key': GEMINI_API_KEY,
+            'x-goog-api-key': apiKey,
           },
         }, response => {
           let raw = '';
@@ -263,7 +265,7 @@ Respond with ONLY a single valid JSON object, no markdown fences, no commentary,
           response.on('data', chunk => { raw += chunk; });
           response.on('end', () => {
             if (response.statusCode < 200 || response.statusCode >= 300) {
-              reject(new Error(`Gemini API returned HTTP ${response.statusCode}: ${raw.slice(0, 300)}`));
+              reject(createGeminiHttpError(response.statusCode, raw, response.headers));
               return;
             }
             try {
@@ -285,7 +287,7 @@ Respond with ONLY a single valid JSON object, no markdown fences, no commentary,
       }),
       GEMINI_RANGE_ADVISOR_TIMEOUT_MS,
       `Gemini API call timed out after ${GEMINI_RANGE_ADVISOR_TIMEOUT_MS}ms`
-    );
+    ));
 
     const cleaned = text.replace(/```json|```/g, '').trim();
     let parsed;

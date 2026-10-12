@@ -158,6 +158,33 @@ test('Gemini monitor retries transient errors and not permanent HTTP errors', as
   assert.equal(rejected.source, 'GEMINI_ERROR');
 });
 
+test('Gemini monitor changes project key when daily quota is exhausted', async () => {
+  const calls = [];
+  const monitor = new GeminiAdaptiveMonitor({
+    enabled: true,
+    apiKeys: ['account-a', 'account-b'],
+    maxAttempts: 3,
+    minimumRequestIntervalMs: 0,
+    requestJitterMs: 0,
+    provider: async input => {
+      calls.push(input.apiKey);
+      if (input.apiKey === 'account-a') {
+        const error = new Error('daily quota exhausted');
+        error.statusCode = 429;
+        error.dailyQuotaExceeded = true;
+        error.retryAfterMs = 60_000;
+        throw error;
+      }
+      return { profile: 'SIDEWAYS', confidence: 0.8, reasoning: 'ok', riskFactors: [] };
+    },
+  });
+
+  const decision = await monitor.refresh('A', {}, 1000);
+  assert.deepEqual(calls, ['account-a', 'account-b']);
+  assert.equal(decision.source, 'GEMINI');
+  assert.equal(decision.attempts, 1);
+});
+
 test('Gemini monitor uses the last accepted decision during a temporary outage', async () => {
   let shouldFail = false;
   const monitor = new GeminiAdaptiveMonitor({
@@ -192,6 +219,7 @@ test('Gemini monitor uses the last accepted decision during a temporary outage',
 
 test('Gemini transient-error detection covers rate limits, server errors and timeouts', () => {
   assert.equal(isTransientGeminiError({ statusCode: 429 }), true);
+  assert.equal(isTransientGeminiError({ statusCode: 429, dailyQuotaExceeded: true }), false);
   assert.equal(isTransientGeminiError({ statusCode: 503 }), true);
   assert.equal(isTransientGeminiError(new Error('request timed out')), true);
   assert.equal(isTransientGeminiError({ statusCode: 400 }), false);

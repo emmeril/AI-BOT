@@ -364,6 +364,7 @@ ADAPTIVE_SUPERVISOR_LEARNING_CANDIDATE_FILE=adaptive-supervisor-policy-candidate
 ADAPTIVE_SUPERVISOR_LEARNING_POLICY_FILE=adaptive-supervisor-learning-policy.json
 ADAPTIVE_SUPERVISOR_LEARNING_HISTORY_FILE=adaptive-supervisor-policy-history.jsonl
 GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_API_KEYS=second_project_key,third_project_key
 GEMINI_MODEL=gemini-3.1-flash-lite
 ```
 
@@ -373,7 +374,7 @@ Gunakan `ADAPTIVE_RISK_STATE_MACHINE_MODE=SHADOW` untuk observasi awal. Dalam mo
 
 Gemini menerima ringkasan arah Fibonacci, volatilitas, exposure, posisi, liquidation price, funding, fee, dan PnL grid. Request berjalan non-blocking: order loop tidak menunggu respons Gemini. Respons memakai structured JSON, divalidasi terhadap empat profil yang diizinkan, dan baru diterapkan pada siklus berikutnya. Timeout, respons invalid, atau confidence rendah otomatis memakai klasifikasi deterministik.
 
-Semua request Gemini Adaptive Monitor melewati satu antrean agar beberapa simbol tidak mengirim burst bersamaan. HTTP `429`, error server `5xx`, timeout, dan error jaringan sementara dicoba ulang dengan exponential backoff. Jika seluruh percobaan gagal, keputusan accepted terakhir masih boleh dipakai sampai melewati stale TTL; setelah itu supervisor kembali ke klasifikasi deterministik.
+Semua request Gemini Adaptive Monitor melewati satu antrean agar beberapa simbol tidak mengirim burst bersamaan. `GEMINI_API_KEY` tetap menjadi key utama. Key tambahan dari project Google lain dapat ditulis sebagai daftar dipisahkan koma di `GEMINI_API_KEYS`. Saat satu project mencapai kuota harian, request yang sama langsung mencoba project berikutnya dan project yang habis kuota ditahan sampai waktu reset yang dikirim Gemini. HTTP `429` jangka pendek, error server `5xx`, timeout, dan error jaringan sementara tetap dicoba ulang dengan exponential backoff. Jika seluruh project gagal, keputusan accepted terakhir masih boleh dipakai sampai melewati stale TTL; setelah itu supervisor kembali ke klasifikasi deterministik.
 
 Decision Scorecard memakai request Gemini Adaptive Monitor yang sama, jadi tidak menambah jumlah request API. Gemini mengembalikan `marketRegime`, `riskScore` (0-100), `buyIntensity` (0-1), `spacingMultiplier` (0.75-2), masa berlaku, dan sinyal invalidasi. Nilai ini menjadi saran terstruktur untuk Supervisor dan tidak mengendalikan order secara langsung.
 
@@ -410,13 +411,15 @@ Aktifkan dengan:
 ```env
 GEMINI_RANGE_ADVISOR_ENABLED=true
 GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_API_KEYS=second_project_key,third_project_key
 ```
 
 Advisor mengambil candle OHLCV, menghitung indikator teknikal lokal, lalu meminta Gemini menyarankan `lower`, `upper`, dan opsional `levels` untuk harga order grid. Rekomendasi hanya dipakai jika confidence memenuhi threshold dan range masih lolos safety clamp. Jika Gemini mengirim `levels`, jumlahnya harus tepat `GRID_COUNT + 1`, berurutan naik dari `lower` ke `upper`, tanpa duplikat, dan tetap distinct setelah precision exchange; kalau tidak valid bot fallback ke level lokal dari range.
 
 Range advisor ini terpisah dari Gemini Adaptive Monitor. Biarkan `GEMINI_RANGE_ADVISOR_ENABLED=false` jika Gemini hanya boleh menentukan profil risiko BUY dan Fibonacci tetap menjadi sumber range.
 
-- `GEMINI_API_KEY`: API key Gemini. Wajib jika advisor aktif.
+- `GEMINI_API_KEY`: API key Gemini utama. Untuk kompatibilitas, konfigurasi satu key tetap didukung.
+- `GEMINI_API_KEYS`: key tambahan dari project Google yang berbeda, dipisahkan koma. Jangan masukkan key yang sama dua kali.
 - `GEMINI_MODEL`: model Gemini yang dipakai.
 - `GEMINI_API_BASE_URL`: base URL Gemini API.
 - `GEMINI_RANGE_ADVISOR_TIMEFRAME`: timeframe OHLCV untuk konteks analisis. Advisor hanya melakukan request setelah candle baru untuk timeframe ini close, bukan berdasarkan interval rolling.
