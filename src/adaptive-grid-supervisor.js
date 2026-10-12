@@ -308,6 +308,11 @@ function classificationWithMonitor(analysis, exposureRatio, options = {}, monito
       ...deterministic,
       source: 'DETERMINISTIC_SAFETY',
       deterministicProfile: deterministic.profile,
+      learning: {
+        policyVersion: options.learningPolicy?.version || 'default-v1',
+        usedGemini: false,
+        reason: 'deterministic_safety',
+      },
     };
   }
   const acceptedProfiles = options.skipLegacySafety
@@ -318,6 +323,34 @@ function classificationWithMonitor(analysis, exposureRatio, options = {}, monito
       ...deterministic,
       source: 'DETERMINISTIC',
       deterministicProfile: deterministic.profile,
+      learning: {
+        policyVersion: options.learningPolicy?.version || 'default-v1',
+        usedGemini: false,
+        reason: 'gemini_unavailable_or_rejected',
+      },
+    };
+  }
+  const learningPolicy = options.learningPolicy || {};
+  const alignment = monitorDecision.profile === deterministic.profile ? 'ALIGNED' : 'CONFLICT';
+  const configuredThreshold = alignment === 'ALIGNED'
+    ? Number(learningPolicy.alignedMinConfidence ?? 0.6)
+    : Number(learningPolicy.conflictMinConfidence ?? 0.6);
+  const learnedThreshold = Number.isFinite(configuredThreshold) ? configuredThreshold : 0.6;
+  const monitorConfidence = Number(monitorDecision.confidence);
+  if (!Number.isFinite(monitorConfidence) || monitorConfidence < learnedThreshold) {
+    return {
+      ...deterministic,
+      reasons: [...deterministic.reasons, `gemini_below_${alignment.toLowerCase()}_threshold`],
+      source: 'LEARNING_POLICY',
+      deterministicProfile: deterministic.profile,
+      learning: {
+        policyVersion: learningPolicy.version || 'default-v1',
+        alignment,
+        threshold: round(learnedThreshold),
+        confidence: round(monitorConfidence),
+        usedGemini: false,
+        reason: 'confidence_below_learned_threshold',
+      },
     };
   }
   return {
@@ -329,6 +362,14 @@ function classificationWithMonitor(analysis, exposureRatio, options = {}, monito
     features: deterministic.features,
     source: 'GEMINI',
     deterministicProfile: deterministic.profile,
+    learning: {
+      policyVersion: learningPolicy.version || 'default-v1',
+      alignment,
+      threshold: round(learnedThreshold),
+      confidence: round(monitorConfidence),
+      usedGemini: true,
+      reason: 'confidence_passed_learned_threshold',
+    },
   };
 }
 
@@ -369,6 +410,7 @@ class AdaptiveGridSupervisor {
     now = Date.now(),
     signalId,
     monitorDecision = null,
+    learningPolicy = null,
   } = {}) {
     if (!analysis) return null;
     const state = this.getState(symbol);
@@ -394,6 +436,7 @@ class AdaptiveGridSupervisor {
       {
         ...this.options,
         skipLegacySafety: riskStateMachineEnabled && riskStateMachineMode === 'LIVE',
+        learningPolicy,
       },
       monitorDecision
     );
@@ -436,6 +479,7 @@ class AdaptiveGridSupervisor {
       exposurePct: round(Number(exposureRatio) * 100, 2),
       decisionSource: classified.source,
       deterministicProfile: classified.deterministicProfile,
+      learning: classified.learning || null,
       riskStateMachineMode: riskStateMachineEnabled ? riskStateMachineMode : 'OFF',
       riskState: riskDecision?.state || null,
       riskTargetState: riskDecision?.targetState || null,

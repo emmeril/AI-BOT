@@ -123,6 +123,26 @@ test('accepted Gemini monitoring drives the adaptive profile', () => {
   assert.equal(result.gemini.scorecard.riskScore, 70);
 });
 
+test('learned trust policy falls back to Fibonacci when conflicting Gemini confidence is too low', () => {
+  const supervisor = new AdaptiveGridSupervisor({ profileConfirmations: 1, cooldownMs: 0 });
+  const result = supervisor.evaluate('TEST', {
+    analysis: analysis('BEARISH'),
+    now: 1,
+    signalId: 'learned-gate',
+    monitorDecision: { accepted: true, profile: 'BULLISH', confidence: 0.7, riskFactors: [] },
+    learningPolicy: {
+      version: 'learned-test',
+      alignedMinConfidence: 0.6,
+      conflictMinConfidence: 0.8,
+    },
+  });
+
+  assert.equal(result.profile, 'BEARISH');
+  assert.equal(result.decisionSource, 'LEARNING_POLICY');
+  assert.equal(result.learning.usedGemini, false);
+  assert.equal(result.learning.threshold, 0.8);
+});
+
 test('deterministic risk guard overrides a bullish Gemini classification', () => {
   const supervisor = new AdaptiveGridSupervisor({ profileConfirmations: 1, cooldownMs: 0 });
   const result = supervisor.evaluate('TEST', {

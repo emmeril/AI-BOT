@@ -168,6 +168,7 @@ function decisionSnapshot(engine, symbol, symState, orders, position) {
       profile: adaptive?.profile || 'SIDEWAYS',
       rawProfile: adaptive?.rawProfile || null,
       source: adaptive?.decisionSource || 'PENDING',
+      learning: adaptive?.learning || null,
       changed: Boolean(adaptive?.changed),
       candidateCount: numberOrZero(adaptive?.candidateCount),
       confirmationsRequired: numberOrZero(adaptive?.confirmationsRequired || process.env.ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS),

@@ -344,6 +344,19 @@ ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED=true
 ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_MODE=SHADOW
 ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_LOG_FILE=adaptive-supervisor-outcomes.jsonl
 ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE=adaptive-supervisor-outcomes-state.json
+ADAPTIVE_SUPERVISOR_LEARNING_ENABLED=true
+ADAPTIVE_SUPERVISOR_LEARNING_AUTO_APPLY=true
+ADAPTIVE_SUPERVISOR_LEARNING_INTERVAL_MINUTES=60
+ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES=30
+ADAPTIVE_SUPERVISOR_LEARNING_VALIDATION_RATIO=0.30
+ADAPTIVE_SUPERVISOR_LEARNING_MIN_ACCURACY=0.55
+ADAPTIVE_SUPERVISOR_LEARNING_MIN_IMPROVEMENT=0.03
+ADAPTIVE_SUPERVISOR_LEARNING_HORIZON_HOURS=4
+ADAPTIVE_SUPERVISOR_LEARNING_EPISODE_GAP_MINUTES=120
+ADAPTIVE_SUPERVISOR_LEARNING_MOVE_THRESHOLD_PCT=0.50
+ADAPTIVE_SUPERVISOR_LEARNING_REPORT_FILE=adaptive-supervisor-learning-report.json
+ADAPTIVE_SUPERVISOR_LEARNING_CANDIDATE_FILE=adaptive-supervisor-policy-candidate.json
+ADAPTIVE_SUPERVISOR_LEARNING_POLICY_FILE=adaptive-supervisor-learning-policy.json
 GEMINI_API_KEY=your_gemini_api_key_here
 GEMINI_MODEL=gemini-3.1-flash-lite
 ```
@@ -361,6 +374,12 @@ Decision Scorecard memakai request Gemini Adaptive Monitor yang sama, jadi tidak
 Adaptive Supervisor Outcome Journal mencatat kesimpulan akhir Supervisor, bukan hanya saran Gemini. Setiap event keputusan berisi ringkasan Fibonacci, saran dan scorecard Gemini, sumber keputusan, profil final, safety override, exposure, serta BUY weight dan spacing yang benar-benar dipilih Supervisor. Harga pada horizon 4 jam dan 24 jam kemudian dicatat sebagai event outcome.
 
 Mode jurnal yang didukung saat ini hanya `SHADOW`: jurnal mengamati keputusan Supervisor tanpa mengubah order, leverage, SELL exit, modal, atau hard safety guard. Pending outcome dipulihkan dari `ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE` setelah restart.
+
+Adaptive Supervisor Learning menggabungkan keputusan berulang menjadi episode agar satu kondisi pasar tidak dihitung berkali-kali. Laporan memisahkan akurasi 4 jam dan 24 jam berdasarkan profil final, sumber keputusan, keselarasan Gemini dengan Fibonacci, dan simbol.
+
+Learner mengoptimalkan dua aturan saja: confidence minimum saat Gemini searah dengan Fibonacci dan confidence minimum saat keduanya bertentangan. Kandidat dilatih pada bagian awal episode dan diuji pada holdout episode terbaru. Kebijakan baru hanya dipromosikan ketika minimal 30 episode lengkap tersedia, akurasi validasi minimal 55%, dan peningkatannya minimal 3 poin persentase dibanding kebijakan aktif.
+
+`ADAPTIVE_SUPERVISOR_LEARNING_AUTO_APPLY=true` membuat kebijakan yang lulus langsung aktif tanpa restart. Confidence tetap dibatasi pada 0.60-0.90 dan threshold konflik tidak boleh lebih rendah dari threshold searah. Learning tidak memiliki akses untuk mengubah modal, leverage, exposure cap, SELL exit, liquidation guard, risk state, atau kill switch. Jika file kebijakan rusak atau berada di luar batas, Supervisor kembali ke kebijakan default.
 
 - `GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS`: jarak minimum awal request dalam antrean. Default `5000` ms atau maksimal sekitar 12 request/menit.
 - `GEMINI_ADAPTIVE_MONITOR_REQUEST_JITTER_MS`: jitter tambahan agar request tidak selalu jatuh pada detik yang sama. Default `250` ms.

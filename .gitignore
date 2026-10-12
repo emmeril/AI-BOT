@@ -31,4 +31,7 @@ gemini-decision-scorecard-*.jsonl
 gemini-decision-scorecard-state.json
 adaptive-supervisor-outcomes.jsonl
 adaptive-supervisor-outcomes-state.json
+adaptive-supervisor-learning-report.json
+adaptive-supervisor-policy-candidate.json
+adaptive-supervisor-learning-policy.json
 futures.js

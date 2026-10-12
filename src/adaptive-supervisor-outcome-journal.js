@@ -48,6 +48,7 @@ function supervisorSnapshot(decision) {
     cooldownElapsed: Boolean(decision.cooldownElapsed),
     decisionSource: decision.decisionSource,
     deterministicProfile: decision.deterministicProfile,
+    learning: decision.learning || null,
     reasons: Array.isArray(decision.reasons) ? decision.reasons : [],
     exposurePct: decision.exposurePct,
   };

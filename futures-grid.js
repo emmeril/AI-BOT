@@ -17,6 +17,7 @@ const {
 } = require('./src/adaptive-grid-supervisor');
 const { GeminiAdaptiveMonitor } = require('./src/gemini-adaptive-monitor');
 const { AdaptiveSupervisorOutcomeJournal } = require('./src/adaptive-supervisor-outcome-journal');
+const { AdaptiveSupervisorLearner } = require('./src/adaptive-supervisor-learner');
 const { BinanceFuturesUserStream } = require('./src/binance-futures-user-stream');
 const { startFuturesDashboardServer } = require('./src/futures-dashboard-server');
 const {
@@ -309,6 +310,43 @@ const ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_LOG_FILE = Config.get(
 );
 const ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE = Config.get(
   'ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE', 'adaptive-supervisor-outcomes-state.json'
+);
+const ADAPTIVE_SUPERVISOR_LEARNING_ENABLED = Config.boolean('ADAPTIVE_SUPERVISOR_LEARNING_ENABLED', false);
+const ADAPTIVE_SUPERVISOR_LEARNING_AUTO_APPLY = Config.boolean(
+  'ADAPTIVE_SUPERVISOR_LEARNING_AUTO_APPLY', false
+);
+const ADAPTIVE_SUPERVISOR_LEARNING_INTERVAL_MS = Math.max(
+  Config.number('ADAPTIVE_SUPERVISOR_LEARNING_INTERVAL_MINUTES', 60), 1
+) * MINUTE_MS;
+const ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES = Config.number(
+  'ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES', 30
+);
+const ADAPTIVE_SUPERVISOR_LEARNING_VALIDATION_RATIO = Config.number(
+  'ADAPTIVE_SUPERVISOR_LEARNING_VALIDATION_RATIO', 0.3
+);
+const ADAPTIVE_SUPERVISOR_LEARNING_MIN_ACCURACY = Config.number(
+  'ADAPTIVE_SUPERVISOR_LEARNING_MIN_ACCURACY', 0.55
+);
+const ADAPTIVE_SUPERVISOR_LEARNING_MIN_IMPROVEMENT = Config.number(
+  'ADAPTIVE_SUPERVISOR_LEARNING_MIN_IMPROVEMENT', 0.03
+);
+const ADAPTIVE_SUPERVISOR_LEARNING_HORIZON_HOURS = Config.number(
+  'ADAPTIVE_SUPERVISOR_LEARNING_HORIZON_HOURS', 4
+);
+const ADAPTIVE_SUPERVISOR_LEARNING_EPISODE_GAP_MINUTES = Config.number(
+  'ADAPTIVE_SUPERVISOR_LEARNING_EPISODE_GAP_MINUTES', 120
+);
+const ADAPTIVE_SUPERVISOR_LEARNING_MOVE_THRESHOLD_PCT = Config.number(
+  'ADAPTIVE_SUPERVISOR_LEARNING_MOVE_THRESHOLD_PCT', 0.5
+);
+const ADAPTIVE_SUPERVISOR_LEARNING_REPORT_FILE = Config.get(
+  'ADAPTIVE_SUPERVISOR_LEARNING_REPORT_FILE', 'adaptive-supervisor-learning-report.json'
+);
+const ADAPTIVE_SUPERVISOR_LEARNING_CANDIDATE_FILE = Config.get(
+  'ADAPTIVE_SUPERVISOR_LEARNING_CANDIDATE_FILE', 'adaptive-supervisor-policy-candidate.json'
+);
+const ADAPTIVE_SUPERVISOR_LEARNING_POLICY_FILE = Config.get(
+  'ADAPTIVE_SUPERVISOR_LEARNING_POLICY_FILE', 'adaptive-supervisor-learning-policy.json'
 );
 const GEMINI_RANGE_ADVISOR_TIMEFRAME = Config.get('GEMINI_RANGE_ADVISOR_TIMEFRAME', '1h');
 
@@ -739,6 +777,40 @@ function validateRuntimeConfiguration() {
     }
     if (!ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE) {
       errors.push('ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE must not be empty');
+    }
+  }
+  if (ADAPTIVE_SUPERVISOR_LEARNING_ENABLED) {
+    if (!ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED) {
+      errors.push('ADAPTIVE_SUPERVISOR_LEARNING_ENABLED requires ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED=true');
+    }
+    requirePositive('ADAPTIVE_SUPERVISOR_LEARNING_INTERVAL_MINUTES', ADAPTIVE_SUPERVISOR_LEARNING_INTERVAL_MS);
+    requireInteger('ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES', ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES, 10);
+    requirePositive(
+      'ADAPTIVE_SUPERVISOR_LEARNING_EPISODE_GAP_MINUTES',
+      ADAPTIVE_SUPERVISOR_LEARNING_EPISODE_GAP_MINUTES
+    );
+    requirePositive(
+      'ADAPTIVE_SUPERVISOR_LEARNING_MOVE_THRESHOLD_PCT',
+      ADAPTIVE_SUPERVISOR_LEARNING_MOVE_THRESHOLD_PCT
+    );
+    if (!(ADAPTIVE_SUPERVISOR_LEARNING_VALIDATION_RATIO > 0 &&
+        ADAPTIVE_SUPERVISOR_LEARNING_VALIDATION_RATIO < 0.5)) {
+      errors.push('ADAPTIVE_SUPERVISOR_LEARNING_VALIDATION_RATIO must be greater than 0 and below 0.5');
+    }
+    if (!(ADAPTIVE_SUPERVISOR_LEARNING_MIN_ACCURACY >= 0.5 &&
+        ADAPTIVE_SUPERVISOR_LEARNING_MIN_ACCURACY <= 1)) {
+      errors.push('ADAPTIVE_SUPERVISOR_LEARNING_MIN_ACCURACY must be between 0.5 and 1');
+    }
+    if (!(ADAPTIVE_SUPERVISOR_LEARNING_MIN_IMPROVEMENT >= 0 &&
+        ADAPTIVE_SUPERVISOR_LEARNING_MIN_IMPROVEMENT <= 0.5)) {
+      errors.push('ADAPTIVE_SUPERVISOR_LEARNING_MIN_IMPROVEMENT must be between 0 and 0.5');
+    }
+    if (![4, 24].includes(ADAPTIVE_SUPERVISOR_LEARNING_HORIZON_HOURS)) {
+      errors.push('ADAPTIVE_SUPERVISOR_LEARNING_HORIZON_HOURS must be 4 or 24');
+    }
+    if (!ADAPTIVE_SUPERVISOR_LEARNING_REPORT_FILE || !ADAPTIVE_SUPERVISOR_LEARNING_CANDIDATE_FILE ||
+        !ADAPTIVE_SUPERVISOR_LEARNING_POLICY_FILE) {
+      errors.push('Adaptive Supervisor learning file paths must not be empty');
     }
   }
 
@@ -1587,6 +1659,22 @@ class FuturesGridEngine {
       logPath: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_LOG_FILE,
       statePath: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE,
     });
+    this.adaptiveSupervisorLearner = new AdaptiveSupervisorLearner({
+      enabled: ADAPTIVE_SUPERVISOR_LEARNING_ENABLED,
+      autoApply: ADAPTIVE_SUPERVISOR_LEARNING_AUTO_APPLY,
+      intervalMs: ADAPTIVE_SUPERVISOR_LEARNING_INTERVAL_MS,
+      minimumEpisodes: ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES,
+      validationRatio: ADAPTIVE_SUPERVISOR_LEARNING_VALIDATION_RATIO,
+      minimumValidationAccuracy: ADAPTIVE_SUPERVISOR_LEARNING_MIN_ACCURACY,
+      minimumImprovement: ADAPTIVE_SUPERVISOR_LEARNING_MIN_IMPROVEMENT,
+      horizonHours: ADAPTIVE_SUPERVISOR_LEARNING_HORIZON_HOURS,
+      episodeGapMinutes: ADAPTIVE_SUPERVISOR_LEARNING_EPISODE_GAP_MINUTES,
+      moveThresholdPct: ADAPTIVE_SUPERVISOR_LEARNING_MOVE_THRESHOLD_PCT,
+      journalPath: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_LOG_FILE,
+      reportPath: ADAPTIVE_SUPERVISOR_LEARNING_REPORT_FILE,
+      candidatePath: ADAPTIVE_SUPERVISOR_LEARNING_CANDIDATE_FILE,
+      policyPath: ADAPTIVE_SUPERVISOR_LEARNING_POLICY_FILE,
+    });
     this.futuresUserStream = new BinanceFuturesUserStream({
       exchange: this.exchange,
       enabled: FUTURES_USER_STREAM_ENABLED,
@@ -1873,9 +1961,11 @@ class FuturesGridEngine {
 
   async evaluateAdaptiveSupervisor(symbol, analysis, currentPrice = null) {
     try {
-      this.adaptiveSupervisorOutcomeJournal?.observePrice(symbol, currentPrice).catch(error => {
-        console.warn(`[ADAPTIVE-OUTCOME] ${symbol} outcome write failed: ${error.message}`);
-      });
+      this.adaptiveSupervisorOutcomeJournal?.observePrice(symbol, currentPrice)
+        .then(() => this.adaptiveSupervisorLearner?.runIfDue())
+        .catch(error => {
+          console.warn(`[ADAPTIVE-OUTCOME] ${symbol} outcome or learning run failed: ${error.message}`);
+        });
       const exposureRatio = GRID_TOTAL_INVESTMENT_USDT > 0
         ? this.getAllocatedInvestmentUsdt(symbol) / GRID_TOTAL_INVESTMENT_USDT
         : 0;
@@ -1909,13 +1999,16 @@ class FuturesGridEngine {
       const riskSignal = ADAPTIVE_RISK_STATE_MACHINE_ENABLED && ADAPTIVE_RISK_STATE_MACHINE_MODE === 'LIVE'
         ? `|risk:${lossBand}:${liquidationBand}:${riskContext.marginCallActive ? 'margin-call' : 'clear'}`
         : '';
-      const signalId = `${marketSignalId}|gemini:${monitorDecision?.decisionId || 'pending'}${riskSignal}`;
+      const learningPolicy = this.adaptiveSupervisorLearner?.getActivePolicy() || null;
+      const signalId = `${marketSignalId}|gemini:${monitorDecision?.decisionId || 'pending'}` +
+        `|learning:${learningPolicy?.version || 'default-v1'}${riskSignal}`;
       const decision = this.adaptiveGridSupervisor.evaluate(symbol, {
         analysis,
         exposureRatio,
         riskContext,
         signalId,
         monitorDecision,
+        learningPolicy,
       });
       if (!decision) return null;
       this.adaptiveGridDecisions.set(symbol, decision);
@@ -1934,6 +2027,7 @@ class FuturesGridEngine {
       console.log(
         `[${label}] ${symbol} profile=${decision.profile} raw=${decision.rawProfile} source=${decision.decisionSource} ` +
         `changed=${decision.changed} exposure=${decision.exposurePct}% ` +
+        `${decision.learning ? `learning=${decision.learning.policyVersion}:${decision.learning.usedGemini ? 'gemini' : 'fallback'} ` : ''}` +
         `${decision.riskState ? `risk=${decision.riskState}->${decision.riskTargetState} ` : ''}` +
         `buy-weight=${weights.upper}/${weights.middle}/${weights.lower} ` +
         `spacing=${decision.recommendation.spacingMultiplier} investment-cap=${GRID_TOTAL_INVESTMENT_USDT}USDT ` +
@@ -4932,6 +5026,9 @@ Gemini Adaptive Monitor: ${GEMINI_ADAPTIVE_MONITOR_ENABLED
 Adaptive Supervisor Outcome Journal: ${ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED
       ? `ON (${ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_MODE}; outcomes=4h/24h; observation only)`
       : 'OFF'}
+Adaptive Supervisor Learning: ${ADAPTIVE_SUPERVISOR_LEARNING_ENABLED
+      ? `ON (auto-apply=${ADAPTIVE_SUPERVISOR_LEARNING_AUTO_APPLY}; horizon=${ADAPTIVE_SUPERVISOR_LEARNING_HORIZON_HOURS}h; min-episodes=${ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES}; policy=${this.adaptiveSupervisorLearner.getActivePolicy().version})`
+      : 'OFF'}
 `);
     await this.init();
     await this.startUserStream();
@@ -4995,6 +5092,7 @@ module.exports = {
   GeminiRangeAdvisor,
   GeminiAdaptiveMonitor,
   AdaptiveSupervisorOutcomeJournal,
+  AdaptiveSupervisorLearner,
   AIGridValidator,
   TechnicalIndicators,
   FibonacciDirectionAnalyzer,
