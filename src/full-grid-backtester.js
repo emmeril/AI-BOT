@@ -152,7 +152,18 @@ class FullGridBacktester {
     });
   }
 
-  simulate({ symbol, rows, fundingRates = [], start, end, adaptive = false, riskStateMachine = false }) {
+  simulate({
+    symbol,
+    rows,
+    fundingRates = [],
+    start,
+    end,
+    adaptive = false,
+    riskStateMachine = false,
+    monitorDecisionProvider = null,
+    learningPolicyProvider = null,
+    variant = null,
+  }) {
     const options = this.options;
     const adaptiveEnabled = adaptive || riskStateMachine;
     const series = this.prepareSeries(rows);
@@ -379,6 +390,12 @@ class FullGridBacktester {
           riskContext: { unrealizedPnlPct },
           now: evaluationTime,
           signalId: timestamp,
+          monitorDecision: typeof monitorDecisionProvider === 'function'
+            ? monitorDecisionProvider({ symbol, timestamp: evaluationTime, analysis: lastAnalysis })
+            : null,
+          learningPolicy: typeof learningPolicyProvider === 'function'
+            ? learningPolicyProvider({ symbol, timestamp: evaluationTime, analysis: lastAnalysis })
+            : null,
         });
         metrics.profileSamples[lastDecision.profile]++;
         if (lastDecision.riskState) metrics.riskStateSamples[lastDecision.riskState]++;
@@ -443,7 +460,7 @@ class FullGridBacktester {
     const durationDays = firstEvaluationAt ? Math.max(0, (Math.min(end, rows.at(-1)[0] + BASE_TIMEFRAME_MS) - firstEvaluationAt) / 86_400_000) : 0;
     return {
       symbol,
-      variant: riskStateMachine ? 'risk-state-machine' : adaptive ? 'adaptive' : 'baseline',
+      variant: variant || (riskStateMachine ? 'risk-state-machine' : adaptive ? 'adaptive' : 'baseline'),
       start: firstEvaluationAt ? new Date(firstEvaluationAt).toISOString() : null,
       end: new Date(end).toISOString(),
       durationDays: round(durationDays, 2),

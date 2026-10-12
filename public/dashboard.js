@@ -5,11 +5,10 @@
   const MOTION_STORAGE_KEY = 'grid-flow-motion';
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   const FLOW_EDGES = [
-    ['market', 'fibonacci'], ['market', 'gemini'],
-    ['fibonacci', 'supervisor'], ['gemini', 'supervisor'],
+    ['market', 'fibonacci'], ['fibonacci', 'supervisor'],
     ['supervisor', 'buy'], ['buy', 'position'], ['position', 'sell'],
   ];
-  const FLOW_STAGES = [['market'], ['fibonacci', 'gemini'], ['supervisor'], ['buy'], ['position'], ['sell']];
+  const FLOW_STAGES = [['market'], ['fibonacci'], ['supervisor'], ['buy'], ['position'], ['sell']];
   const byId = id => document.getElementById(id);
   const num = value => Number.isFinite(Number(value)) ? Number(value) : 0;
   const nullable = value => value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Number(value);
@@ -163,67 +162,6 @@
     })[String(profile || '').toUpperCase()] || 'Keputusan adaptive belum tersedia.';
   }
 
-  function confidence(value, digits = 0) {
-    const numeric = nullable(value);
-    return numeric === null ? 'N/A' : percent(numeric * 100, digits);
-  }
-  function learningStatusLabel(status) {
-    return ({
-      OFF: 'NONAKTIF',
-      PENDING: 'MENUNGGU EVALUASI',
-      WAITING_FOR_SAMPLES: 'MENGUMPULKAN DATA',
-      REJECTED: 'KANDIDAT DITOLAK',
-      ELIGIBLE: 'KANDIDAT LOLOS',
-    })[String(status || '').toUpperCase()] || String(status || 'MENUNGGU').replaceAll('_', ' ');
-  }
-  function learningReason(value) {
-    const normalized = String(value || '');
-    const sampleMatch = normalized.match(/^need_(\d+)_more_(?:(aligned|conflict|post_promotion)_)?episodes$/);
-    if (sampleMatch) {
-      const label = ({ aligned: 'searah', conflict: 'konflik', post_promotion: 'pasca-promosi' })[sampleMatch[2]];
-      return `Perlu ${sampleMatch[1]} episode${label ? ` ${label}` : ''} lagi`;
-    }
-    return ({
-      deterministic_safety: 'Safety deterministik mengambil alih',
-      gemini_unavailable_or_rejected: 'Gemini tidak tersedia atau ditolak',
-      confidence_below_learned_threshold: 'Confidence Gemini di bawah threshold policy',
-      confidence_passed_learned_threshold: 'Confidence Gemini melewati threshold policy',
-      candidate_matches_active_policy: 'Kandidat sama dengan policy aktif',
-      validation_accuracy_below_minimum: 'Akurasi validasi belum memenuhi batas',
-      validation_improvement_below_minimum: 'Peningkatan validasi belum memenuhi batas',
-      active_policy_underperforms_previous_policy: 'Policy aktif tertinggal dari policy sebelumnya',
-    })[value] || normalized.replaceAll('_', ' ');
-  }
-  function rollbackLabel(learning) {
-    if (!learning.rollbackEnabled) return 'Nonaktif';
-    const rollback = learning.rollback;
-    if (!rollback || rollback.status === 'INACTIVE') return 'Menunggu policy hasil belajar';
-    if (rollback.status === 'WAITING_FOR_SAMPLES') {
-      return `${num(rollback.episodes)} / ${num(rollback.minimumEpisodes)} episode pasca-promosi`;
-    }
-    if (rollback.status === 'HEALTHY') return `Sehat · ${num(rollback.episodes)} episode`;
-    if (rollback.status === 'ROLLBACK_REQUIRED') return 'Rollback diperlukan';
-    return String(rollback.status || 'Menunggu').replaceAll('_', ' ');
-  }
-  function learningSummary(learning) {
-    if (!learning.enabled) return 'Adaptive learning tidak aktif. Supervisor tetap menggunakan aturan policy yang tersedia.';
-    const candidate = learning.candidate;
-    if (!candidate) return 'Learning aktif dan menunggu evaluasi pertama dari Outcome Journal.';
-    if (learning.status === 'WAITING_FOR_SAMPLES') {
-      return `Terkumpul ${num(candidate.episodes)} dari ${num(candidate.minimumEpisodes)} episode valid. Policy tidak berubah sebelum batas sampel terpenuhi.`;
-    }
-    if (learning.status === 'ELIGIBLE') {
-      return learning.autoApply
-        ? 'Kandidat terbaru lolos validasi dan auto-apply aktif.'
-        : 'Kandidat terbaru lolos validasi, tetapi auto-apply tidak aktif.';
-    }
-    if (learning.status === 'REJECTED') {
-      const reason = candidate.reasons?.map(learningReason).join('; ');
-      return `Kandidat terbaru tidak menggantikan policy aktif${reason ? `: ${reason}.` : '.'}`;
-    }
-    return 'Learning aktif dan policy yang tervalidasi akan diterapkan pada siklus Supervisor berikutnya.';
-  }
-
   function renderOverview() {
     const data = state.data;
     const adaptive = intel().adaptive || {};
@@ -246,7 +184,6 @@
     const data = state.data;
     byId('flow-map').dataset.running = String(Boolean(data.running));
     const fib = intel().fibonacci || {};
-    const gemini = intel().gemini || {};
     const adaptive = intel().adaptive || {};
     const execution = intel().execution || {};
     const position = data.futures?.position;
@@ -255,8 +192,6 @@
     const coverage = execution.sellCoveragePct;
     const marketAvailable = Boolean(data.running && num(data.market?.price) > 0);
     const fibonacciAvailable = Boolean(marketAvailable && fib.available);
-    const geminiError = Boolean(gemini.error);
-    const geminiAvailable = Boolean(marketAvailable && gemini.available && !geminiError);
     const adaptiveAvailable = Boolean(data.running && adaptive.available);
     const safetyOverride = Boolean(adaptiveAvailable && (String(adaptive.profile).toUpperCase() === 'RISK_OFF' || String(adaptive.source).toUpperCase().includes('SAFETY')));
     const adaptiveBuyAvailable = Boolean(adaptiveAvailable && String(adaptive.mode).toUpperCase() === 'LIVE');
@@ -266,22 +201,18 @@
     const sellAvailable = Boolean(positionAvailable && !sellNeedsAttention && coverage !== null && coverage !== undefined && num(coverage) >= 99.999);
     setNode('market', 'accent', String(data.mode || 'LIVE').toUpperCase(), `${data.market?.priceText || price(data.market?.price)} ${quote()}`, `${signed(data.market?.changePercent, 2)}% dalam 24 jam`);
     setNode('fibonacci', toneFor(fib.direction), fib.direction || 'MENUNGGU', `Score ${fib.score ?? 'N/A'}`, fib.available ? `Applied ${fib.appliedDirection} · conf ${percent(num(fib.confidence) * 100, 1)}` : 'Belum ada analisis');
-    setNode('gemini', gemini.error ? 'negative' : toneFor(gemini.profile), gemini.profile || (gemini.enabled ? 'MENUNGGU' : 'OFF'), `Confidence ${gemini.confidence == null ? 'N/A' : percent(num(gemini.confidence) * 100, 0)}`, gemini.error || gemini.model || 'Belum ada keputusan');
     setNode('supervisor', toneFor(adaptive.profile), adaptive.profile || 'MENUNGGU', `Exposure ${percent(adaptive.exposurePct)}`, `${adaptive.source || 'PENDING'} · spacing ${adaptive.recommendation?.spacingMultiplier ?? 'N/A'}`);
     setNode('buy', 'positive', `${num(data.orders?.buyCount)} ORDER`, `${money(data.orders?.buyValue, 2)} ${quote()}`, `Bobot atas/tengah/bawah ${weightText}`);
     setNode('position', position ? (num(data.profit?.unrealizedPnl) >= 0 ? 'positive' : 'negative') : 'accent', position ? 'LONG AKTIF' : 'TIDAK ADA POSISI', position ? compact(position.contracts) : '0', `PnL berjalan ${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`);
     setNode('sell', coverage !== null && coverage !== undefined && coverage < 99.999 ? 'negative' : 'positive', `${num(data.orders?.sellCount)} ORDER`, coverage == null ? 'Coverage N/A' : `Coverage ${percent(coverage, 0)}`, execution.uncovered > 0 ? `${compact(execution.uncovered)} kontrak belum tertutup` : 'Tidak ada posisi tanpa exit');
     setFlowNodeState('market', marketAvailable ? 'active' : 'waiting');
     setFlowNodeState('fibonacci', fibonacciAvailable ? 'active' : 'waiting');
-    setFlowNodeState('gemini', geminiError ? 'error' : geminiAvailable ? 'active' : 'waiting');
     setFlowNodeState('supervisor', safetyOverride ? 'safety' : adaptiveAvailable ? 'active' : 'waiting');
     setFlowNodeState('buy', safetyOverride && adaptiveBuyAvailable ? 'safety' : buyAvailable ? 'active' : 'waiting');
     setFlowNodeState('position', positionAvailable ? 'active' : 'waiting');
     setFlowNodeState('sell', sellNeedsAttention ? 'error' : sellAvailable ? 'active' : 'waiting');
     setFlowEdge('market', 'fibonacci', fibonacciAvailable ? 'active' : 'waiting');
-    setFlowEdge('market', 'gemini', geminiError ? 'error' : geminiAvailable ? 'active' : 'waiting');
     setFlowEdge('fibonacci', 'supervisor', fibonacciAvailable && adaptiveAvailable ? 'active' : 'waiting');
-    setFlowEdge('gemini', 'supervisor', geminiError ? 'error' : geminiAvailable && adaptiveAvailable ? 'active' : 'waiting');
     setFlowEdge('supervisor', 'buy', safetyOverride && adaptiveBuyAvailable ? 'safety' : adaptiveBuyAvailable ? 'active' : 'waiting');
     setFlowEdge('buy', 'position', positionAvailable ? 'active' : 'waiting');
     setFlowEdge('position', 'sell', sellNeedsAttention ? 'error' : sellAvailable ? 'active' : 'waiting');
@@ -292,7 +223,6 @@
   function inspectorModel() {
     const data = state.data;
     const fib = intel().fibonacci || {};
-    const gemini = intel().gemini || {};
     const adaptive = intel().adaptive || {};
     const execution = intel().execution || {};
     const position = data.futures?.position;
@@ -301,7 +231,6 @@
     return ({
       market: { title: 'Market feed', status: String(data.mode || 'LIVE').toUpperCase(), summary: 'Ticker dan candle Binance menjadi input harga untuk range, sinyal, dan penempatan level grid.', tags: data.market?.timeframe ? [`Chart ${data.market.timeframe}`] : [], details: [['Harga terakhir', `${data.market?.priceText || price(data.market?.price)} ${quote()}`], ['Perubahan 24 jam', `${signed(data.market?.changePercent, 2)}%`], ['High 24 jam', `${data.market?.highText || price(data.market?.high)} ${quote()}`], ['Low 24 jam', `${data.market?.lowText || price(data.market?.low)} ${quote()}`]] },
       fibonacci: { title: 'Fibonacci direction', status: fib.direction || 'MENUNGGU', summary: fib.available ? `Arah mentah ${fib.direction}. Arah yang diterapkan ke bias level saat ini ${fib.appliedDirection}.` : 'Analisis Fibonacci belum tersedia untuk pair ini.', tags: tfTags, details: [['Score', fib.score ?? 'N/A'], ['Confidence', fib.confidence == null ? 'N/A' : percent(num(fib.confidence) * 100, 1)], ['Alignment', fib.alignment == null ? 'N/A' : percent(num(fib.alignment) * 100, 1)], ['Konfirmasi', `${num(fib.confirmationCount)}/${num(fib.confirmationsRequired)}`], ['Confirmed', fib.confirmedDirection || 'RANGING'], ['Diperbarui', time(fib.generatedAt)]] },
-      gemini: { title: 'Gemini monitor', status: gemini.error ? 'ERROR' : gemini.profile || (gemini.enabled ? 'MENUNGGU' : 'OFF'), summary: gemini.error || gemini.reasoning || (gemini.enabled ? 'Gemini aktif, keputusan pertama belum diterima.' : 'Gemini monitor tidak aktif.'), tags: gemini.riskFactors || [], details: [['Status', gemini.accepted ? 'Accepted' : 'Fallback'], ['Profile', gemini.profile || 'N/A'], ['Confidence', gemini.confidence == null ? 'N/A' : percent(num(gemini.confidence) * 100, 0)], ['Model', gemini.model || 'N/A'], ['Diperbarui', time(gemini.generatedAt)]] },
       supervisor: { title: 'Adaptive supervisor', status: adaptive.profile || 'MENUNGGU', summary: profileCopy(adaptive.profile), tags: adaptive.reasons || [], details: [['Profil aktif', adaptive.profile || 'N/A'], ['Kandidat raw', adaptive.rawProfile || 'N/A'], ['Sumber', adaptive.source || 'PENDING'], ['Exposure', percent(adaptive.exposurePct)], ['Konfirmasi profil', `${num(adaptive.candidateCount)}/${num(adaptive.confirmationsRequired)}`], ['Spacing', adaptive.recommendation?.spacingMultiplier ?? 'N/A'], ['Bobot BUY', weights ? `${weights.upper} / ${weights.middle} / ${weights.lower}` : 'N/A'], ['Mode', adaptive.mode || 'OFF']] },
       buy: { title: 'BUY grid', status: `${num(data.orders?.buyCount)} ORDER AKTIF`, summary: 'Order BUY baru mengikuti profil adaptive. Batas investasi tetap berasal dari konfigurasi pengguna.', tags: weights ? [`Upper ${weights.upper}x`, `Middle ${weights.middle}x`, `Lower ${weights.lower}x`] : [], details: [['Order aktif', num(data.orders?.buyCount)], ['Nilai pending', `${money(data.orders?.buyValue, 4)} ${quote()}`], ['Grid count', num(execution.gridCount) || 'N/A'], ['Investment cap', adaptive.investmentCap > 0 ? `${money(adaptive.investmentCap, 0)} ${quote()}` : 'N/A'], ['Allocated', `${money(adaptive.allocatedInvestment, 4)} ${quote()}`], ['Spacing', adaptive.recommendation?.spacingMultiplier ?? 'N/A']] },
       position: { title: 'LONG position', status: position ? 'AKTIF' : 'KOSONG', summary: position ? 'Posisi LONG berasal dari BUY grid yang sudah terisi. PnL berjalan mengikuti mark price Binance.' : 'Tidak ada kontrak LONG terbuka pada pair ini.', tags: position ? [`${data.futures?.leverage || 0}x`, data.futures?.marginMode || 'N/A', data.futures?.positionSide || 'LONG'] : [], details: [['Kontrak', position ? compact(position.contracts) : '0'], ['Entry', position ? price(position.entryPrice) : 'N/A'], ['Mark', position ? price(position.markPrice) : 'N/A'], ['Likuidasi', position?.liquidationPrice > 0 ? price(position.liquidationPrice) : 'N/A'], ['Margin posisi', `${money(data.futures?.positionMargin, 4)} ${quote()}`], ['ROI posisi', position ? percent(position.roiPct, 2) : 'N/A'], ['PnL berjalan', `${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`]] },
@@ -317,59 +246,6 @@
       const description = document.createElement('dd'); description.textContent = String(value ?? 'N/A');
       item.append(term, description); container.append(item);
     }
-  }
-  function renderLearning() {
-    const learning = intel().learning || {};
-    const adaptiveLearning = intel().adaptive?.learning || {};
-    const candidate = learning.candidate || {};
-    const policy = learning.activePolicy || {};
-    const alignmentCounts = candidate.alignmentCounts || {};
-    const report = learning.report || {};
-    const horizon4h = report.horizons?.['4h'] || {};
-    const horizon24h = report.horizons?.['24h'] || {};
-    const episodes = num(candidate.episodes);
-    const minimumEpisodes = Math.max(0, num(candidate.minimumEpisodes || learning.minimumEpisodes));
-    const progress = minimumEpisodes > 0 ? clamp(episodes / minimumEpisodes * 100, 0, 100) : 0;
-    const status = String(learning.status || (learning.enabled ? 'PENDING' : 'OFF')).toUpperCase();
-    const statusElement = byId('learning-status');
-    text('learning-status', learningStatusLabel(status));
-    statusElement.dataset.state = status === 'ELIGIBLE' ? 'active' : status === 'REJECTED' ? 'rejected' : status === 'OFF' ? 'off' : 'waiting';
-    text('learning-summary', learningSummary({ ...learning, status }));
-    text('learning-progress-label', minimumEpisodes > 0 ? `${episodes} / ${minimumEpisodes}` : 'N/A');
-    byId('learning-meter-fill').style.width = `${progress}%`;
-    byId('learning-meter').setAttribute('aria-valuemax', String(minimumEpisodes || 1));
-    byId('learning-meter').setAttribute('aria-valuenow', String(minimumEpisodes > 0 ? Math.min(episodes, minimumEpisodes) : 0));
-    byId('learning-meter').setAttribute('aria-valuetext', minimumEpisodes > 0
-      ? `${episodes} dari ${minimumEpisodes} episode valid Gemini`
-      : 'Adaptive learning tidak aktif');
-    const confidenceVsThreshold = adaptiveLearning.confidence == null && adaptiveLearning.threshold == null
-      ? 'N/A'
-      : `${confidence(adaptiveLearning.confidence)} / min ${confidence(adaptiveLearning.threshold)}`;
-    const decisionPath = adaptiveLearning.reason === 'deterministic_safety'
-      ? 'Safety override'
-      : adaptiveLearning.usedGemini ? 'Gemini digunakan' : adaptiveLearning.reason ? 'Fallback Fibonacci' : 'N/A';
-    const validationAccuracy = candidate.validation?.candidate?.accuracy;
-    const validationImprovement = candidate.validation?.improvement;
-    renderDefinitionList(byId('learning-facts'), [
-      ['Policy aktif', policy.version || 'N/A'],
-      ['Sumber policy', policy.source || 'N/A'],
-      ['Mode penerapan', learning.autoApply ? 'Otomatis' : 'Manual'],
-      ['Threshold searah', confidence(policy.alignedMinConfidence)],
-      ['Threshold konflik', confidence(policy.conflictMinConfidence)],
-      ['Komposisi episode', `${num(alignmentCounts.aligned)} searah / ${num(alignmentCounts.conflict)} konflik`],
-      ['Minimum holdout', `${num(candidate.minimumValidationEpisodes || learning.minimumValidationEpisodes)} episode`],
-      ['Keputusan pair', decisionPath],
-      ['Alignment pair', adaptiveLearning.alignment || 'N/A'],
-      ['Confidence / threshold', confidenceVsThreshold],
-      ['Alasan keputusan', learningReason(adaptiveLearning.reason) || 'N/A'],
-      ['Akurasi arah 4 jam', horizon4h.accuracy == null ? 'N/A' : `${confidence(horizon4h.accuracy, 1)} · ${num(horizon4h.episodes)} episode`],
-      ['Akurasi arah 24 jam', horizon24h.accuracy == null ? 'N/A' : `${confidence(horizon24h.accuracy, 1)} · ${num(horizon24h.episodes)} episode`],
-      ['Akurasi validasi', validationAccuracy == null ? 'Belum tersedia' : confidence(validationAccuracy, 1)],
-      ['Peningkatan validasi', validationImprovement == null ? 'Belum tersedia' : confidence(validationImprovement, 1)],
-      ['Monitor rollback', rollbackLabel(learning)],
-      ['Horizon optimizer', learning.horizonHours ? `${num(learning.horizonHours)} jam` : 'N/A'],
-      ['Evaluasi terakhir', time(learning.generatedAt || report.generatedAt)],
-    ]);
   }
   function renderInspector() {
     const model = inspectorModel();
@@ -437,7 +313,7 @@
     const data = state.data; text('status-text', state.loading ? 'Memperbarui' : data.tradingEnabled ? 'Live · Trading aktif' : 'Live · Order dijeda'); byId('status-mark').dataset.state = state.loading ? '' : data.tradingEnabled ? 'active' : 'paused';
     text('updated-at', `Diperbarui ${time(data.generatedAt)}`); text('runtime-label', `${String(data.mode || '').toUpperCase()} · ${data.source || 'Binance'} · refresh ${num(data.refreshSeconds) || 5} detik`); byId('logout-form').hidden = !data.dashboardAuthEnabled;
   }
-  function render() { renderOverview(); renderFlow(); renderLearning(); renderInspector(); renderLedger(); renderRisk(); renderOrders(); renderChartMeta(); renderRuntime(); }
+  function render() { renderOverview(); renderFlow(); renderInspector(); renderLedger(); renderRisk(); renderOrders(); renderChartMeta(); renderRuntime(); }
   function renderSymbols(symbols, selected) {
     const select = byId('symbol-select'); const current = [...select.options].map(option => option.value);
     if (JSON.stringify(current) !== JSON.stringify(symbols)) { select.replaceChildren(); for (const symbol of symbols) { const option = document.createElement('option'); option.value = symbol; option.textContent = symbol; select.append(option); } }

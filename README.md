@@ -300,15 +300,22 @@ npm run backtest:fibonacci-direction
 
 Runner membandingkan konfigurasi saat ini, beberapa minimum alignment, dan konsensus `4h + satu timeframe lebih rendah`. Data publik Binance disimpan di `backtest-data/`, sedangkan laporan JSON dan Markdown disimpan di `backtest-results/`. Pengujian ini mengukur ketepatan arah 4 jam dan 24 jam tanpa mengklaim simulasi PnL grid, funding, likuidasi, atau urutan fill intrabar.
 
-Full-grid PnL backtest membandingkan grid live sebagai baseline dengan Risk State Machine yang diterapkan di simulator:
+Full-grid PnL backtest membandingkan empat varian: baseline, Adaptive Supervisor deterministik, Adaptive + Gemini, dan Adaptive + learned policy. Keputusan historis Gemini dibuat satu kali sebagai cache agar replay berikutnya reproducible dan tidak memanggil API lagi:
 
 ```bash
+npm run backtest:gemini-cache
 npm run backtest:full-grid-pnl
-# atau nama yang lebih spesifik
+```
+
+Pembuatan cache bersifat resumable. Default-nya mengambil snapshot tiap 120 menit dengan exposure tetap 50%; deterministic safety tetap menerima exposure yang benar dari masing-masing simulasi. Cache berada di `backtest-data/gemini-adaptive-decisions.jsonl`, sedangkan laporan berada di `backtest-results/adaptive-variants-full-grid-backtest.{json,md}`. Laporan mencatat SHA-256 cache dan policy yang dipakai. Learned policy hanya dilatih dari separuh periode pertama dan baru aktif setelah titik split.
+
+Risk State Machine tetap memiliki backtest terpisah:
+
+```bash
 npm run backtest:risk-state-machine
 ```
 
-Simulator memasukkan maker fee dua sisi, funding historis, minimum notional, batas exposure, refill, reset range, dan mark-to-market posisi tersisa. Fill memakai OHLC 15 menit secara konservatif: SELL yang dibuat setelah BUY fill baru boleh terisi mulai candle berikutnya. Kandidat range dihitung setiap 120 menit sesuai cooldown konfigurasi, atau langsung saat harga keluar dari range aktif. Laporan tersimpan sebagai `backtest-results/risk-state-machine-backtest.{json,md}`. Data lama dapat menguji exposure, arah Fibonacci, volatilitas, dan unrealized PnL, tetapi tidak memiliki riwayat margin call maupun tier likuidasi. Ini bukan replay tick/orderbook dan tidak memodelkan antrean maker.
+Simulator memasukkan maker fee dua sisi, funding historis, minimum notional, batas exposure, refill, reset range, dan mark-to-market posisi tersisa. Fill memakai OHLC 15 menit secara konservatif: SELL yang dibuat setelah BUY fill baru boleh terisi mulai candle berikutnya. Kandidat range dihitung setiap 120 menit sesuai cooldown konfigurasi, atau langsung saat harga keluar dari range aktif. Data lama dapat menguji exposure, arah Fibonacci, volatilitas, dan unrealized PnL, tetapi tidak memiliki riwayat margin call maupun tier likuidasi. Ini bukan replay tick/orderbook dan tidak memodelkan antrean maker.
 
 ### Adaptive grid supervisor
 

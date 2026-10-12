@@ -8,8 +8,8 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/fontawesome/css/fontawesome.min.css?v=7.3.1">
   <link rel="stylesheet" href="/fontawesome/css/solid.min.css?v=7.3.1">
-  <link rel="stylesheet" href="/dashboard.css?v=20261012.1">
-  <script defer src="/dashboard.js?v=20261012.1"></script>
+  <link rel="stylesheet" href="/dashboard.css?v=20261012.3">
+  <script defer src="/dashboard.js?v=20261012.3"></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Lewati ke dashboard</a>
@@ -41,32 +41,18 @@
       <section class="panel flow-panel" aria-labelledby="flow-title">
         <div class="panel-head"><div><p class="eyebrow">Decision pipeline</p><h2 class="panel-title" id="flow-title">Dari sinyal pasar ke exit SELL</h2><p class="panel-copy">Pilih node untuk melihat alasan, nilai input, dan keputusan yang sedang digunakan bot.</p></div><div class="legend" aria-label="Legenda koneksi"><span><i class="live"></i> Alur aktif</span><span><i class="safe"></i> Safety override</span><span><i class="waiting"></i> Data menunggu</span><span><i class="error"></i> Perlu perhatian</span></div></div>
         <div class="flow-map" id="flow-map" data-running="false">
-          <svg class="flow-lines" viewBox="0 0 1200 400" preserveAspectRatio="none" aria-hidden="true">
-            <g class="flow-track"><path data-edge="market-fibonacci"></path><path data-edge="market-gemini"></path><path data-edge="fibonacci-supervisor"></path><path data-edge="gemini-supervisor"></path><path data-edge="supervisor-buy"></path><path data-edge="buy-position"></path><path data-edge="position-sell"></path></g>
-            <g class="flow-signal"><path data-edge="market-fibonacci"></path><path data-edge="market-gemini"></path><path data-edge="fibonacci-supervisor"></path><path data-edge="gemini-supervisor"></path><path data-edge="supervisor-buy"></path><path data-edge="buy-position"></path><path data-edge="position-sell"></path></g>
+          <svg class="flow-lines" viewBox="0 0 1200 220" preserveAspectRatio="none" aria-hidden="true">
+            <g class="flow-track"><path data-edge="market-fibonacci"></path><path data-edge="fibonacci-supervisor"></path><path data-edge="supervisor-buy"></path><path data-edge="buy-position"></path><path data-edge="position-sell"></path></g>
+            <g class="flow-signal"><path data-edge="market-fibonacci"></path><path data-edge="fibonacci-supervisor"></path><path data-edge="supervisor-buy"></path><path data-edge="buy-position"></path><path data-edge="position-sell"></path></g>
           </svg>
           <div class="flow-grid">
             <button class="flow-node node-market" type="button" data-node="market" data-tone="accent" aria-pressed="false"><span class="node-index">01 / INPUT</span><span class="node-title">Market feed</span><strong class="node-status" id="market-node-status">BINANCE LIVE</strong><span class="node-value" id="market-node-value">N/A</span><span class="node-meta" id="market-node-meta">Menunggu ticker</span></button>
-            <button class="flow-node node-fibonacci" type="button" data-node="fibonacci" aria-pressed="false"><span class="node-index">02A / SIGNAL</span><span class="node-title">Fibonacci</span><strong class="node-status" id="fib-node-status">MENUNGGU</strong><span class="node-value" id="fib-node-value">Score N/A</span><span class="node-meta" id="fib-node-meta">Belum ada analisis</span></button>
-            <button class="flow-node node-gemini" type="button" data-node="gemini" aria-pressed="false"><span class="node-index">02B / MONITOR</span><span class="node-title">Gemini</span><strong class="node-status" id="gemini-node-status">MENUNGGU</strong><span class="node-value" id="gemini-node-value">Confidence N/A</span><span class="node-meta" id="gemini-node-meta">Belum ada keputusan</span></button>
+            <button class="flow-node node-fibonacci" type="button" data-node="fibonacci" aria-pressed="false"><span class="node-index">02 / SIGNAL</span><span class="node-title">Fibonacci</span><strong class="node-status" id="fib-node-status">MENUNGGU</strong><span class="node-value" id="fib-node-value">Score N/A</span><span class="node-meta" id="fib-node-meta">Belum ada analisis</span></button>
             <button class="flow-node node-supervisor" type="button" data-node="supervisor" aria-pressed="true"><span class="node-index">03 / DECISION</span><span class="node-title">Adaptive supervisor</span><strong class="node-status" id="supervisor-node-status">MENUNGGU</strong><span class="node-value" id="supervisor-node-value">Exposure N/A</span><span class="node-meta" id="supervisor-node-meta">Profil belum tersedia</span></button>
             <button class="flow-node node-buy" type="button" data-node="buy" aria-pressed="false"><span class="node-index">04 / EXECUTE</span><span class="node-title">BUY grid</span><strong class="node-status" id="buy-node-status">0 ORDER</strong><span class="node-value" id="buy-node-value">0 USDT</span><span class="node-meta" id="buy-node-meta">Bobot N/A</span></button>
             <button class="flow-node node-position" type="button" data-node="position" aria-pressed="false"><span class="node-index">05 / HOLD</span><span class="node-title">LONG position</span><strong class="node-status" id="position-node-status">TIDAK ADA POSISI</strong><span class="node-value" id="position-node-value">0</span><span class="node-meta" id="position-node-meta">PnL berjalan 0 USDT</span></button>
             <button class="flow-node node-sell" type="button" data-node="sell" aria-pressed="false"><span class="node-index">06 / EXIT</span><span class="node-title">SELL ladder</span><strong class="node-status" id="sell-node-status">0 ORDER</strong><span class="node-value" id="sell-node-value">Coverage N/A</span><span class="node-meta" id="sell-node-meta">Belum ada exit aktif</span></button>
           </div>
-        </div>
-      </section>
-
-      <section class="panel learning-panel" aria-labelledby="learning-title">
-        <div class="panel-head"><div><p class="eyebrow">Adaptive learning</p><h2 class="panel-title" id="learning-title">Kebijakan kepercayaan Gemini</h2><p class="panel-copy">Menilai kapan saran Gemini digunakan atau dikembalikan ke keputusan Fibonacci.</p></div><span class="status-code" id="learning-status">MENUNGGU</span></div>
-        <div class="learning-body">
-          <div class="learning-overview">
-            <p class="learning-summary" id="learning-summary">Menunggu evaluasi pembelajaran pertama.</p>
-            <div class="learning-progress-head"><span>Episode valid Gemini</span><strong id="learning-progress-label">0 / 30</strong></div>
-            <div class="learning-meter" id="learning-meter" role="progressbar" aria-label="Progres episode pembelajaran Gemini" aria-valuemin="0" aria-valuemax="30" aria-valuenow="0"><div class="learning-meter-fill" id="learning-meter-fill"></div></div>
-            <p class="learning-note">Akurasi di panel ini mengukur arah harga, bukan profit atau PnL. Learning tidak mengubah modal, leverage, SELL exit, atau pengaman risiko.</p>
-          </div>
-          <dl class="detail-list learning-facts" id="learning-facts"></dl>
         </div>
       </section>
 
