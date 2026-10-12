@@ -207,26 +207,71 @@ function policyDistance(left, right) {
     Math.abs(left.conflictMinConfidence - right.conflictMinConfidence);
 }
 
+function policySummary(policy) {
+  if (!policy) return null;
+  return {
+    schemaVersion: 1,
+    version: policy.version,
+    alignedMinConfidence: policy.alignedMinConfidence,
+    conflictMinConfidence: policy.conflictMinConfidence,
+    source: policy.source,
+    generatedAt: policy.generatedAt || null,
+  };
+}
+
+function learningEpisodes(events, options = {}) {
+  const sinceMs = Number(options.sinceMs);
+  return buildEpisodes(events, {
+    horizonHours: Number(options.horizonHours) || 4,
+    episodeGapMinutes: Number(options.episodeGapMinutes) || 120,
+    moveThresholdPct: Number(options.moveThresholdPct) || 0.5,
+  }).filter(episode => episode.geminiAccepted &&
+    episode.decisionSource !== 'DETERMINISTIC_SAFETY' &&
+    (!Number.isFinite(sinceMs) || episode.observedAtMs >= sinceMs));
+}
+
 function buildPolicyCandidate(events, activePolicy, options = {}) {
   const minimumEpisodes = Math.max(10, Number(options.minimumEpisodes) || 30);
   const validationRatio = Number(options.validationRatio) || 0.3;
   const moveThresholdPct = Number(options.moveThresholdPct) || 0.5;
-  const episodes = buildEpisodes(events, {
-    horizonHours: Number(options.horizonHours) || 4,
-    episodeGapMinutes: Number(options.episodeGapMinutes) || 120,
-    moveThresholdPct,
-  }).filter(episode => episode.geminiAccepted && episode.decisionSource !== 'DETERMINISTIC_SAFETY');
+  const minimumValidationEpisodes = options.minimumValidationEpisodes === undefined
+    ? 15
+    : Math.max(5, Number(options.minimumValidationEpisodes) || 5);
+  const minimumBucketEpisodes = options.minimumBucketEpisodes === undefined
+    ? 10
+    : Math.max(0, Number(options.minimumBucketEpisodes) || 0);
+  const episodes = learningEpisodes(events, { ...options, moveThresholdPct });
+  const alignmentCounts = {
+    aligned: episodes.filter(episode => episode.alignment === 'ALIGNED').length,
+    conflict: episodes.filter(episode => episode.alignment === 'CONFLICT').length,
+  };
+  const sampleReasons = [];
   if (episodes.length < minimumEpisodes) {
+    sampleReasons.push(`need_${minimumEpisodes - episodes.length}_more_episodes`);
+  }
+  if (alignmentCounts.aligned < minimumBucketEpisodes) {
+    sampleReasons.push(`need_${minimumBucketEpisodes - alignmentCounts.aligned}_more_aligned_episodes`);
+  }
+  if (alignmentCounts.conflict < minimumBucketEpisodes) {
+    sampleReasons.push(`need_${minimumBucketEpisodes - alignmentCounts.conflict}_more_conflict_episodes`);
+  }
+  if (sampleReasons.length) {
     return {
       status: 'WAITING_FOR_SAMPLES',
       eligible: false,
       episodes: episodes.length,
       minimumEpisodes,
-      reasons: [`need_${minimumEpisodes - episodes.length}_more_episodes`],
+      minimumValidationEpisodes,
+      minimumBucketEpisodes,
+      alignmentCounts,
+      reasons: sampleReasons,
     };
   }
 
-  const validationCount = Math.max(5, Math.floor(episodes.length * validationRatio));
+  const validationCount = Math.min(
+    episodes.length - 1,
+    Math.max(minimumValidationEpisodes, Math.floor(episodes.length * validationRatio))
+  );
   const splitAt = episodes.length - validationCount;
   const training = episodes.slice(0, splitAt);
   const validation = episodes.slice(splitAt);
@@ -262,6 +307,9 @@ function buildPolicyCandidate(events, activePolicy, options = {}) {
     eligible: reasons.length === 0,
     episodes: episodes.length,
     minimumEpisodes,
+    minimumValidationEpisodes,
+    minimumBucketEpisodes,
+    alignmentCounts,
     horizonHours: Number(options.horizonHours) || 4,
     training: { active: evaluatePolicy(training, activePolicy, moveThresholdPct), candidate: bestTraining },
     validation: { active: activeValidation, candidate: candidateValidation, improvement: round(improvement, 6) },
@@ -273,29 +321,83 @@ function buildPolicyCandidate(events, activePolicy, options = {}) {
   };
 }
 
+function buildRollbackDecision(events, activePolicy, options = {}) {
+  const minimumEpisodes = Math.max(10, Number(options.minimumEpisodes) || 20);
+  const minimumDegradation = Number(options.minimumDegradation) || 0.05;
+  const previousPolicy = validatePolicy(activePolicy?.evidence?.previousPolicy);
+  const promotedAtMs = Date.parse(activePolicy?.generatedAt || '');
+  if (activePolicy?.source !== 'AUTO_LEARNING' || !previousPolicy || !Number.isFinite(promotedAtMs)) {
+    return { status: 'INACTIVE', eligible: false, episodes: 0, minimumEpisodes, reasons: [] };
+  }
+  const episodes = learningEpisodes(events, { ...options, sinceMs: promotedAtMs });
+  if (episodes.length < minimumEpisodes) {
+    return {
+      status: 'WAITING_FOR_SAMPLES',
+      eligible: false,
+      episodes: episodes.length,
+      minimumEpisodes,
+      reasons: [`need_${minimumEpisodes - episodes.length}_more_post_promotion_episodes`],
+    };
+  }
+  const active = evaluatePolicy(episodes, activePolicy, options.moveThresholdPct);
+  const previous = evaluatePolicy(episodes, previousPolicy, options.moveThresholdPct);
+  const degradation = previous.accuracy - active.accuracy;
+  const eligible = degradation >= minimumDegradation;
+  return {
+    status: eligible ? 'ROLLBACK_REQUIRED' : 'HEALTHY',
+    eligible,
+    episodes: episodes.length,
+    minimumEpisodes,
+    minimumDegradation,
+    active,
+    previous,
+    degradation: round(degradation, 6),
+    previousPolicy: policySummary(previousPolicy),
+    reasons: eligible ? ['active_policy_underperforms_previous_policy'] : [],
+  };
+}
+
 class AdaptiveSupervisorLearner {
   constructor(options = {}) {
     this.options = {
       enabled: false,
       autoApply: false,
       intervalMs: HOUR_MS,
-      minimumEpisodes: 30,
+      minimumEpisodes: 60,
       validationRatio: 0.3,
-      minimumValidationAccuracy: 0.55,
-      minimumImprovement: 0.03,
+      minimumValidationEpisodes: 15,
+      minimumBucketEpisodes: 10,
+      minimumValidationAccuracy: 0.6,
+      minimumImprovement: 0.05,
       horizonHours: 4,
       episodeGapMinutes: 120,
       moveThresholdPct: 0.5,
+      rollbackEnabled: false,
+      rollbackMinimumEpisodes: 20,
+      rollbackMinimumDegradation: 0.05,
       journalPath: 'adaptive-supervisor-outcomes.jsonl',
       reportPath: 'adaptive-supervisor-learning-report.json',
       candidatePath: 'adaptive-supervisor-policy-candidate.json',
       policyPath: 'adaptive-supervisor-learning-policy.json',
+      historyPath: 'adaptive-supervisor-policy-history.jsonl',
       ...options,
     };
     this.logger = options.logger || console;
     this.activePolicy = this.loadPolicy();
+    this.latestReport = this.loadDocument(this.options.reportPath);
+    this.latestCandidate = this.loadDocument(this.options.candidatePath);
+    this.latestRollback = null;
     this.lastRunAt = 0;
     this.inFlight = null;
+  }
+
+  loadDocument(filePath) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.resolve(filePath), 'utf8'));
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
   }
 
   loadPolicy() {
@@ -316,10 +418,58 @@ class AdaptiveSupervisorLearner {
     return { ...this.activePolicy };
   }
 
+  getSnapshot() {
+    const candidate = this.latestCandidate;
+    const report = this.latestReport;
+    const episodes = Number(candidate?.episodes);
+    const minimumEpisodes = Number(candidate?.minimumEpisodes ?? this.options.minimumEpisodes);
+    return {
+      enabled: Boolean(this.options.enabled),
+      autoApply: Boolean(this.options.autoApply),
+      minimumEpisodes: this.options.minimumEpisodes,
+      minimumValidationEpisodes: this.options.minimumValidationEpisodes,
+      minimumBucketEpisodes: this.options.minimumBucketEpisodes,
+      horizonHours: this.options.horizonHours,
+      rollbackEnabled: Boolean(this.options.rollbackEnabled),
+      activePolicy: this.getActivePolicy(),
+      status: this.options.enabled ? (candidate?.status || 'PENDING') : 'OFF',
+      generatedAt: candidate?.generatedAt || report?.generatedAt || null,
+      candidate: candidate ? {
+        eligible: Boolean(candidate.eligible),
+        episodes: Number.isFinite(episodes) ? episodes : 0,
+        minimumEpisodes: Number.isFinite(minimumEpisodes) ? minimumEpisodes : this.options.minimumEpisodes,
+        minimumValidationEpisodes: Number(candidate.minimumValidationEpisodes) || this.options.minimumValidationEpisodes,
+        minimumBucketEpisodes: Number(candidate.minimumBucketEpisodes) || this.options.minimumBucketEpisodes,
+        alignmentCounts: candidate.alignmentCounts || { aligned: 0, conflict: 0 },
+        reasons: Array.isArray(candidate.reasons) ? candidate.reasons : [],
+        horizonHours: Number(candidate.horizonHours) || this.options.horizonHours,
+        training: candidate.training || null,
+        validation: candidate.validation || null,
+        policy: candidate.policy || null,
+      } : null,
+      rollback: this.latestRollback,
+      report: report ? {
+        generatedAt: report.generatedAt || null,
+        scoring: report.scoring || null,
+        horizons: report.horizons || {},
+      } : null,
+    };
+  }
+
   async writeJson(filePath, value) {
     const resolved = path.resolve(filePath);
     await fs.promises.mkdir(path.dirname(resolved), { recursive: true });
     await AtomicFileWriter.write(resolved, () => `${JSON.stringify(value, null, 2)}\n`);
+  }
+
+  async appendHistory(value) {
+    try {
+      const resolved = path.resolve(this.options.historyPath);
+      await fs.promises.mkdir(path.dirname(resolved), { recursive: true });
+      await fs.promises.appendFile(resolved, `${JSON.stringify(value)}\n`, 'utf8');
+    } catch (error) {
+      this.logger.warn?.(`[ADAPTIVE-LEARNING] Policy history write failed: ${error.message}`);
+    }
   }
 
   async run(now = Date.now()) {
@@ -337,13 +487,58 @@ class AdaptiveSupervisorLearner {
     };
     const report = buildLearningReport(events, common);
     await this.writeJson(this.options.reportPath, report);
+    this.latestReport = report;
+    const rollback = buildRollbackDecision(events, this.activePolicy, {
+      ...common,
+      horizonHours: this.options.horizonHours,
+      minimumEpisodes: this.options.rollbackMinimumEpisodes,
+      minimumDegradation: this.options.rollbackMinimumDegradation,
+    });
+    this.latestRollback = rollback;
+    let rolledBack = false;
+    if (this.options.rollbackEnabled && rollback.eligible) {
+      const rolledBackAt = new Date(now).toISOString();
+      const rollbackPolicy = validatePolicy({
+        ...rollback.previousPolicy,
+        version: `rollback-${rolledBackAt}`,
+        source: 'AUTO_ROLLBACK',
+        generatedAt: rolledBackAt,
+        evidence: {
+          rollbackFrom: policySummary(this.activePolicy),
+          evaluation: rollback,
+          candidateSince: rolledBackAt,
+        },
+      });
+      await this.writeJson(this.options.policyPath, rollbackPolicy);
+      const replacedPolicy = this.activePolicy;
+      this.activePolicy = rollbackPolicy;
+      rolledBack = true;
+      await this.appendHistory({
+        schemaVersion: 1,
+        type: 'POLICY_ROLLED_BACK',
+        recordedAt: rolledBackAt,
+        from: policySummary(replacedPolicy),
+        to: policySummary(rollbackPolicy),
+        evidence: rollback,
+      });
+      this.logger.warn?.(
+        `[ADAPTIVE-LEARNING] Rolled back ${replacedPolicy.version}: ` +
+        `active=${rollback.active.accuracy}, previous=${rollback.previous.accuracy}`
+      );
+    }
+    const candidateSinceMs = this.activePolicy.source === 'AUTO_ROLLBACK'
+      ? Date.parse(this.activePolicy.evidence?.candidateSince || this.activePolicy.generatedAt || '')
+      : NaN;
     const candidate = buildPolicyCandidate(events, this.activePolicy, {
       ...common,
       minimumEpisodes: this.options.minimumEpisodes,
       validationRatio: this.options.validationRatio,
+      minimumValidationEpisodes: this.options.minimumValidationEpisodes,
+      minimumBucketEpisodes: this.options.minimumBucketEpisodes,
       minimumValidationAccuracy: this.options.minimumValidationAccuracy,
       minimumImprovement: this.options.minimumImprovement,
       horizonHours: this.options.horizonHours,
+      sinceMs: candidateSinceMs,
     });
     const candidateDocument = {
       schemaVersion: 1,
@@ -352,9 +547,11 @@ class AdaptiveSupervisorLearner {
       ...candidate,
     };
     await this.writeJson(this.options.candidatePath, candidateDocument);
+    this.latestCandidate = candidateDocument;
 
     let promoted = false;
-    if (candidate.eligible && this.options.autoApply) {
+    if (!rolledBack && candidate.eligible && this.options.autoApply) {
+      const previousPolicy = policySummary(this.activePolicy);
       const promotedPolicy = validatePolicy({
         ...candidate.policy,
         version: `learned-${new Date(now).toISOString()}`,
@@ -364,17 +561,34 @@ class AdaptiveSupervisorLearner {
           episodes: candidate.episodes,
           horizonHours: candidate.horizonHours,
           validation: candidate.validation,
+          alignmentCounts: candidate.alignmentCounts,
+          previousPolicy,
         },
       });
       await this.writeJson(this.options.policyPath, promotedPolicy);
       this.activePolicy = promotedPolicy;
       promoted = true;
+      await this.appendHistory({
+        schemaVersion: 1,
+        type: 'POLICY_PROMOTED',
+        recordedAt: promotedPolicy.generatedAt,
+        from: previousPolicy,
+        to: policySummary(promotedPolicy),
+        evidence: promotedPolicy.evidence,
+      });
       this.logger.log?.(
         `[ADAPTIVE-LEARNING] Promoted policy ${promotedPolicy.version}: ` +
         `aligned>=${promotedPolicy.alignedMinConfidence}, conflict>=${promotedPolicy.conflictMinConfidence}`
       );
     }
-    return { report, candidate: candidateDocument, promoted, activePolicy: this.getActivePolicy() };
+    return {
+      report,
+      candidate: candidateDocument,
+      rollback,
+      promoted,
+      rolledBack,
+      activePolicy: this.getActivePolicy(),
+    };
   }
 
   runIfDue(now = Date.now()) {
@@ -401,8 +615,11 @@ module.exports = {
   buildEpisodes,
   buildLearningReport,
   buildPolicyCandidate,
+  buildRollbackDecision,
   evaluatePolicy,
+  learningEpisodes,
   parseJournal,
+  policySummary,
   profileCorrect,
   selectedProfile,
   validatePolicy,

@@ -8,8 +8,8 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/fontawesome/css/fontawesome.min.css?v=7.3.1">
   <link rel="stylesheet" href="/fontawesome/css/solid.min.css?v=7.3.1">
-  <link rel="stylesheet" href="/dashboard.css?v=20261007.10">
-  <script defer src="/dashboard.js?v=20261007.10"></script>
+  <link rel="stylesheet" href="/dashboard.css?v=20261012.1">
+  <script defer src="/dashboard.js?v=20261012.1"></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Lewati ke dashboard</a>
@@ -54,6 +54,19 @@
             <button class="flow-node node-position" type="button" data-node="position" aria-pressed="false"><span class="node-index">05 / HOLD</span><span class="node-title">LONG position</span><strong class="node-status" id="position-node-status">TIDAK ADA POSISI</strong><span class="node-value" id="position-node-value">0</span><span class="node-meta" id="position-node-meta">PnL berjalan 0 USDT</span></button>
             <button class="flow-node node-sell" type="button" data-node="sell" aria-pressed="false"><span class="node-index">06 / EXIT</span><span class="node-title">SELL ladder</span><strong class="node-status" id="sell-node-status">0 ORDER</strong><span class="node-value" id="sell-node-value">Coverage N/A</span><span class="node-meta" id="sell-node-meta">Belum ada exit aktif</span></button>
           </div>
+        </div>
+      </section>
+
+      <section class="panel learning-panel" aria-labelledby="learning-title">
+        <div class="panel-head"><div><p class="eyebrow">Adaptive learning</p><h2 class="panel-title" id="learning-title">Kebijakan kepercayaan Gemini</h2><p class="panel-copy">Menilai kapan saran Gemini digunakan atau dikembalikan ke keputusan Fibonacci.</p></div><span class="status-code" id="learning-status">MENUNGGU</span></div>
+        <div class="learning-body">
+          <div class="learning-overview">
+            <p class="learning-summary" id="learning-summary">Menunggu evaluasi pembelajaran pertama.</p>
+            <div class="learning-progress-head"><span>Episode valid Gemini</span><strong id="learning-progress-label">0 / 30</strong></div>
+            <div class="learning-meter" id="learning-meter" role="progressbar" aria-label="Progres episode pembelajaran Gemini" aria-valuemin="0" aria-valuemax="30" aria-valuenow="0"><div class="learning-meter-fill" id="learning-meter-fill"></div></div>
+            <p class="learning-note">Akurasi di panel ini mengukur arah harga, bukan profit atau PnL. Learning tidak mengubah modal, leverage, SELL exit, atau pengaman risiko.</p>
+          </div>
+          <dl class="detail-list learning-facts" id="learning-facts"></dl>
         </div>
       </section>
 

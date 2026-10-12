@@ -58,3 +58,22 @@ test('dashboard pages declare an empty favicon instead of requesting a missing a
   assert.match(publicFile('dashboard.html'), /<link rel="icon" href="data:,">/);
   assert.match(publicFile('dashboard-login.html'), /<link rel="icon" href="data:,">/);
 });
+
+test('dashboard presents adaptive learning evidence and safe empty states', () => {
+  const html = publicFile('dashboard.html');
+  const css = publicFile('dashboard.css');
+  const script = publicFile('dashboard.js');
+
+  assert.match(html, /id="learning-status">MENUNGGU/);
+  assert.match(html, /id="learning-meter" role="progressbar"/);
+  assert.match(html, /Akurasi di panel ini mengukur arah harga, bukan profit atau PnL/);
+  assert.match(script, /function renderLearning\(\)/);
+  assert.match(script, /confidence_below_learned_threshold/);
+  assert.match(script, /\['Threshold konflik', confidence\(policy\.conflictMinConfidence\)\]/);
+  assert.match(script, /\['Komposisi episode'/);
+  assert.match(script, /\['Akurasi arah 4 jam'/);
+  assert.match(script, /\['Monitor rollback', rollbackLabel\(learning\)\]/);
+  assert.match(script, /renderOverview\(\); renderFlow\(\); renderLearning\(\)/);
+  assert.match(css, /\.learning-body\{display:grid/);
+  assert.match(css, /@media\(max-width:900px\)\{\.learning-body\{grid-template-columns:1fr\}\}/);
+});

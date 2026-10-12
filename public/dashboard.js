@@ -163,6 +163,67 @@
     })[String(profile || '').toUpperCase()] || 'Keputusan adaptive belum tersedia.';
   }
 
+  function confidence(value, digits = 0) {
+    const numeric = nullable(value);
+    return numeric === null ? 'N/A' : percent(numeric * 100, digits);
+  }
+  function learningStatusLabel(status) {
+    return ({
+      OFF: 'NONAKTIF',
+      PENDING: 'MENUNGGU EVALUASI',
+      WAITING_FOR_SAMPLES: 'MENGUMPULKAN DATA',
+      REJECTED: 'KANDIDAT DITOLAK',
+      ELIGIBLE: 'KANDIDAT LOLOS',
+    })[String(status || '').toUpperCase()] || String(status || 'MENUNGGU').replaceAll('_', ' ');
+  }
+  function learningReason(value) {
+    const normalized = String(value || '');
+    const sampleMatch = normalized.match(/^need_(\d+)_more_(?:(aligned|conflict|post_promotion)_)?episodes$/);
+    if (sampleMatch) {
+      const label = ({ aligned: 'searah', conflict: 'konflik', post_promotion: 'pasca-promosi' })[sampleMatch[2]];
+      return `Perlu ${sampleMatch[1]} episode${label ? ` ${label}` : ''} lagi`;
+    }
+    return ({
+      deterministic_safety: 'Safety deterministik mengambil alih',
+      gemini_unavailable_or_rejected: 'Gemini tidak tersedia atau ditolak',
+      confidence_below_learned_threshold: 'Confidence Gemini di bawah threshold policy',
+      confidence_passed_learned_threshold: 'Confidence Gemini melewati threshold policy',
+      candidate_matches_active_policy: 'Kandidat sama dengan policy aktif',
+      validation_accuracy_below_minimum: 'Akurasi validasi belum memenuhi batas',
+      validation_improvement_below_minimum: 'Peningkatan validasi belum memenuhi batas',
+      active_policy_underperforms_previous_policy: 'Policy aktif tertinggal dari policy sebelumnya',
+    })[value] || normalized.replaceAll('_', ' ');
+  }
+  function rollbackLabel(learning) {
+    if (!learning.rollbackEnabled) return 'Nonaktif';
+    const rollback = learning.rollback;
+    if (!rollback || rollback.status === 'INACTIVE') return 'Menunggu policy hasil belajar';
+    if (rollback.status === 'WAITING_FOR_SAMPLES') {
+      return `${num(rollback.episodes)} / ${num(rollback.minimumEpisodes)} episode pasca-promosi`;
+    }
+    if (rollback.status === 'HEALTHY') return `Sehat · ${num(rollback.episodes)} episode`;
+    if (rollback.status === 'ROLLBACK_REQUIRED') return 'Rollback diperlukan';
+    return String(rollback.status || 'Menunggu').replaceAll('_', ' ');
+  }
+  function learningSummary(learning) {
+    if (!learning.enabled) return 'Adaptive learning tidak aktif. Supervisor tetap menggunakan aturan policy yang tersedia.';
+    const candidate = learning.candidate;
+    if (!candidate) return 'Learning aktif dan menunggu evaluasi pertama dari Outcome Journal.';
+    if (learning.status === 'WAITING_FOR_SAMPLES') {
+      return `Terkumpul ${num(candidate.episodes)} dari ${num(candidate.minimumEpisodes)} episode valid. Policy tidak berubah sebelum batas sampel terpenuhi.`;
+    }
+    if (learning.status === 'ELIGIBLE') {
+      return learning.autoApply
+        ? 'Kandidat terbaru lolos validasi dan auto-apply aktif.'
+        : 'Kandidat terbaru lolos validasi, tetapi auto-apply tidak aktif.';
+    }
+    if (learning.status === 'REJECTED') {
+      const reason = candidate.reasons?.map(learningReason).join('; ');
+      return `Kandidat terbaru tidak menggantikan policy aktif${reason ? `: ${reason}.` : '.'}`;
+    }
+    return 'Learning aktif dan policy yang tervalidasi akan diterapkan pada siklus Supervisor berikutnya.';
+  }
+
   function renderOverview() {
     const data = state.data;
     const adaptive = intel().adaptive || {};
@@ -257,6 +318,59 @@
       item.append(term, description); container.append(item);
     }
   }
+  function renderLearning() {
+    const learning = intel().learning || {};
+    const adaptiveLearning = intel().adaptive?.learning || {};
+    const candidate = learning.candidate || {};
+    const policy = learning.activePolicy || {};
+    const alignmentCounts = candidate.alignmentCounts || {};
+    const report = learning.report || {};
+    const horizon4h = report.horizons?.['4h'] || {};
+    const horizon24h = report.horizons?.['24h'] || {};
+    const episodes = num(candidate.episodes);
+    const minimumEpisodes = Math.max(0, num(candidate.minimumEpisodes || learning.minimumEpisodes));
+    const progress = minimumEpisodes > 0 ? clamp(episodes / minimumEpisodes * 100, 0, 100) : 0;
+    const status = String(learning.status || (learning.enabled ? 'PENDING' : 'OFF')).toUpperCase();
+    const statusElement = byId('learning-status');
+    text('learning-status', learningStatusLabel(status));
+    statusElement.dataset.state = status === 'ELIGIBLE' ? 'active' : status === 'REJECTED' ? 'rejected' : status === 'OFF' ? 'off' : 'waiting';
+    text('learning-summary', learningSummary({ ...learning, status }));
+    text('learning-progress-label', minimumEpisodes > 0 ? `${episodes} / ${minimumEpisodes}` : 'N/A');
+    byId('learning-meter-fill').style.width = `${progress}%`;
+    byId('learning-meter').setAttribute('aria-valuemax', String(minimumEpisodes || 1));
+    byId('learning-meter').setAttribute('aria-valuenow', String(minimumEpisodes > 0 ? Math.min(episodes, minimumEpisodes) : 0));
+    byId('learning-meter').setAttribute('aria-valuetext', minimumEpisodes > 0
+      ? `${episodes} dari ${minimumEpisodes} episode valid Gemini`
+      : 'Adaptive learning tidak aktif');
+    const confidenceVsThreshold = adaptiveLearning.confidence == null && adaptiveLearning.threshold == null
+      ? 'N/A'
+      : `${confidence(adaptiveLearning.confidence)} / min ${confidence(adaptiveLearning.threshold)}`;
+    const decisionPath = adaptiveLearning.reason === 'deterministic_safety'
+      ? 'Safety override'
+      : adaptiveLearning.usedGemini ? 'Gemini digunakan' : adaptiveLearning.reason ? 'Fallback Fibonacci' : 'N/A';
+    const validationAccuracy = candidate.validation?.candidate?.accuracy;
+    const validationImprovement = candidate.validation?.improvement;
+    renderDefinitionList(byId('learning-facts'), [
+      ['Policy aktif', policy.version || 'N/A'],
+      ['Sumber policy', policy.source || 'N/A'],
+      ['Mode penerapan', learning.autoApply ? 'Otomatis' : 'Manual'],
+      ['Threshold searah', confidence(policy.alignedMinConfidence)],
+      ['Threshold konflik', confidence(policy.conflictMinConfidence)],
+      ['Komposisi episode', `${num(alignmentCounts.aligned)} searah / ${num(alignmentCounts.conflict)} konflik`],
+      ['Minimum holdout', `${num(candidate.minimumValidationEpisodes || learning.minimumValidationEpisodes)} episode`],
+      ['Keputusan pair', decisionPath],
+      ['Alignment pair', adaptiveLearning.alignment || 'N/A'],
+      ['Confidence / threshold', confidenceVsThreshold],
+      ['Alasan keputusan', learningReason(adaptiveLearning.reason) || 'N/A'],
+      ['Akurasi arah 4 jam', horizon4h.accuracy == null ? 'N/A' : `${confidence(horizon4h.accuracy, 1)} · ${num(horizon4h.episodes)} episode`],
+      ['Akurasi arah 24 jam', horizon24h.accuracy == null ? 'N/A' : `${confidence(horizon24h.accuracy, 1)} · ${num(horizon24h.episodes)} episode`],
+      ['Akurasi validasi', validationAccuracy == null ? 'Belum tersedia' : confidence(validationAccuracy, 1)],
+      ['Peningkatan validasi', validationImprovement == null ? 'Belum tersedia' : confidence(validationImprovement, 1)],
+      ['Monitor rollback', rollbackLabel(learning)],
+      ['Horizon optimizer', learning.horizonHours ? `${num(learning.horizonHours)} jam` : 'N/A'],
+      ['Evaluasi terakhir', time(learning.generatedAt || report.generatedAt)],
+    ]);
+  }
   function renderInspector() {
     const model = inspectorModel();
     text('inspector-title', model.title); text('inspector-status', model.status); text('inspector-summary', model.summary);
@@ -323,7 +437,7 @@
     const data = state.data; text('status-text', state.loading ? 'Memperbarui' : data.tradingEnabled ? 'Live · Trading aktif' : 'Live · Order dijeda'); byId('status-mark').dataset.state = state.loading ? '' : data.tradingEnabled ? 'active' : 'paused';
     text('updated-at', `Diperbarui ${time(data.generatedAt)}`); text('runtime-label', `${String(data.mode || '').toUpperCase()} · ${data.source || 'Binance'} · refresh ${num(data.refreshSeconds) || 5} detik`); byId('logout-form').hidden = !data.dashboardAuthEnabled;
   }
-  function render() { renderOverview(); renderFlow(); renderInspector(); renderLedger(); renderRisk(); renderOrders(); renderChartMeta(); renderRuntime(); }
+  function render() { renderOverview(); renderFlow(); renderLearning(); renderInspector(); renderLedger(); renderRisk(); renderOrders(); renderChartMeta(); renderRuntime(); }
   function renderSymbols(symbols, selected) {
     const select = byId('symbol-select'); const current = [...select.options].map(option => option.value);
     if (JSON.stringify(current) !== JSON.stringify(symbols)) { select.replaceChildren(); for (const symbol of symbols) { const option = document.createElement('option'); option.value = symbol; option.textContent = symbol; select.append(option); } }

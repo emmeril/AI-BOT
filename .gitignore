@@ -34,4 +34,5 @@ adaptive-supervisor-outcomes-state.json
 adaptive-supervisor-learning-report.json
 adaptive-supervisor-policy-candidate.json
 adaptive-supervisor-learning-policy.json
+adaptive-supervisor-policy-history.jsonl
 futures.js
