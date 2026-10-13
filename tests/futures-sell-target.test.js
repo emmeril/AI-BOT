@@ -34,6 +34,59 @@ test('futures sell target skips an adjacent level below required profit', () => 
   });
 });
 
+test('futures sell target stays above the current average position entry', () => {
+  const engine = createEngine();
+  engine.latestPositions = new Map([['TEST/USDT:USDT', { entryPrice: 100.8 }]]);
+
+  const target = engine.findSellTargetForBuy(
+    'TEST/USDT:USDT',
+    [100, 100.5, 101, 101.5],
+    0,
+    { amount: 1, sellableAmount: 1, totalCostQuote: 100, totalFeeQuote: 0 }
+  );
+
+  assert.equal(target.sellLevelIndex, 2);
+  assert.equal(target.sellPrice, 101);
+});
+
+test('futures reconciliation cancels only SELL orders below average position entry', async () => {
+  const engine = createEngine();
+  engine.latestPositions = new Map([['TEST/USDT:USDT', { entryPrice: 100.8 }]]);
+  const cancelled = [];
+  engine.cancelOrder = async (_symbol, order) => { cancelled.push(order.id); };
+
+  const count = await engine.cancelSellsBelowPositionEntry('TEST/USDT:USDT', [
+    { id: 'below', side: 'sell', price: 100.5 },
+    { id: 'equal', side: 'sell', price: 100.8 },
+    { id: 'above', side: 'sell', price: 101 },
+    { id: 'buy', side: 'buy', price: 99 },
+  ]);
+
+  assert.equal(count, 1);
+  assert.deepEqual(cancelled, ['below']);
+});
+
+test('futures order placement rejects a rounded SELL price below average position entry', async () => {
+  const engine = createEngine();
+  engine.latestPositions = new Map([['TEST/USDT:USDT', { entryPrice: 100.8 }]]);
+  engine.pendingOrderLevels = new Set();
+  engine.state = { rememberOrder: async () => {} };
+  let placementAttempts = 0;
+  engine.createFuturesLimitOrder = async () => {
+    placementAttempts++;
+    return { id: 'unexpected' };
+  };
+
+  const order = await engine.placeLimit(
+    'TEST/USDT:USDT', 'sell', 1, 100.5, 1,
+    { sourceBuyLevelIndex: 0 }
+  );
+
+  assert.equal(order, null);
+  assert.equal(placementAttempts, 0);
+  assert.equal(engine.pendingOrderLevels.size, 0);
+});
+
 test('different futures buy levels may share the same profitable sell target', () => {
   const engine = createEngine({ profitableAt: 100.5 });
   const levels = [100, 100.2, 100.5, 101];

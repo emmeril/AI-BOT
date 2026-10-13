@@ -184,6 +184,7 @@ const GRID_PRICE_PRECISION_MAX_DEVIATION_PCT = Config.number('GRID_PRICE_PRECISI
 // configurable so it can match the account's Binance VIP/BNB fee tier.
 const BINANCE_FUTURES_MAKER_FEE_RATE = Config.number('BINANCE_FUTURES_MAKER_FEE_RATE', 0.0002);
 const GRID_MIN_NET_PROFIT_PCT = Config.number('GRID_MIN_NET_PROFIT_PCT', 0.05);
+const FUTURES_SELL_ENTRY_FLOOR_ENABLED = Config.boolean('FUTURES_SELL_ENTRY_FLOOR_ENABLED', true);
 
 const FIBONACCI_RANGE_ADVISOR_ENABLED = Config.boolean('FIBONACCI_RANGE_ADVISOR_ENABLED', false);
 const FIBONACCI_RANGE_ADVISOR_TIMEFRAMES = Config.list('FIBONACCI_RANGE_ADVISOR_TIMEFRAMES', 'all');
@@ -2763,7 +2764,7 @@ class FuturesGridEngine {
           this.getActiveSellOrderForBuyLevel(symState, buyLevelIndex)) continue;
       const plan = this.buildAggregatedExitLadderPlan(symbol, levels, buyLevelIndex, buy, {
         occupiedBuyLevels,
-        minimumPrice: currentPrice,
+        minimumPrice: Math.max(currentPrice, this.getPositionEntryFloor(symbol)),
       });
       if (!plan) continue;
 
@@ -3092,6 +3093,12 @@ class FuturesGridEngine {
     return precise + 1e-12 >= this.getMinimumProfitableSellPrice(buy);
   }
 
+  getPositionEntryFloor(symbol) {
+    if (!FUTURES_SELL_ENTRY_FLOOR_ENABLED) return 0;
+    const position = this.latestPositions?.get(symbol);
+    return Math.max(0, numberOrZero(position?.entryPrice ?? position?.info?.entryPrice));
+  }
+
   // Guards against grid levels collapsing onto the same exchange-rounded price.
   // This can happen when the range becomes too narrow relative to GRID_COUNT —
   // e.g. after several trailing up/down shifts, or a tight AI-suggested range —
@@ -3377,6 +3384,14 @@ class FuturesGridEngine {
       }
 
       if (side === 'sell') {
+        const entryFloor = this.getPositionEntryFloor(symbol);
+        if (entryFloor > 0 && preciseNum + 1e-12 < entryFloor) {
+          console.warn(
+            `[SKIP] ${symbol} SELL level=${levelIndex} price=${preciseNum} below ` +
+            `position average entry ${entryFloor}`
+          );
+          return null;
+        }
         const minCost = this.getMinCost(symbol);
         if (minCost > 0 && notional < minCost - 1e-8) {
           console.warn(`[SKIP] ${symbol} SELL level=${levelIndex} | notional ${notional.toFixed(8)} below min ${minCost}, skipping order (dust)`);
@@ -4448,6 +4463,11 @@ class FuturesGridEngine {
     this.updatePositionSnapshot(symbol, positions);
     let managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
 
+    if (await this.cancelSellsBelowPositionEntry(symbol, managedOrders)) {
+      freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+      managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+    }
+
     if (GRID_CANCEL_OUT_OF_RANGE) {
       for (const order of managedOrders) {
         if (order.side === 'sell') continue;
@@ -4623,6 +4643,23 @@ class FuturesGridEngine {
       .reduce((sum, p) => sum + numberOrZero(p.unrealizedPnl ?? p.info?.unRealizedProfit), 0));
   }
 
+  async cancelSellsBelowPositionEntry(symbol, managedOrders) {
+    const entryFloor = this.getPositionEntryFloor(symbol);
+    if (!(entryFloor > 0)) return 0;
+    const belowEntry = (managedOrders || []).filter(order =>
+      String(order?.side).toLowerCase() === 'sell' &&
+      Number(order?.price) + 1e-12 < entryFloor
+    );
+    for (const order of belowEntry) {
+      await this.cancelOrder(
+        symbol,
+        order,
+        `SELL price ${Number(order.price)} below position average entry ${entryFloor}`
+      );
+    }
+    return belowEntry.length;
+  }
+
   getActiveSellOrderForBuyLevel(symState, buyLevelIndex) {
     return Object.values(symState.orders || {}).find(order =>
       String(order.side).toLowerCase() === 'sell' &&
@@ -4638,10 +4675,11 @@ class FuturesGridEngine {
     if (!Number.isInteger(sourceLevel) || sourceLevel < 0 || !levels.length) return null;
     const sellableAmount = Math.max(0, Number(amount ?? trackedBuy?.sellableAmount ?? trackedBuy?.amount) || 0);
     if (!(sellableAmount > 0)) return null;
+    const effectiveMinimumPrice = Math.max(minimumPrice, this.getPositionEntryFloor(symbol));
     const minCost = this.getMinCost(symbol);
     for (let sellLevelIndex = sourceLevel + 1; sellLevelIndex < levels.length; sellLevelIndex++) {
       const sellPrice = Number(levels[sellLevelIndex]);
-      if (!(sellPrice > minimumPrice) || !this.isTrackedSellProfitable(symbol, trackedBuy, sellPrice)) continue;
+      if (!(sellPrice > effectiveMinimumPrice) || !this.isTrackedSellProfitable(symbol, trackedBuy, sellPrice)) continue;
       let precise;
       try { precise = this.getPreciseOrderNumbers(symbol, sellPrice, sellableAmount); } catch { continue; }
       if (!(Number(precise.amountNum ?? precise.preciseAmount) > 0)) continue;
@@ -4660,11 +4698,11 @@ class FuturesGridEngine {
     if (!(preciseAmount > 0)) return null;
     const minimum = Math.max(this.getMinimumProfitableSellPrice(trackedBuy),
       minCost / preciseAmount, Number(levels[levels.length - 1]) + tick,
-      Number.isFinite(minimumPrice) ? minimumPrice + tick : 0);
+      Number.isFinite(effectiveMinimumPrice) ? effectiveMinimumPrice + tick : 0);
     const sellPrice = Number(this.exchange.priceToPrecision(symbol, Math.ceil(minimum / tick) * tick + tick));
     if (!Number.isFinite(sellPrice) || !this.isTrackedSellProfitable(symbol, trackedBuy, sellPrice)) return null;
     const precise = this.getPreciseOrderNumbers(symbol, sellPrice, preciseAmount);
-    if (precise.notional < minCost || sellPrice <= minimumPrice) return null;
+    if (precise.notional < minCost || sellPrice <= effectiveMinimumPrice) return null;
     return { buyLevelIndex: sourceLevel, sellLevelIndex: levels.length - 1, sellPrice,
       amount: preciseAmount, notional: precise.notional, outsideGrid: true };
   }
