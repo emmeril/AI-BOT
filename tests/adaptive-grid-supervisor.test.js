@@ -96,6 +96,8 @@ test('live decisions expose the configured execution mode', () => {
     analysis: analysis('BULLISH'), now: 1, signalId: 'live',
   });
   assert.equal(result.mode, 'LIVE');
+  assert.equal(result.learning, null);
+  assert.equal(result.gemini, null);
 });
 
 test('accepted Gemini monitoring drives the adaptive profile', () => {

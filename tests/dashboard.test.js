@@ -149,7 +149,7 @@ test('futures dashboard reports fill counts for the selected symbol', async () =
   assert.equal(accounted.profit.gridPairProfit, 999);
 });
 
-test('futures decision snapshot exposes AI flow and SELL coverage without mutating execution', () => {
+test('futures decision snapshot exposes deterministic flow and SELL coverage without mutating execution', () => {
   const previous = {
     cap: process.env.GRID_TOTAL_INVESTMENT_USDT,
     count: process.env.GRID_COUNT,
@@ -170,28 +170,11 @@ test('futures decision snapshot exposes AI flow and SELL coverage without mutati
         confidence: 0.9, alignment: 1, confirmationCount: 3, confirmationsRequired: 2,
         timeframes: { '4h': { direction: 'BEARISH', score: -1 } },
       } } } },
-      geminiAdaptiveMonitor: {
-        isEnabled: () => true,
-        getDecision: () => ({ accepted: true, profile: 'BEARISH', confidence: 0.8, riskFactors: ['volatility'] }),
-      },
       adaptiveGridDecisions: new Map([[symbol, {
         mode: 'LIVE', profile: 'RISK_OFF', rawProfile: 'RISK_OFF', decisionSource: 'DETERMINISTIC_SAFETY',
-        learning: { policyVersion: 'default-v1', usedGemini: false, reason: 'deterministic_safety' },
+        learning: null,
         exposurePct: 92, recommendation: { buyWeight: { upper: 0.25, middle: 0.5, lower: 1.25 }, spacingMultiplier: 1.4 },
       }]]),
-      adaptiveSupervisorLearner: {
-        getSnapshot: () => ({
-          enabled: true,
-          autoApply: true,
-          minimumEpisodes: 30,
-          horizonHours: 4,
-          activePolicy: { version: 'default-v1', alignedMinConfidence: 0.6, conflictMinConfidence: 0.6 },
-          status: 'WAITING_FOR_SAMPLES',
-          generatedAt: '2026-10-12T00:00:00.000Z',
-          candidate: { episodes: 10, minimumEpisodes: 30, eligible: false, reasons: ['need_20_more_episodes'] },
-          report: { horizons: { '4h': { episodes: 39, accuracy: 0.3333 }, '24h': { episodes: 0, accuracy: null } } },
-        }),
-      },
       getAllocatedInvestmentUsdt: () => 138,
     };
     const result = decisionSnapshot(engine, symbol, { lastBuyByLevel: {}, lastTradeTimestamp: 10 }, [
@@ -199,13 +182,9 @@ test('futures decision snapshot exposes AI flow and SELL coverage without mutati
       { side: 'sell', price: 2, remaining: 8 },
     ], { contracts: 10 });
     assert.equal(result.fibonacci.appliedDirection, 'BEARISH');
-    assert.equal(result.gemini.profile, 'BEARISH');
     assert.equal(result.adaptive.profile, 'RISK_OFF');
     assert.equal(result.adaptive.exposurePct, 92);
-    assert.equal(result.adaptive.learning.reason, 'deterministic_safety');
-    assert.equal(result.learning.status, 'WAITING_FOR_SAMPLES');
-    assert.equal(result.learning.candidate.episodes, 10);
-    assert.equal(result.learning.report.horizons['4h'].accuracy, 0.3333);
+    assert.equal(result.adaptive.learning, null);
     assert.equal(result.execution.gridCount, 27);
     assert.equal(result.execution.uncovered, 2);
     assert.equal(result.execution.sellCoveragePct, 80);

@@ -96,9 +96,7 @@ function positionMetrics(position, leverage, openPositionFees = 0) {
 
 function decisionSnapshot(engine, symbol, symState, orders, position) {
   const fibonacci = engine.fibonacciDirectionAnalyzer?.cache?.[symbol]?.analysis || null;
-  const gemini = engine.geminiAdaptiveMonitor?.getDecision?.(symbol) || null;
   const adaptive = engine.adaptiveGridDecisions?.get?.(symbol) || null;
-  const learning = engine.adaptiveSupervisorLearner?.getSnapshot?.() || null;
   const investmentCap = numberOrZero(process.env.GRID_TOTAL_INVESTMENT_USDT);
   let allocatedInvestment = 0;
   if (typeof engine.getAllocatedInvestmentUsdt === 'function') {
@@ -150,19 +148,6 @@ function decisionSnapshot(engine, symbol, symState, orders, position) {
         volatilityRatio: value?.volatilityRatio ?? null,
       }])),
     },
-    gemini: {
-      enabled: Boolean(engine.geminiAdaptiveMonitor?.isEnabled?.()),
-      available: Boolean(gemini),
-      accepted: Boolean(gemini?.accepted),
-      profile: gemini?.profile || null,
-      confidence: gemini?.confidence ?? null,
-      model: gemini?.model || null,
-      reasoning: gemini?.reasoning || '',
-      riskFactors: Array.isArray(gemini?.riskFactors) ? gemini.riskFactors : [],
-      scorecard: gemini?.scorecard || null,
-      generatedAt: gemini?.generatedAt || null,
-      error: gemini?.error || null,
-    },
     adaptive: {
       available: Boolean(adaptive),
       mode: adaptive?.mode || String(process.env.ADAPTIVE_GRID_SUPERVISOR_MODE || 'OFF').toUpperCase(),
@@ -188,21 +173,6 @@ function decisionSnapshot(engine, symbol, symState, orders, position) {
       recommendation: adaptive?.recommendation || null,
       reasons: Array.isArray(adaptive?.reasons) ? adaptive.reasons : [],
       generatedAt: adaptive?.generatedAt || null,
-    },
-    learning: learning || {
-      enabled: false,
-      autoApply: false,
-      minimumEpisodes: 0,
-      minimumValidationEpisodes: 0,
-      minimumBucketEpisodes: 0,
-      horizonHours: null,
-      rollbackEnabled: false,
-      activePolicy: null,
-      status: 'OFF',
-      generatedAt: null,
-      candidate: null,
-      rollback: null,
-      report: null,
     },
     execution: {
       gridCount: numberOrZero(process.env.GRID_COUNT),

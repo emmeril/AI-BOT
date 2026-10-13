@@ -90,10 +90,10 @@ unrealized PnL posisi aktif. Nilai `net` adalah realized trading profit ditambah
 funding dan unrealized PnL. `FUNDING_SYNC_INTERVAL_MINUTES` mengatur interval
 sinkronisasi funding dengan default 60 menit.
 
-Gemini Smart Range Advisor juga tersedia pada futures. Seluruh variabelnya ada
-di `futures-env.example`. Advisor hanya merekomendasikan batas grid berdasarkan
-OHLCV dan indikator; pengelolaan posisi tetap long-only dan exit tetap mengikuti
-batas ROI futures.
+Range futures dibangun oleh advisor Fibonacci multi-timeframe. Jika rekomendasi
+Fibonacci tidak lolos validasi, bot mempertahankan range atau level lokal yang
+sudah ada; pengelolaan posisi tetap long-only dan exit tetap mengikuti batas ROI
+futures.
 
 Referensi resmi Binance:
 
@@ -259,11 +259,11 @@ Nilai `all` memakai seluruh timeframe OHLCV yang dilaporkan Binance. Untuk mengu
 - `FIBONACCI_RANGE_ADVISOR_MAX_DISTANCE_PCT`: batas jarak level dari harga saat ini agar extension timeframe besar tidak membuat range tidak terkendali.
 - `FIBONACCI_RANGE_ADVISOR_REBUILD_THRESHOLD_PCT`: perubahan median minimum pada seluruh level sebelum grid lama boleh diganti. Satu level ekstrem tidak cukup untuk memicu cancel/rebuild seluruh grid.
 - `FIBONACCI_RANGE_ADVISOR_REBUILD_COOLDOWN_MINUTES`: cooldown cancel/remap/rebuild order setelah rekomendasi diterapkan.
-- `FIBONACCI_RANGE_ADVISOR_APPLY_ON`: `AUTO_RANGE_ONLY` atau `ALWAYS`, sama seperti advisor Gemini.
+- `FIBONACCI_RANGE_ADVISOR_APPLY_ON`: `AUTO_RANGE_ONLY` agar range manual tidak ditimpa, atau `ALWAYS`.
 - `FIBONACCI_RANGE_ADVISOR_ALLOW_TRAILING`: default `false`. Trailing dijeda ketika Fibonacci menguasai range agar level tidak bergeser dari zona candle lalu dibangun ulang pada siklus berikutnya.
 - `FIBONACCI_RANGE_ADVISOR_STATE_FILE`: cache candle dan rekomendasi terakhir.
 
-Advisor selalu meminta tepat `GRID_COUNT + 1` level yang mengelilingi harga saat ini dan memenuhi jarak profit minimum sebelum precision exchange. Mesin grid melakukan validasi tick size dan fee sekali lagi. Jika level Fibonacci tidak dapat dipakai, bot fallback ke Gemini (jika aktif), lalu ke range/level lokal yang sudah ada. Jika Fibonacci dan Gemini sama-sama aktif, Fibonacci memiliki prioritas.
+Advisor selalu meminta tepat `GRID_COUNT + 1` level yang mengelilingi harga saat ini dan memenuhi jarak profit minimum sebelum precision exchange. Mesin grid melakukan validasi tick size dan fee sekali lagi. Jika level Fibonacci tidak dapat dipakai, bot mempertahankan range atau level lokal yang sudah ada.
 
 ### Fibonacci Direction Analyzer (Futures)
 
@@ -320,7 +320,7 @@ Simulator memasukkan maker fee dua sisi, funding historis, minimum notional, bat
 
 ### Adaptive grid supervisor
 
-Supervisor adaptif menghasilkan profil `BULLISH`, `SIDEWAYS`, `BEARISH`, atau `RISK_OFF`. Tanpa Gemini monitor, profil berasal dari direction analyzer deterministik. Jika Gemini monitor aktif dan confidence-nya lolos validasi, profil Gemini menjadi input supervisor. Hard guard deterministik tetap memaksa `RISK_OFF` saat exposure atau kondisi bearish ekstrem melewati batas.
+Supervisor adaptif menghasilkan profil `BULLISH`, `SIDEWAYS`, `BEARISH`, atau `RISK_OFF` dari direction analyzer deterministik. Hard guard tetap memaksa `RISK_OFF` saat exposure atau kondisi bearish ekstrem melewati batas.
 
 Mode `SHADOW` hanya menulis rekomendasi ke log. Mode `LIVE` menerapkan bobot notional BUY per zona dan jarak level BUY terhadap BUY baru serta refill. Semua profil tetap memakai `GRID_TOTAL_INVESTMENT_USDT` sebagai batas yang sama; supervisor tidak membuat reserve atau mengecilkan cap yang ditentukan pengguna. Posisi yang sudah terbuka tidak ditutup paksa dan SELL exit tetap mengikuti target profit grid normal.
 
@@ -344,65 +344,19 @@ ADAPTIVE_RISK_STATE_MACHINE_CAUTION_CONFIRMATIONS=2
 ADAPTIVE_RISK_STATE_MACHINE_RECOVERY_CONFIRMATIONS=3
 ADAPTIVE_RISK_STATE_MACHINE_MARGIN_CALL_HOLD_MINUTES=60
 
-GEMINI_ADAPTIVE_MONITOR_ENABLED=true
-GEMINI_ADAPTIVE_MONITOR_INTERVAL_MINUTES=15
-GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE=0.60
-GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS=20000
 ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED=true
 ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_MODE=SHADOW
 ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_LOG_FILE=adaptive-supervisor-outcomes.jsonl
 ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE=adaptive-supervisor-outcomes-state.json
-ADAPTIVE_SUPERVISOR_LEARNING_ENABLED=true
-ADAPTIVE_SUPERVISOR_LEARNING_AUTO_APPLY=true
-ADAPTIVE_SUPERVISOR_LEARNING_INTERVAL_MINUTES=60
-ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES=60
-ADAPTIVE_SUPERVISOR_LEARNING_VALIDATION_RATIO=0.30
-ADAPTIVE_SUPERVISOR_LEARNING_MIN_VALIDATION_EPISODES=15
-ADAPTIVE_SUPERVISOR_LEARNING_MIN_BUCKET_EPISODES=10
-ADAPTIVE_SUPERVISOR_LEARNING_MIN_ACCURACY=0.60
-ADAPTIVE_SUPERVISOR_LEARNING_MIN_IMPROVEMENT=0.05
-ADAPTIVE_SUPERVISOR_LEARNING_HORIZON_HOURS=4
-ADAPTIVE_SUPERVISOR_LEARNING_EPISODE_GAP_MINUTES=120
-ADAPTIVE_SUPERVISOR_LEARNING_MOVE_THRESHOLD_PCT=0.50
-ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_ENABLED=true
-ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_MIN_EPISODES=20
-ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_MIN_DEGRADATION=0.05
-ADAPTIVE_SUPERVISOR_LEARNING_REPORT_FILE=adaptive-supervisor-learning-report.json
-ADAPTIVE_SUPERVISOR_LEARNING_CANDIDATE_FILE=adaptive-supervisor-policy-candidate.json
-ADAPTIVE_SUPERVISOR_LEARNING_POLICY_FILE=adaptive-supervisor-learning-policy.json
-ADAPTIVE_SUPERVISOR_LEARNING_HISTORY_FILE=adaptive-supervisor-policy-history.jsonl
-GEMINI_API_KEY=your_gemini_api_key_here
-GEMINI_API_KEYS=second_project_key,third_project_key
-GEMINI_MODEL=gemini-3.1-flash-lite
 ```
 
-Risk State Machine terpisah dari profil pasar. `NORMAL` memakai rekomendasi profil biasa. `CAUTION` mengurangi BUY dan memperlebar jarak level. `RISK_OFF` menghentikan BUY baru serta membatalkan BUY tertunda, tetapi tidak membatalkan SELL exit. Pemicu keselamatan berasal dari kombinasi exposure dan bearish Fibonacci, unrealized loss, jarak likuidasi, serta event margin call dari User Data WebSocket. Gemini tidak dapat menurunkan status keselamatan ini.
+Risk State Machine terpisah dari profil pasar. `NORMAL` memakai rekomendasi profil biasa. `CAUTION` mengurangi BUY dan memperlebar jarak level. `RISK_OFF` menghentikan BUY baru serta membatalkan BUY tertunda, tetapi tidak membatalkan SELL exit. Pemicu keselamatan berasal dari kombinasi exposure dan bearish Fibonacci, unrealized loss, jarak likuidasi, serta event margin call dari User Data WebSocket.
 
 Gunakan `ADAPTIVE_RISK_STATE_MACHINE_MODE=SHADOW` untuk observasi awal. Dalam mode ini status dan alasannya masuk ke log adaptive tanpa mengubah order. Peralihan ke `LIVE` harus dilakukan setelah hasil backtest dan log shadow ditinjau.
 
-Gemini menerima ringkasan arah Fibonacci, volatilitas, exposure, posisi, liquidation price, funding, fee, dan PnL grid. Request berjalan non-blocking: order loop tidak menunggu respons Gemini. Respons memakai structured JSON, divalidasi terhadap empat profil yang diizinkan, dan baru diterapkan pada siklus berikutnya. Timeout, respons invalid, atau confidence rendah otomatis memakai klasifikasi deterministik.
-
-Semua request Gemini Adaptive Monitor melewati satu antrean agar beberapa simbol tidak mengirim burst bersamaan. `GEMINI_API_KEY` tetap menjadi key utama. Key tambahan dari project Google lain dapat ditulis sebagai daftar dipisahkan koma di `GEMINI_API_KEYS`. Saat satu project mencapai kuota harian, request yang sama langsung mencoba project berikutnya dan project yang habis kuota ditahan sampai waktu reset yang dikirim Gemini. HTTP `429` jangka pendek, error server `5xx`, timeout, dan error jaringan sementara tetap dicoba ulang dengan exponential backoff. Jika seluruh project gagal, keputusan accepted terakhir masih boleh dipakai sampai melewati stale TTL; setelah itu supervisor kembali ke klasifikasi deterministik.
-
-Decision Scorecard memakai request Gemini Adaptive Monitor yang sama, jadi tidak menambah jumlah request API. Gemini mengembalikan `marketRegime`, `riskScore` (0-100), `buyIntensity` (0-1), `spacingMultiplier` (0.75-2), masa berlaku, dan sinyal invalidasi. Nilai ini menjadi saran terstruktur untuk Supervisor dan tidak mengendalikan order secara langsung.
-
-Adaptive Supervisor Outcome Journal mencatat kesimpulan akhir Supervisor, bukan hanya saran Gemini. Setiap event keputusan berisi ringkasan Fibonacci, saran dan scorecard Gemini, sumber keputusan, profil final, safety override, exposure, serta BUY weight dan spacing yang benar-benar dipilih Supervisor. Harga pada horizon 4 jam dan 24 jam kemudian dicatat sebagai event outcome.
+Adaptive Supervisor Outcome Journal mencatat kesimpulan akhir Supervisor. Setiap event keputusan berisi ringkasan Fibonacci, sumber keputusan, profil final, safety override, exposure, serta BUY weight dan spacing yang benar-benar dipilih Supervisor. Harga pada horizon 4 jam dan 24 jam kemudian dicatat sebagai event outcome.
 
 Mode jurnal yang didukung saat ini hanya `SHADOW`: jurnal mengamati keputusan Supervisor tanpa mengubah order, leverage, SELL exit, modal, atau hard safety guard. Pending outcome dipulihkan dari `ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE` setelah restart.
-
-Adaptive Supervisor Learning menggabungkan keputusan berulang menjadi episode agar satu kondisi pasar tidak dihitung berkali-kali. Laporan memisahkan akurasi 4 jam dan 24 jam berdasarkan profil final, sumber keputusan, keselarasan Gemini dengan Fibonacci, dan simbol.
-
-Learner mengoptimalkan dua aturan saja: confidence minimum saat Gemini searah dengan Fibonacci dan confidence minimum saat keduanya bertentangan. Kandidat dilatih pada bagian awal episode dan diuji pada holdout episode terbaru. Kebijakan baru hanya dipromosikan ketika minimal 60 episode lengkap tersedia, holdout berisi minimal 15 episode, masing-masing kondisi searah dan konflik memiliki minimal 10 episode, akurasi validasi minimal 60%, dan peningkatannya minimal 5 poin persentase dibanding kebijakan aktif.
-
-`ADAPTIVE_SUPERVISOR_LEARNING_AUTO_APPLY=true` membuat kebijakan yang lulus langsung aktif tanpa restart. Confidence tetap dibatasi pada 0.60-0.90 dan threshold konflik tidak boleh lebih rendah dari threshold searah. Learning tidak memiliki akses untuk mengubah modal, leverage, exposure cap, SELL exit, liquidation guard, risk state, atau kill switch. Jika file kebijakan rusak atau berada di luar batas, Supervisor kembali ke kebijakan default.
-
-Rollback otomatis membandingkan policy aktif dan policy sebelumnya pada episode yang sama setelah promosi. Setelah minimal 20 episode pasca-promosi, policy lama dipulihkan jika akurasinya unggul minimal 5 poin persentase. Setelah rollback, kandidat belajar lagi hanya dari episode baru agar policy yang gagal tidak langsung dipromosikan kembali. Setiap promosi dan rollback dicatat di `ADAPTIVE_SUPERVISOR_LEARNING_HISTORY_FILE`.
-
-- `GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS`: jarak minimum awal request dalam antrean. Default `5000` ms atau maksimal sekitar 12 request/menit.
-- `GEMINI_ADAPTIVE_MONITOR_REQUEST_JITTER_MS`: jitter tambahan agar request tidak selalu jatuh pada detik yang sama. Default `250` ms.
-- `GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS`: jumlah maksimum percobaan untuk error sementara. Default `3`.
-- `GEMINI_ADAPTIVE_MONITOR_RETRY_BASE_MS` dan `GEMINI_ADAPTIVE_MONITOR_RETRY_MAX_MS`: backoff awal dan batas maksimum backoff.
-- `GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MINUTES`: batas umur keputusan accepted terakhir saat provider gagal. Default `60` menit.
 
 Backtest shadow memakai cache candle yang sama dengan backtest arah:
 
@@ -412,7 +366,7 @@ npm run backtest:adaptive-supervisor
 
 Laporan shadow mengukur pemisahan kondisi pasar, future return, dan maximum adverse excursion selama 24 jam. Gunakan full-grid PnL backtest untuk membandingkan dampak rekomendasi ketika benar-benar diterapkan pada BUY.
 
-## Smart Range Advisor Gemini
+## Smart Range Advisor Gemini (Spot)
 
 Aktifkan dengan:
 
@@ -424,7 +378,7 @@ GEMINI_API_KEYS=second_project_key,third_project_key
 
 Advisor mengambil candle OHLCV, menghitung indikator teknikal lokal, lalu meminta Gemini menyarankan `lower`, `upper`, dan opsional `levels` untuk harga order grid. Rekomendasi hanya dipakai jika confidence memenuhi threshold dan range masih lolos safety clamp. Jika Gemini mengirim `levels`, jumlahnya harus tepat `GRID_COUNT + 1`, berurutan naik dari `lower` ke `upper`, tanpa duplikat, dan tetap distinct setelah precision exchange; kalau tidak valid bot fallback ke level lokal dari range.
 
-Range advisor ini terpisah dari Gemini Adaptive Monitor. Biarkan `GEMINI_RANGE_ADVISOR_ENABLED=false` jika Gemini hanya boleh menentukan profil risiko BUY dan Fibonacci tetap menjadi sumber range.
+Fitur ini hanya dipakai bot spot. Bot futures memakai Fibonacci sebagai sumber range dan mengabaikan konfigurasi Gemini range advisor.
 
 - `GEMINI_API_KEY`: API key Gemini utama. Untuk kompatibilitas, konfigurasi satu key tetap didukung.
 - `GEMINI_API_KEYS`: key tambahan dari project Google yang berbeda, dipisahkan koma. Jangan masukkan key yang sama dua kali.

@@ -303,16 +303,17 @@ function classifyProfile(analysis, exposureRatio, options = {}) {
 
 function classificationWithMonitor(analysis, exposureRatio, options = {}, monitorDecision = null) {
   const deterministic = classifyProfile(analysis, exposureRatio, options);
+  const usesLearningPolicy = Boolean(monitorDecision || options.learningPolicy);
   if (deterministic.profile === PROFILES.RISK_OFF) {
     return {
       ...deterministic,
       source: 'DETERMINISTIC_SAFETY',
       deterministicProfile: deterministic.profile,
-      learning: {
+      learning: usesLearningPolicy ? {
         policyVersion: options.learningPolicy?.version || 'default-v1',
         usedGemini: false,
         reason: 'deterministic_safety',
-      },
+      } : null,
     };
   }
   const acceptedProfiles = options.skipLegacySafety
@@ -323,11 +324,11 @@ function classificationWithMonitor(analysis, exposureRatio, options = {}, monito
       ...deterministic,
       source: 'DETERMINISTIC',
       deterministicProfile: deterministic.profile,
-      learning: {
+      learning: usesLearningPolicy ? {
         policyVersion: options.learningPolicy?.version || 'default-v1',
         usedGemini: false,
         reason: 'gemini_unavailable_or_rejected',
-      },
+      } : null,
     };
   }
   const learningPolicy = options.learningPolicy || {};

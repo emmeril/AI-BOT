@@ -15,10 +15,7 @@ const {
   recommendationFor,
   recommendationForRiskState,
 } = require('./src/adaptive-grid-supervisor');
-const { GeminiAdaptiveMonitor } = require('./src/gemini-adaptive-monitor');
-const { GeminiApiKeyPool, createGeminiHttpError } = require('./src/gemini-api-keys');
 const { AdaptiveSupervisorOutcomeJournal } = require('./src/adaptive-supervisor-outcome-journal');
-const { AdaptiveSupervisorLearner } = require('./src/adaptive-supervisor-learner');
 const { BinanceFuturesUserStream } = require('./src/binance-futures-user-stream');
 const { startFuturesDashboardServer } = require('./src/futures-dashboard-server');
 const {
@@ -267,42 +264,6 @@ const ADAPTIVE_RISK_STATE_MACHINE_MARGIN_CALL_HOLD_MS = Math.max(
   Config.number('ADAPTIVE_RISK_STATE_MACHINE_MARGIN_CALL_HOLD_MINUTES', 60), 1
 ) * MINUTE_MS;
 
-// ------------------------------
-//  Smart Grid Range Advisor (Gemini AI)
-// ------------------------------
-const GEMINI_RANGE_ADVISOR_ENABLED = Config.boolean('GEMINI_RANGE_ADVISOR_ENABLED', false);
-const GEMINI_API_KEY = Config.get('GEMINI_API_KEY', '');
-const GEMINI_API_KEYS = [...new Set([GEMINI_API_KEY, ...Config.list('GEMINI_API_KEYS', '')].filter(Boolean))];
-const GEMINI_API_KEY_POOL = new GeminiApiKeyPool({ apiKeys: GEMINI_API_KEYS });
-const GEMINI_MODEL = Config.get('GEMINI_MODEL', 'gemini-2.5-flash');
-const GEMINI_API_BASE_URL = Config.get(
-  'GEMINI_API_BASE_URL',
-  'https://generativelanguage.googleapis.com'
-);
-const GEMINI_ADAPTIVE_MONITOR_ENABLED = Config.boolean('GEMINI_ADAPTIVE_MONITOR_ENABLED', false);
-const GEMINI_ADAPTIVE_MONITOR_INTERVAL_MS = Math.max(
-  Config.number('GEMINI_ADAPTIVE_MONITOR_INTERVAL_MINUTES', 15), 1
-) * MINUTE_MS;
-const GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE = Config.number(
-  'GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE', 0.6
-);
-const GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS = Config.number('GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS', 20_000);
-const GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS = Math.max(
-  Config.number('GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS', 5000), 0
-);
-const GEMINI_ADAPTIVE_MONITOR_REQUEST_JITTER_MS = Math.max(
-  Config.number('GEMINI_ADAPTIVE_MONITOR_REQUEST_JITTER_MS', 250), 0
-);
-const GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS = Config.number('GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS', 3);
-const GEMINI_ADAPTIVE_MONITOR_RETRY_BASE_MS = Math.max(
-  Config.number('GEMINI_ADAPTIVE_MONITOR_RETRY_BASE_MS', 2000), 0
-);
-const GEMINI_ADAPTIVE_MONITOR_RETRY_MAX_MS = Math.max(
-  Config.number('GEMINI_ADAPTIVE_MONITOR_RETRY_MAX_MS', 15000), 0
-);
-const GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MS = Math.max(
-  Config.number('GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MINUTES', 60), 0
-) * MINUTE_MS;
 const ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED = Config.boolean(
   'ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED', false
 );
@@ -315,128 +276,6 @@ const ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_LOG_FILE = Config.get(
 const ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE = Config.get(
   'ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE', 'adaptive-supervisor-outcomes-state.json'
 );
-const ADAPTIVE_SUPERVISOR_LEARNING_ENABLED = Config.boolean('ADAPTIVE_SUPERVISOR_LEARNING_ENABLED', false);
-const ADAPTIVE_SUPERVISOR_LEARNING_AUTO_APPLY = Config.boolean(
-  'ADAPTIVE_SUPERVISOR_LEARNING_AUTO_APPLY', false
-);
-const ADAPTIVE_SUPERVISOR_LEARNING_INTERVAL_MS = Math.max(
-  Config.number('ADAPTIVE_SUPERVISOR_LEARNING_INTERVAL_MINUTES', 60), 1
-) * MINUTE_MS;
-const ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES = Config.number(
-  'ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES', 60
-);
-const ADAPTIVE_SUPERVISOR_LEARNING_VALIDATION_RATIO = Config.number(
-  'ADAPTIVE_SUPERVISOR_LEARNING_VALIDATION_RATIO', 0.3
-);
-const ADAPTIVE_SUPERVISOR_LEARNING_MIN_VALIDATION_EPISODES = Config.number(
-  'ADAPTIVE_SUPERVISOR_LEARNING_MIN_VALIDATION_EPISODES', 15
-);
-const ADAPTIVE_SUPERVISOR_LEARNING_MIN_BUCKET_EPISODES = Config.number(
-  'ADAPTIVE_SUPERVISOR_LEARNING_MIN_BUCKET_EPISODES', 10
-);
-const ADAPTIVE_SUPERVISOR_LEARNING_MIN_ACCURACY = Config.number(
-  'ADAPTIVE_SUPERVISOR_LEARNING_MIN_ACCURACY', 0.6
-);
-const ADAPTIVE_SUPERVISOR_LEARNING_MIN_IMPROVEMENT = Config.number(
-  'ADAPTIVE_SUPERVISOR_LEARNING_MIN_IMPROVEMENT', 0.05
-);
-const ADAPTIVE_SUPERVISOR_LEARNING_HORIZON_HOURS = Config.number(
-  'ADAPTIVE_SUPERVISOR_LEARNING_HORIZON_HOURS', 4
-);
-const ADAPTIVE_SUPERVISOR_LEARNING_EPISODE_GAP_MINUTES = Config.number(
-  'ADAPTIVE_SUPERVISOR_LEARNING_EPISODE_GAP_MINUTES', 120
-);
-const ADAPTIVE_SUPERVISOR_LEARNING_MOVE_THRESHOLD_PCT = Config.number(
-  'ADAPTIVE_SUPERVISOR_LEARNING_MOVE_THRESHOLD_PCT', 0.5
-);
-const ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_ENABLED = Config.boolean(
-  'ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_ENABLED', false
-);
-const ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_MIN_EPISODES = Config.number(
-  'ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_MIN_EPISODES', 20
-);
-const ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_MIN_DEGRADATION = Config.number(
-  'ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_MIN_DEGRADATION', 0.05
-);
-const ADAPTIVE_SUPERVISOR_LEARNING_REPORT_FILE = Config.get(
-  'ADAPTIVE_SUPERVISOR_LEARNING_REPORT_FILE', 'adaptive-supervisor-learning-report.json'
-);
-const ADAPTIVE_SUPERVISOR_LEARNING_CANDIDATE_FILE = Config.get(
-  'ADAPTIVE_SUPERVISOR_LEARNING_CANDIDATE_FILE', 'adaptive-supervisor-policy-candidate.json'
-);
-const ADAPTIVE_SUPERVISOR_LEARNING_POLICY_FILE = Config.get(
-  'ADAPTIVE_SUPERVISOR_LEARNING_POLICY_FILE', 'adaptive-supervisor-learning-policy.json'
-);
-const ADAPTIVE_SUPERVISOR_LEARNING_HISTORY_FILE = Config.get(
-  'ADAPTIVE_SUPERVISOR_LEARNING_HISTORY_FILE', 'adaptive-supervisor-policy-history.jsonl'
-);
-const GEMINI_RANGE_ADVISOR_TIMEFRAME = Config.get('GEMINI_RANGE_ADVISOR_TIMEFRAME', '1h');
-
-// Converts a ccxt-style timeframe string (e.g. '1m', '15m', '1h', '4h', '1d')
-// into milliseconds. Prefers ccxt's own parser (so it stays consistent with
-// however the exchange defines each unit) and falls back to a manual regex
-// parser, then to 60 minutes, if that's unavailable or the string is invalid.
-function timeframeToMs(timeframe) {
-  const fallbackMs = 60 * MINUTE_MS;
-  if (typeof timeframe !== 'string' || !timeframe.trim()) return fallbackMs;
-  if (ccxt?.Exchange?.parseTimeframe) {
-    try {
-      const seconds = ccxt.Exchange.parseTimeframe(timeframe);
-      if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
-    } catch (err) {
-      // fall through to manual parsing below
-    }
-  }
-  const match = /^(\d+)([mhdwM])$/.exec(timeframe.trim());
-  if (!match) {
-    console.warn(
-      `[CONFIG] Could not parse GEMINI_RANGE_ADVISOR_TIMEFRAME "${timeframe}"; defaulting interval sync to 60m.`
-    );
-    return fallbackMs;
-  }
-  const amount = Number(match[1]);
-  const unitMs = {
-    m: MINUTE_MS,
-    h: 60 * MINUTE_MS,
-    d: 24 * 60 * MINUTE_MS,
-    w: 7 * 24 * 60 * MINUTE_MS,
-    M: 30 * 24 * 60 * MINUTE_MS,
-  }[match[2]];
-  return amount * unitMs;
-}
-
-const GEMINI_RANGE_ADVISOR_TIMEFRAME_MS = timeframeToMs(GEMINI_RANGE_ADVISOR_TIMEFRAME);
-
-// Small grace period after an exchange candle-close boundary before the advisor
-// is allowed to fetch it, in case the exchange takes a moment to finalize/publish
-// the just-closed candle. Doesn't delay by a full cycle - just a few seconds.
-const GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS = Math.max(
-  Config.number('GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_SECONDS', 5),
-  0
-) * 1000;
-
-// Gemini is called at most once per candle close for GEMINI_RANGE_ADVISOR_TIMEFRAME
-// (e.g. once an hour for '1h'), never more often - a new candle for that
-// timeframe only closes once per period, so calling more often would just
-// re-analyze the same OHLCV data and burn API quota for no new information.
-// Change GEMINI_RANGE_ADVISOR_TIMEFRAME if you want a different call frequency.
-const GEMINI_RANGE_ADVISOR_CANDLE_LIMIT = Config.number('GEMINI_RANGE_ADVISOR_CANDLE_LIMIT', 100);
-// How far the AI-recommended range is allowed to differ from the current
-// auto/manual range before being applied; a safety clamp against bad output.
-const GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT = Config.number('GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT', 40);
-// Minimum width (as a % of current price) the AI-recommended range must span.
-// Passed into the prompt as an instruction so Gemini doesn't suggest an overly
-// narrow range that would cause grid levels to bunch up too tightly.
-const GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT = Config.number('GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT', 2);
-const GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE = Config.number('GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE', 0.55);
-const GEMINI_RANGE_ADVISOR_TIMEOUT_MS = Config.number('GEMINI_RANGE_ADVISOR_TIMEOUT_MS', 20_000);
-const GEMINI_RANGE_ADVISOR_APPLY_ON = Config.get('GEMINI_RANGE_ADVISOR_APPLY_ON', 'AUTO_RANGE_ONLY').toUpperCase();
-const GEMINI_RANGE_ADVISOR_STATE_FILE = Config.get(
-  'GEMINI_RANGE_ADVISOR_STATE_FILE',
-  'gemini-range-advisor-state.json'
-);
-const GEMINI_RANGE_ADVISOR_STATE_PATH = path.resolve(process.cwd(), GEMINI_RANGE_ADVISOR_STATE_FILE);
-
 // In the futures bot these legacy variable names represent position ROI
 // percentages, not market prices. Zero disables the corresponding exit.
 const STOP_LOSS_ROI_PCT = Config.number('GRID_STOP_LOSS_PRICE', -100);
@@ -451,10 +290,6 @@ const TELEGRAM_BOT_TOKEN = Config.get('TELEGRAM_BOT_TOKEN', '');
 const TELEGRAM_CHAT_ID = Config.get('TELEGRAM_CHAT_ID', '');
 const TELEGRAM_API_URL = Config.get('TELEGRAM_API_URL', 'https://api.telegram.org');
 const TELEGRAM_TIMEOUT_MS = Config.number('TELEGRAM_TIMEOUT_MS', 10_000);
-const TELEGRAM_STATUS_REPORT_ENABLED = Config.boolean('FUTURES_TELEGRAM_STATUS_REPORT_ENABLED', false);
-const TELEGRAM_STATUS_REPORT_INTERVAL_MS = Math.max(
-  Config.number('FUTURES_TELEGRAM_STATUS_REPORT_INTERVAL_MINUTES', 60), 1
-) * MINUTE_MS;
 
 const MAX_PROCESSED_TRADE_IDS = 2000;
 const TRADE_FETCH_LIMIT = 100;
@@ -533,19 +368,6 @@ function sleepSync(ms) {
   } catch {
     const until = Date.now() + ms;
     while (Date.now() < until) {}
-  }
-}
-
-async function withTimeout(promise, timeoutMs, message) {
-  let timeoutId;
-  const timeout = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
-    if (timeoutId.unref) timeoutId.unref();
-  });
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 
@@ -755,42 +577,6 @@ function validateRuntimeConfiguration() {
   if (TELEGRAM_ENABLED && (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID)) {
     errors.push('TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required when TELEGRAM_ENABLED=true');
   }
-  if (GEMINI_RANGE_ADVISOR_ENABLED) {
-    if (!GEMINI_API_KEYS.length) {
-      errors.push('GEMINI_API_KEY or GEMINI_API_KEYS is required when GEMINI_RANGE_ADVISOR_ENABLED=true');
-    }
-    requirePositive('GEMINI_RANGE_ADVISOR_CANDLE_LIMIT', GEMINI_RANGE_ADVISOR_CANDLE_LIMIT);
-    requirePositive('GEMINI_RANGE_ADVISOR_TIMEOUT_MS', GEMINI_RANGE_ADVISOR_TIMEOUT_MS);
-    requireNonNegative('GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS', GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS);
-    if (!(GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE >= 0 && GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE <= 1)) {
-      errors.push('GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE must be between 0 and 1');
-    }
-    if (!['AUTO_RANGE_ONLY', 'ALWAYS'].includes(GEMINI_RANGE_ADVISOR_APPLY_ON)) {
-      errors.push('GEMINI_RANGE_ADVISOR_APPLY_ON must be AUTO_RANGE_ONLY or ALWAYS');
-    }
-  }
-  if (GEMINI_ADAPTIVE_MONITOR_ENABLED) {
-    if (!ADAPTIVE_GRID_SUPERVISOR_ENABLED) {
-      errors.push('GEMINI_ADAPTIVE_MONITOR_ENABLED requires ADAPTIVE_GRID_SUPERVISOR_ENABLED=true');
-    }
-    if (!GEMINI_API_KEYS.length) {
-      errors.push('GEMINI_API_KEY or GEMINI_API_KEYS is required when GEMINI_ADAPTIVE_MONITOR_ENABLED=true');
-    }
-    requirePositive('GEMINI_ADAPTIVE_MONITOR_INTERVAL_MINUTES', GEMINI_ADAPTIVE_MONITOR_INTERVAL_MS);
-    requirePositive('GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS', GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS);
-    requireNonNegative(
-      'GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS',
-      GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS
-    );
-    requireNonNegative('GEMINI_ADAPTIVE_MONITOR_REQUEST_JITTER_MS', GEMINI_ADAPTIVE_MONITOR_REQUEST_JITTER_MS);
-    requireInteger('GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS', GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS, 1);
-    requireNonNegative('GEMINI_ADAPTIVE_MONITOR_RETRY_BASE_MS', GEMINI_ADAPTIVE_MONITOR_RETRY_BASE_MS);
-    requireNonNegative('GEMINI_ADAPTIVE_MONITOR_RETRY_MAX_MS', GEMINI_ADAPTIVE_MONITOR_RETRY_MAX_MS);
-    requireNonNegative('GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MINUTES', GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MS);
-    if (!(GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE >= 0 && GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE <= 1)) {
-      errors.push('GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE must be between 0 and 1');
-    }
-  }
   if (ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED) {
     if (!ADAPTIVE_GRID_SUPERVISOR_ENABLED) {
       errors.push('ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED requires ADAPTIVE_GRID_SUPERVISOR_ENABLED=true');
@@ -805,65 +591,6 @@ function validateRuntimeConfiguration() {
       errors.push('ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE must not be empty');
     }
   }
-  if (ADAPTIVE_SUPERVISOR_LEARNING_ENABLED) {
-    if (!ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED) {
-      errors.push('ADAPTIVE_SUPERVISOR_LEARNING_ENABLED requires ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED=true');
-    }
-    requirePositive('ADAPTIVE_SUPERVISOR_LEARNING_INTERVAL_MINUTES', ADAPTIVE_SUPERVISOR_LEARNING_INTERVAL_MS);
-    requireInteger('ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES', ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES, 10);
-    requireInteger(
-      'ADAPTIVE_SUPERVISOR_LEARNING_MIN_VALIDATION_EPISODES',
-      ADAPTIVE_SUPERVISOR_LEARNING_MIN_VALIDATION_EPISODES,
-      5
-    );
-    requireInteger(
-      'ADAPTIVE_SUPERVISOR_LEARNING_MIN_BUCKET_EPISODES',
-      ADAPTIVE_SUPERVISOR_LEARNING_MIN_BUCKET_EPISODES,
-      1
-    );
-    if (ADAPTIVE_SUPERVISOR_LEARNING_MIN_VALIDATION_EPISODES >= ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES) {
-      errors.push('ADAPTIVE_SUPERVISOR_LEARNING_MIN_VALIDATION_EPISODES must be below ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES');
-    }
-    requirePositive(
-      'ADAPTIVE_SUPERVISOR_LEARNING_EPISODE_GAP_MINUTES',
-      ADAPTIVE_SUPERVISOR_LEARNING_EPISODE_GAP_MINUTES
-    );
-    requirePositive(
-      'ADAPTIVE_SUPERVISOR_LEARNING_MOVE_THRESHOLD_PCT',
-      ADAPTIVE_SUPERVISOR_LEARNING_MOVE_THRESHOLD_PCT
-    );
-    if (!(ADAPTIVE_SUPERVISOR_LEARNING_VALIDATION_RATIO > 0 &&
-        ADAPTIVE_SUPERVISOR_LEARNING_VALIDATION_RATIO < 0.5)) {
-      errors.push('ADAPTIVE_SUPERVISOR_LEARNING_VALIDATION_RATIO must be greater than 0 and below 0.5');
-    }
-    if (!(ADAPTIVE_SUPERVISOR_LEARNING_MIN_ACCURACY >= 0.5 &&
-        ADAPTIVE_SUPERVISOR_LEARNING_MIN_ACCURACY <= 1)) {
-      errors.push('ADAPTIVE_SUPERVISOR_LEARNING_MIN_ACCURACY must be between 0.5 and 1');
-    }
-    if (!(ADAPTIVE_SUPERVISOR_LEARNING_MIN_IMPROVEMENT >= 0 &&
-        ADAPTIVE_SUPERVISOR_LEARNING_MIN_IMPROVEMENT <= 0.5)) {
-      errors.push('ADAPTIVE_SUPERVISOR_LEARNING_MIN_IMPROVEMENT must be between 0 and 0.5');
-    }
-    if (ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_ENABLED) {
-      requireInteger(
-        'ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_MIN_EPISODES',
-        ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_MIN_EPISODES,
-        10
-      );
-      if (!(ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_MIN_DEGRADATION > 0 &&
-          ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_MIN_DEGRADATION <= 0.5)) {
-        errors.push('ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_MIN_DEGRADATION must be greater than 0 and at most 0.5');
-      }
-    }
-    if (![4, 24].includes(ADAPTIVE_SUPERVISOR_LEARNING_HORIZON_HOURS)) {
-      errors.push('ADAPTIVE_SUPERVISOR_LEARNING_HORIZON_HOURS must be 4 or 24');
-    }
-    if (!ADAPTIVE_SUPERVISOR_LEARNING_REPORT_FILE || !ADAPTIVE_SUPERVISOR_LEARNING_CANDIDATE_FILE ||
-        !ADAPTIVE_SUPERVISOR_LEARNING_POLICY_FILE || !ADAPTIVE_SUPERVISOR_LEARNING_HISTORY_FILE) {
-      errors.push('Adaptive Supervisor learning file paths must not be empty');
-    }
-  }
-
   if (
     GRID_TOTAL_INVESTMENT_USDT > 0 &&
     GRID_ORDER_SIZE_USDT > 0 &&
@@ -1354,310 +1081,6 @@ class GridState {
 // ------------------------------
 //  Binance-Style Futures (USDⓈ-M) Grid Engine
 // ------------------------------
-// ------------------------------
-//  Smart Grid Range Advisor (Gemini AI)
-// ------------------------------
-//
-// Re-evaluated every cycle (cheap local checks), but only actually calls the
-// Gemini API right after a new exchange candle closes for GEMINI_RANGE_ADVISOR_TIMEFRAME
-// (epoch-aligned boundaries, e.g. on the hour for '1h'), to avoid burning API
-// quota/cost on tight INTERVAL_MINUTES.
-//
-// Pipeline per symbol:
-//   1. fetchOHLCV (ccxt)              -> candle history
-//   2. computeIndicators (pure JS)    -> RSI(14), ATR(14), Bollinger Bands(20,2)
-//   3. Gemini API -> { lower, upper, confidence, reasoning }
-//   4. Sanity clamp vs. current price / max shift % / min confidence
-//   5. Cache result; FuturesGridEngine.buildRange() consumes the cached suggestion.
-class TechnicalIndicators {
-  static rsi(closes, period = 14) {
-    if (closes.length < period + 1) return null;
-    let gains = 0;
-    let losses = 0;
-    for (let i = closes.length - period; i < closes.length; i++) {
-      const diff = closes[i] - closes[i - 1];
-      if (diff >= 0) gains += diff;
-      else losses -= diff;
-    }
-    const avgGain = gains / period;
-    const avgLoss = losses / period;
-    if (avgLoss === 0) return 100;
-    const rs = avgGain / avgLoss;
-    return roundNumber(100 - 100 / (1 + rs), 2);
-  }
-
-  static atr(candles, period = 14) {
-    if (candles.length < period + 1) return null;
-    const trueRanges = [];
-    for (let i = 1; i < candles.length; i++) {
-      const [, , high, low] = candles[i];
-      const prevClose = candles[i - 1][4];
-      trueRanges.push(Math.max(
-        high - low,
-        Math.abs(high - prevClose),
-        Math.abs(low - prevClose)
-      ));
-    }
-    const lastN = trueRanges.slice(-period);
-    const atr = lastN.reduce((a, b) => a + b, 0) / lastN.length;
-    return roundNumber(atr, 8);
-  }
-
-  static bollinger(closes, period = 20, stdDevMultiplier = 2) {
-    if (closes.length < period) return null;
-    const window = closes.slice(-period);
-    const mean = window.reduce((a, b) => a + b, 0) / period;
-    const variance = window.reduce((sum, v) => sum + (v - mean) ** 2, 0) / period;
-    const stdDev = Math.sqrt(variance);
-    return {
-      middle: roundNumber(mean, 8),
-      upper: roundNumber(mean + stdDevMultiplier * stdDev, 8),
-      lower: roundNumber(mean - stdDevMultiplier * stdDev, 8),
-      stdDev: roundNumber(stdDev, 8),
-    };
-  }
-
-  static volatilityPct(candles) {
-    if (!candles.length) return null;
-    const closes = candles.map(c => c[4]);
-    const high = Math.max(...closes);
-    const low = Math.min(...closes);
-    if (low <= 0) return null;
-    return roundNumber(((high - low) / low) * 100, 2);
-  }
-}
-
-class GeminiRangeAdvisor {
-  constructor(exchange) {
-    this.exchange = exchange;
-    this.cache = this.loadCache();
-  }
-
-  loadCache() {
-    try {
-      if (fs.existsSync(GEMINI_RANGE_ADVISOR_STATE_PATH)) {
-        return JSON.parse(fs.readFileSync(GEMINI_RANGE_ADVISOR_STATE_PATH, 'utf8')) || {};
-      }
-    } catch (err) {
-      console.warn('[GEMINI] Failed to read advisor cache, starting fresh:', err.message);
-    }
-    return {};
-  }
-
-  async saveCache() {
-    await AtomicFileWriter.write(GEMINI_RANGE_ADVISOR_STATE_PATH, () => JSON.stringify(this.cache, null, 2));
-  }
-
-  isEnabled() {
-    return GEMINI_RANGE_ADVISOR_ENABLED && GEMINI_API_KEY_POOL.size > 0;
-  }
-
-  /**
-   * Returns the cached/fresh suggestion for a symbol, or null if disabled,
-   * not yet due for refresh, or the last attempt failed.
-   * This is cheap to call every cycle: it only triggers a real Gemini call
-   * right after a new exchange candle closes for GEMINI_RANGE_ADVISOR_TIMEFRAME
-   * (epoch-aligned, e.g. every hour on the hour for '1h'), instead of on an
-   * arbitrary rolling clock started from whenever the bot happened to boot.
-   */
-  async getSuggestion(symbol, currentPrice) {
-    if (!this.isEnabled()) return null;
-    const entry = this.cache[symbol];
-    const now = Date.now();
-    const currentBoundary = Math.floor(now / GEMINI_RANGE_ADVISOR_TIMEFRAME_MS) * GEMINI_RANGE_ADVISOR_TIMEFRAME_MS;
-    const readyAt = currentBoundary + GEMINI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS;
-    const lastBoundary = entry?.candleBoundary ?? -1;
-    const due = now >= readyAt && currentBoundary > lastBoundary;
-    if (!due) return entry?.suggestion || null;
-
-    try {
-      const suggestion = await this.computeSuggestion(symbol, currentPrice);
-      this.cache[symbol] = { fetchedAt: now, candleBoundary: currentBoundary, suggestion };
-      await this.saveCache();
-      return suggestion;
-    } catch (err) {
-      console.warn(`[GEMINI] ${symbol} range advisor failed, keeping previous suggestion:`, err.message);
-      // Keep stale suggestion (if any) but stamp the boundary so we don't
-      // hammer the API every cycle while it's failing; retry on the next
-      // candle close instead.
-      if (entry) {
-        entry.fetchedAt = now;
-        entry.candleBoundary = currentBoundary;
-      } else {
-        this.cache[symbol] = { fetchedAt: now, candleBoundary: currentBoundary, suggestion: null, lastError: err.message };
-      }
-      await this.saveCache();
-      return entry?.suggestion || null;
-    }
-  }
-
-  async computeSuggestion(symbol, currentPrice) {
-    const candles = await retry(() => this.exchange.fetchOHLCV(
-      symbol,
-      GEMINI_RANGE_ADVISOR_TIMEFRAME,
-      undefined,
-      GEMINI_RANGE_ADVISOR_CANDLE_LIMIT
-    ));
-    if (!Array.isArray(candles) || candles.length < 20) {
-      throw new Error(`insufficient candle history (${candles?.length || 0})`);
-    }
-    const closes = candles.map(c => c[4]);
-    const indicators = {
-      rsi14: TechnicalIndicators.rsi(closes, 14),
-      atr14: TechnicalIndicators.atr(candles, 14),
-      bollinger20: TechnicalIndicators.bollinger(closes, 20, 2),
-      volatilityPct: TechnicalIndicators.volatilityPct(candles),
-      candleCount: candles.length,
-      timeframe: GEMINI_RANGE_ADVISOR_TIMEFRAME,
-    };
-
-    const raw = await this.callGemini(symbol, currentPrice, indicators);
-    return this.sanitizeSuggestion(symbol, currentPrice, raw);
-  }
-
-  buildPrompt(symbol, priceOrContext, indicators = {}) {
-    const context = isPlainObject(priceOrContext)
-      ? priceOrContext
-      : { currentPrice: priceOrContext };
-    const currentPrice = Number(context.currentPrice);
-    const trailingUpJustShifted = Boolean(context.trailingUpJustShifted);
-    const trailingDownJustShifted = Boolean(context.trailingDownJustShifted);
-
-    return `You are a quantitative trading assistant advising a LEVERAGED FUTURES GRID TRADING bot (${LEVERAGE}x leverage, ${MARGIN_MODE} margin, long-only: buy low / sell high within a fixed price range).
-Grid bots perform best when the price range tightly matches realistic near-term price action (ranging/sideways market), and perform badly if the price breaks far outside the range or if the market is strongly trending.
-
-Symbol: ${symbol}
-Current price: ${currentPrice}
-Current grid range: ${context.lower ?? 'unknown'}-${context.upper ?? 'unknown'}
-Timeframe analyzed: ${indicators.timeframe} (${indicators.candleCount} candles)
-RSI(14): ${indicators.rsi14}
-ATR(14): ${indicators.atr14}
-Bollinger Bands(20,2): lower=${indicators.bollinger20?.lower}, middle=${indicators.bollinger20?.middle}, upper=${indicators.bollinger20?.upper}
-Recent range volatility: ${indicators.volatilityPct}%
-Trailing Up Just Shifted: ${trailingUpJustShifted}
-Trailing Down Just Shifted: ${trailingDownJustShifted}
-
-${trailingUpJustShifted ? 'Do not block solely because price is near the new upper bound immediately after a completed trailing-up shift.' : ''}
-${trailingDownJustShifted ? 'Do not block solely because price is near the new lower bound immediately after a completed trailing-down shift.' : ''}
-
-Based on all of this, recommend a grid trading price range (lower and upper bound) that is appropriate for the next few hours to a day, and assess whether current conditions favor grid trading (ranging) or disfavor it (strongly trending, about to break out).
-
-Minimum range width requirement: the recommended range MUST span at least ${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}% of the current price (i.e. upper - lower >= ${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}% * ${currentPrice}). Do not recommend a narrower range even if volatility appears very low; widen the range as needed to meet this minimum.
-
-Respond with ONLY a single valid JSON object, no markdown fences, no commentary, in exactly this shape:
-{
-  "lower": <number>,
-  "upper": <number>,
-  "confidence": <number between 0 and 1>,
-  "marketCondition": "<RANGING|TRENDING_UP|TRENDING_DOWN|VOLATILE|UNCERTAIN>",
-  "reasoning": "<short 1-2 sentence explanation>"
-}`;
-  }
-
-  async callGemini(symbol, currentPrice, indicators) {
-    const prompt = this.buildPrompt(symbol, currentPrice, indicators);
-    const body = {
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.2 },
-    };
-    const payload = JSON.stringify(body);
-    // API key is sent via the x-goog-api-key header instead of the URL query
-    // string. Query strings are commonly written to access logs, reverse-proxy
-    // logs, and error messages (e.g. this function's own HTTP-status error
-    // includes response text, and some infra logs the full request URL) — put
-    // the key in the URL and it can leak into those logs. The header is not
-    // logged by default infra and is Google's documented alternative to ?key=.
-    const url = `${GEMINI_API_BASE_URL}/v1beta/models/${GEMINI_MODEL}:generateContent`;
-
-    const text = await GEMINI_API_KEY_POOL.run(apiKey => withTimeout(
-      new Promise((resolve, reject) => {
-        const req = https.request(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(payload),
-            'x-goog-api-key': apiKey,
-          },
-        }, response => {
-          let raw = '';
-          response.setEncoding('utf8');
-          response.on('data', chunk => { raw += chunk; });
-          response.on('end', () => {
-            if (response.statusCode < 200 || response.statusCode >= 300) {
-              reject(createGeminiHttpError(response.statusCode, raw, response.headers));
-              return;
-            }
-            try {
-              const json = JSON.parse(raw);
-              const parts = json?.candidates?.[0]?.content?.parts || [];
-              const combined = parts.map(p => p.text || '').join('').trim();
-              if (!combined) {
-                reject(new Error('Gemini API returned an empty response'));
-                return;
-              }
-              resolve(combined);
-            } catch (err) {
-              reject(new Error(`Failed to parse Gemini API response: ${err.message}`));
-            }
-          });
-        });
-        req.once('error', reject);
-        req.end(payload);
-      }),
-      GEMINI_RANGE_ADVISOR_TIMEOUT_MS,
-      `Gemini API call timed out after ${GEMINI_RANGE_ADVISOR_TIMEOUT_MS}ms`
-    ));
-
-    const cleaned = text.replace(/```json|```/g, '').trim();
-    let parsed;
-    try {
-      parsed = JSON.parse(cleaned);
-    } catch (err) {
-      throw new Error(`Gemini did not return valid JSON: ${cleaned.slice(0, 200)}`);
-    }
-    return parsed;
-  }
-
-  sanitizeSuggestion(symbol, currentPrice, raw) {
-    const lower = Number(raw?.lower);
-    const upper = Number(raw?.upper);
-    const confidence = Number(raw?.confidence);
-    if (!(lower > 0) || !(upper > 0) || !(lower < upper)) {
-      throw new Error(`Gemini returned an invalid range: lower=${raw?.lower}, upper=${raw?.upper}`);
-    }
-    if (!(confidence >= 0 && confidence <= 1)) {
-      throw new Error(`Gemini returned an invalid confidence: ${raw?.confidence}`);
-    }
-    // Safety clamp: the suggested range must contain the current price and
-    // must not deviate further than GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT from it,
-    // so a hallucinated or out-of-date suggestion can't blow up the grid.
-    const maxLower = currentPrice * (1 - GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT / 100);
-    const maxUpper = currentPrice * (1 + GEMINI_RANGE_ADVISOR_MAX_SHIFT_PCT / 100);
-    const clampedLower = Math.max(lower, maxLower);
-    const clampedUpper = Math.min(upper, maxUpper);
-    if (!(clampedLower < currentPrice && clampedUpper > currentPrice)) {
-      throw new Error(
-        `Gemini suggested range ${lower}-${upper} does not bracket current price ${currentPrice} after clamping`
-      );
-    }
-    const suggestion = {
-      lower: roundNumber(clampedLower, 8),
-      upper: roundNumber(clampedUpper, 8),
-      confidence: roundNumber(confidence, 2),
-      marketCondition: typeof raw?.marketCondition === 'string' ? raw.marketCondition : 'UNCERTAIN',
-      reasoning: typeof raw?.reasoning === 'string' ? raw.reasoning.slice(0, 500) : '',
-      wasClamped: clampedLower !== roundNumber(lower, 8) || clampedUpper !== roundNumber(upper, 8),
-    };
-    console.log(
-      `[GEMINI] ${symbol} suggestion: range=${suggestion.lower}-${suggestion.upper} ` +
-      `confidence=${suggestion.confidence} condition=${suggestion.marketCondition}` +
-      `${suggestion.wasClamped ? ' (clamped to safety bounds)' : ''} — ${suggestion.reasoning}`
-    );
-    return suggestion;
-  }
-}
-
-const AIGridValidator = GeminiRangeAdvisor;
 
 class FuturesGridEngine {
   constructor() {
@@ -1673,7 +1096,6 @@ class FuturesGridEngine {
     this.roiCloseOrders = new Map();
     this.lastFundingSyncAt = new Map();
     this.exposureLimits = { symbol: FUTURES_MAX_SYMBOL_EXPOSURE_USDT, total: FUTURES_MAX_TOTAL_EXPOSURE_USDT };
-    this.telegramStatusTimer = null;
     this.telegramCommandTimer = null;
     this.telegramCommandProcessing = false;
     this.userStreamReconcileTimers = new Map();
@@ -1686,50 +1108,11 @@ class FuturesGridEngine {
     this.adaptiveMinimumWarnings = new Set();
     this.adaptiveGridDecisions = new Map();
     this.lastFibonacciDirectionLog = new Map();
-    this.lastGeminiAdaptiveLog = new Map();
-    this.rangeAdvisor = new GeminiRangeAdvisor(this.exchange);
-    this.geminiAdaptiveMonitor = new GeminiAdaptiveMonitor({
-      enabled: GEMINI_ADAPTIVE_MONITOR_ENABLED,
-      apiKeyPool: GEMINI_API_KEY_POOL,
-      baseUrl: GEMINI_API_BASE_URL,
-      model: GEMINI_MODEL,
-      minimumConfidence: GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE,
-      intervalMs: GEMINI_ADAPTIVE_MONITOR_INTERVAL_MS,
-      timeoutMs: GEMINI_ADAPTIVE_MONITOR_TIMEOUT_MS,
-      minimumRequestIntervalMs: GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS,
-      requestJitterMs: GEMINI_ADAPTIVE_MONITOR_REQUEST_JITTER_MS,
-      maxAttempts: GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS,
-      retryBaseDelayMs: GEMINI_ADAPTIVE_MONITOR_RETRY_BASE_MS,
-      retryMaxDelayMs: GEMINI_ADAPTIVE_MONITOR_RETRY_MAX_MS,
-      staleTtlMs: GEMINI_ADAPTIVE_MONITOR_STALE_TTL_MS,
-    });
     this.adaptiveSupervisorOutcomeJournal = new AdaptiveSupervisorOutcomeJournal({
       enabled: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED,
       mode: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_MODE,
       logPath: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_LOG_FILE,
       statePath: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_STATE_FILE,
-    });
-    this.adaptiveSupervisorLearner = new AdaptiveSupervisorLearner({
-      enabled: ADAPTIVE_SUPERVISOR_LEARNING_ENABLED,
-      autoApply: ADAPTIVE_SUPERVISOR_LEARNING_AUTO_APPLY,
-      intervalMs: ADAPTIVE_SUPERVISOR_LEARNING_INTERVAL_MS,
-      minimumEpisodes: ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES,
-      validationRatio: ADAPTIVE_SUPERVISOR_LEARNING_VALIDATION_RATIO,
-      minimumValidationEpisodes: ADAPTIVE_SUPERVISOR_LEARNING_MIN_VALIDATION_EPISODES,
-      minimumBucketEpisodes: ADAPTIVE_SUPERVISOR_LEARNING_MIN_BUCKET_EPISODES,
-      minimumValidationAccuracy: ADAPTIVE_SUPERVISOR_LEARNING_MIN_ACCURACY,
-      minimumImprovement: ADAPTIVE_SUPERVISOR_LEARNING_MIN_IMPROVEMENT,
-      horizonHours: ADAPTIVE_SUPERVISOR_LEARNING_HORIZON_HOURS,
-      episodeGapMinutes: ADAPTIVE_SUPERVISOR_LEARNING_EPISODE_GAP_MINUTES,
-      moveThresholdPct: ADAPTIVE_SUPERVISOR_LEARNING_MOVE_THRESHOLD_PCT,
-      rollbackEnabled: ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_ENABLED,
-      rollbackMinimumEpisodes: ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_MIN_EPISODES,
-      rollbackMinimumDegradation: ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_MIN_DEGRADATION,
-      journalPath: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_LOG_FILE,
-      reportPath: ADAPTIVE_SUPERVISOR_LEARNING_REPORT_FILE,
-      candidatePath: ADAPTIVE_SUPERVISOR_LEARNING_CANDIDATE_FILE,
-      policyPath: ADAPTIVE_SUPERVISOR_LEARNING_POLICY_FILE,
-      historyPath: ADAPTIVE_SUPERVISOR_LEARNING_HISTORY_FILE,
     });
     this.futuresUserStream = new BinanceFuturesUserStream({
       exchange: this.exchange,
@@ -1929,37 +1312,6 @@ class FuturesGridEngine {
     return true;
   }
 
-  buildGeminiAdaptiveContext(symbol, analysis, currentPrice, exposureRatio) {
-    const symState = this.state.getSymbol(symbol);
-    const position = this.latestPositions?.get(symbol);
-    const account = incomeMetrics(
-      symState.accountIncome,
-      this.latestAccountUnrealized?.get(symbol) ?? numberOrZero(position?.unrealizedPnl)
-    );
-    return {
-      analysis,
-      currentPrice,
-      exposureRatio,
-      allocatedUsdt: this.getAllocatedInvestmentUsdt(symbol),
-      investmentLimitUsdt: GRID_TOTAL_INVESTMENT_USDT,
-      leverage: LEVERAGE,
-      marginMode: MARGIN_MODE,
-      gridCount: GRID_COUNT,
-      position: position ? {
-        contracts: numberOrZero(position.contracts ?? position.info?.positionAmt),
-        entryPrice: numberOrZero(position.entryPrice ?? position.info?.entryPrice),
-        markPrice: numberOrZero(position.markPrice ?? position.info?.markPrice),
-        liquidationPrice: numberOrZero(position.liquidationPrice ?? position.info?.liquidationPrice),
-        unrealizedPnl: numberOrZero(position.unrealizedPnl ?? position.info?.unRealizedProfit),
-      } : null,
-      performance: {
-        realizedGridProfit: numberOrZero(symState.realizedGridProfit),
-        fees: numberOrZero(account.fees),
-        funding: numberOrZero(account.funding),
-      },
-    };
-  }
-
   buildAdaptiveRiskContext(symbol, currentPrice, now = Date.now()) {
     const position = this.latestPositions?.get(symbol);
     const contracts = Math.abs(numberOrZero(position?.contracts ?? position?.info?.positionAmt));
@@ -1981,46 +1333,11 @@ class FuturesGridEngine {
     };
   }
 
-  scheduleGeminiAdaptiveRefresh(symbol, context) {
-    if (!this.geminiAdaptiveMonitor?.isEnabled()) return;
-    this.geminiAdaptiveMonitor.refresh(symbol, context).then(result => {
-      if (!result || this.lastGeminiAdaptiveLog?.get(symbol) === result.decisionId) return;
-      this.lastGeminiAdaptiveLog?.set(symbol, result.decisionId);
-      if (result.source === 'GEMINI_STALE') {
-        console.warn(
-          `[GEMINI-MONITOR] ${symbol} request failed after retries; using last accepted ` +
-          `${result.profile} decision (${Math.round(result.staleAgeMs / 1000)}s old): ${result.error}`
-        );
-        return;
-      }
-      if (result.error) {
-        console.warn(`[GEMINI-MONITOR] ${symbol} failed; deterministic fallback remains active: ${result.error}`);
-        return;
-      }
-      const status = result.accepted ? 'accepted' : 'below-confidence';
-      const reasoning = String(result.reasoning || '').replace(/\s+/g, ' ').trim();
-      const scorecard = result.scorecard;
-      const scorecardSummary = scorecard
-        ? ` regime=${scorecard.marketRegime} risk=${scorecard.riskScore} ` +
-          `buy=${scorecard.buyIntensity} spacing=${scorecard.spacingMultiplier}`
-        : '';
-      console.log(
-        `[GEMINI-MONITOR] ${symbol} profile=${result.profile} confidence=${result.confidence} ` +
-        `status=${status} model=${result.model}${scorecardSummary} ` +
-        `reasons=${result.riskFactors.join(',') || 'none'} ` +
-        `summary=${reasoning}`
-      );
-    }).catch(error => {
-      console.warn(`[GEMINI-MONITOR] ${symbol} refresh failed; deterministic fallback remains active: ${error.message}`);
-    });
-  }
-
   async evaluateAdaptiveSupervisor(symbol, analysis, currentPrice = null) {
     try {
       this.adaptiveSupervisorOutcomeJournal?.observePrice(symbol, currentPrice)
-        .then(() => this.adaptiveSupervisorLearner?.runIfDue())
         .catch(error => {
-          console.warn(`[ADAPTIVE-OUTCOME] ${symbol} outcome or learning run failed: ${error.message}`);
+          console.warn(`[ADAPTIVE-OUTCOME] ${symbol} outcome update failed: ${error.message}`);
         });
       const exposureRatio = GRID_TOTAL_INVESTMENT_USDT > 0
         ? this.getAllocatedInvestmentUsdt(symbol) / GRID_TOTAL_INVESTMENT_USDT
@@ -2029,14 +1346,6 @@ class FuturesGridEngine {
         .map(timeframe => `${timeframe.timeframe}:${timeframe.lastClosedAt}`)
         .sort()
         .join('|') || analysis.generatedAt;
-      const monitorContext = this.buildGeminiAdaptiveContext(
-        symbol,
-        analysis,
-        currentPrice,
-        exposureRatio
-      );
-      const monitorDecision = this.geminiAdaptiveMonitor?.getDecision(symbol) || null;
-      this.scheduleGeminiAdaptiveRefresh(symbol, monitorContext);
       const riskContext = this.buildAdaptiveRiskContext(symbol, currentPrice);
       const lossBand = riskContext.unrealizedPnlPct !== null &&
         riskContext.unrealizedPnlPct <= -ADAPTIVE_RISK_STATE_MACHINE_LOSS_RISK_OFF_PCT
@@ -2055,16 +1364,12 @@ class FuturesGridEngine {
       const riskSignal = ADAPTIVE_RISK_STATE_MACHINE_ENABLED && ADAPTIVE_RISK_STATE_MACHINE_MODE === 'LIVE'
         ? `|risk:${lossBand}:${liquidationBand}:${riskContext.marginCallActive ? 'margin-call' : 'clear'}`
         : '';
-      const learningPolicy = this.adaptiveSupervisorLearner?.getActivePolicy() || null;
-      const signalId = `${marketSignalId}|gemini:${monitorDecision?.decisionId || 'pending'}` +
-        `|learning:${learningPolicy?.version || 'default-v1'}${riskSignal}`;
+      const signalId = `${marketSignalId}${riskSignal}`;
       const decision = this.adaptiveGridSupervisor.evaluate(symbol, {
         analysis,
         exposureRatio,
         riskContext,
         signalId,
-        monitorDecision,
-        learningPolicy,
       });
       if (!decision) return null;
       this.adaptiveGridDecisions.set(symbol, decision);
@@ -2083,7 +1388,6 @@ class FuturesGridEngine {
       console.log(
         `[${label}] ${symbol} profile=${decision.profile} raw=${decision.rawProfile} source=${decision.decisionSource} ` +
         `changed=${decision.changed} exposure=${decision.exposurePct}% ` +
-        `${decision.learning ? `learning=${decision.learning.policyVersion}:${decision.learning.usedGemini ? 'gemini' : 'fallback'} ` : ''}` +
         `${decision.riskState ? `risk=${decision.riskState}->${decision.riskTargetState} ` : ''}` +
         `buy-weight=${weights.upper}/${weights.middle}/${weights.lower} ` +
         `spacing=${decision.recommendation.spacingMultiplier} investment-cap=${GRID_TOTAL_INVESTMENT_USDT}USDT ` +
@@ -2249,26 +1553,11 @@ class FuturesGridEngine {
         await this.evaluateAdaptiveSupervisor(symbol, fibonacciDirection, currentPrice);
       }
     }
-    let rangeSuggestion = fibonacciAllowed
+    const rangeSuggestion = fibonacciAllowed
       ? await this.fibonacciRangeAdvisor.getSuggestion(symbol, currentPrice, Date.now(), {
         direction: appliedDirection,
       })
       : null;
-    let suggestionSource = rangeSuggestion ? 'FIBONACCI' : null;
-    const geminiAllowed = GEMINI_RANGE_ADVISOR_APPLY_ON === 'ALWAYS' || !manualRange;
-    if (!rangeSuggestion && geminiAllowed) {
-      rangeSuggestion = await this.rangeAdvisor.getSuggestion(symbol, currentPrice);
-      suggestionSource = rangeSuggestion ? 'GEMINI' : null;
-      if (rangeSuggestion && rangeSuggestion.confidence < GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE) {
-        console.log(
-          `[GEMINI] ${symbol} suggestion confidence ${rangeSuggestion.confidence} below threshold ` +
-          `${GEMINI_RANGE_ADVISOR_MIN_CONFIDENCE}; ignoring for this cycle.`
-        );
-        rangeSuggestion = null;
-        suggestionSource = null;
-      }
-    }
-
     const fallbackLower = (resetAutoRange ? 0 : storedLower) || currentPrice * (1 - GRID_RANGE_PCT / 100);
     const fallbackUpper = (resetAutoRange ? 0 : storedUpper) || currentPrice * (1 + GRID_RANGE_PCT / 100);
     const lower = manualRange
@@ -2280,14 +1569,14 @@ class FuturesGridEngine {
     if (lower <= 0 || upper <= 0 || lower >= upper) {
       throw new Error(`Invalid grid range. lower=${lower}, upper=${upper}`);
     }
-    const advisorLevels = this.getAiGridLevels(
-      symbol, rangeSuggestion, lower, upper, currentPrice, suggestionSource
+    const advisorLevels = this.getAdvisorGridLevels(
+      symbol, rangeSuggestion, lower, upper, currentPrice
     );
 
     // Unlike a trailing shift (which is a parallel translation of the same
     // grid, handled by applyTrailingRangeShift's offset-based remap), a
-    // stale-range auto-reset, GRID_RESET_RANGE_ON_START, or a fresh Gemini
-    // range-advisor suggestion can all produce a brand-new lower/upper with
+    // stale-range auto-reset, GRID_RESET_RANGE_ON_START, or a fresh Fibonacci
+    // range suggestion can all produce a brand-new lower/upper with
     // no fixed relationship to the old one. If we simply swap symState.config
     // without reconciling, any open managed orders and accumulated
     // lastBuyByLevel records stay indexed against the OLD grid's level
@@ -2308,12 +1597,12 @@ class FuturesGridEngine {
     }
 
     const advisorState = rangeSuggestion ? {
-      source: suggestionSource,
+      source: 'FIBONACCI',
       confidence: rangeSuggestion.confidence,
       confluenceScore: rangeSuggestion.confluenceScore,
       timeframeCount: rangeSuggestion.timeframeCount,
       direction: fibonacciDirection?.direction || rangeSuggestion.direction,
-      directionApplied: suggestionSource === 'FIBONACCI' ? appliedDirection : undefined,
+      directionApplied: appliedDirection,
       directionApplyMode: FIBONACCI_DIRECTION_APPLY_MODE,
       directionScore: fibonacciDirection?.score,
       directionConfidence: fibonacciDirection?.confidence,
@@ -2342,7 +1631,6 @@ class FuturesGridEngine {
       autoRange: !manualRange,
       orderSizeUsdt: this.getOrderSizeUsdt(),
       rangeAdvisor: advisorState,
-      aiAdvisor: suggestionSource === 'GEMINI' ? advisorState : undefined,
     };
     if (resetAutoRange) {
       if (!this.rangeResetSymbols) this.rangeResetSymbols = new Set();
@@ -2994,15 +2282,14 @@ class FuturesGridEngine {
     return levels;
   }
 
-  getAiGridLevels(symbol, suggestion, lower, upper, currentPrice, source = 'GEMINI') {
+  getAdvisorGridLevels(symbol, suggestion, lower, upper, currentPrice) {
     if (!suggestion) return null;
-    const sourceLabel = source === 'FIBONACCI' ? 'multi-timeframe Fibonacci' : 'Gemini';
     const suggestedLevels = suggestion.levels
-      ? this.getUsableCustomLevels(symbol, suggestion.levels, lower, upper, sourceLabel)
+      ? this.getUsableCustomLevels(symbol, suggestion.levels, lower, upper, 'multi-timeframe Fibonacci')
       : null;
     if (suggestedLevels) return suggestedLevels;
     const adaptive = this.buildAdaptiveGridLevels(lower, upper, currentPrice);
-    return this.getUsableCustomLevels(symbol, adaptive, lower, upper, `adaptive-${sourceLabel}`);
+    return this.getUsableCustomLevels(symbol, adaptive, lower, upper, 'adaptive Fibonacci');
   }
 
   buildAdaptiveGridLevels(lower, upper, currentPrice) {
@@ -4983,16 +4270,6 @@ class FuturesGridEngine {
     return lines.join('\n');
   }
 
-  startTelegramStatusReports() {
-    if (!TELEGRAM_STATUS_REPORT_ENABLED || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID || this.telegramStatusTimer) return;
-    this.telegramStatusTimer = setInterval(() => {
-      this.sendAlert(this.buildTelegramStatusMessage()).catch(err =>
-        console.warn('[TELEGRAM] Futures status report failed:', err.message)
-      );
-    }, TELEGRAM_STATUS_REPORT_INTERVAL_MS);
-    this.telegramStatusTimer.unref?.();
-  }
-
   async processFuturesTelegramCommand() {
     if (this.telegramCommandProcessing) return;
     this.telegramCommandProcessing = true;
@@ -5098,9 +4375,6 @@ Post Only (Maker): ${GRID_POST_ONLY ? 'ON' : 'OFF'}
 Binance User Data WebSocket: ${FUTURES_USER_STREAM_ENABLED
       ? `ON (fill debounce=${FUTURES_USER_STREAM_RECONCILE_DEBOUNCE_MS}ms, REST reconciliation retained)`
       : 'OFF'}
-Smart Range Advisor (Gemini): ${GEMINI_RANGE_ADVISOR_ENABLED
-      ? `ON (model=${GEMINI_MODEL}, accounts=${GEMINI_API_KEYS.length}, timeframe=${GEMINI_RANGE_ADVISOR_TIMEFRAME} [candle-close aligned], min-range-width=${GEMINI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}%, applies-to=${GEMINI_RANGE_ADVISOR_APPLY_ON})`
-      : 'OFF'}
 Multi-timeframe Fibonacci: ${FIBONACCI_RANGE_ADVISOR_ENABLED
       ? `ON (timeframes=${FIBONACCI_RANGE_ADVISOR_TIMEFRAMES.join(',')}, min-range-width=${FIBONACCI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}%, trailing=${FIBONACCI_RANGE_ADVISOR_ALLOW_TRAILING ? 'allowed' : 'paused while active'})`
       : 'OFF'}
@@ -5113,21 +4387,14 @@ Adaptive Grid Supervisor: ${ADAPTIVE_GRID_SUPERVISOR_ENABLED
 Adaptive Risk State Machine: ${ADAPTIVE_RISK_STATE_MACHINE_ENABLED
       ? `ON (${ADAPTIVE_RISK_STATE_MACHINE_MODE}; caution-exposure=${ADAPTIVE_RISK_STATE_MACHINE_CAUTION_EXPOSURE_PCT}%, risk-exposure=${ADAPTIVE_RISK_STATE_MACHINE_RISK_EXPOSURE_PCT}%, loss=${ADAPTIVE_RISK_STATE_MACHINE_LOSS_WARNING_PCT}/${ADAPTIVE_RISK_STATE_MACHINE_LOSS_RISK_OFF_PCT}%, liquidation=${ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_WARNING_PCT}/${ADAPTIVE_RISK_STATE_MACHINE_LIQUIDATION_CRITICAL_PCT}%)`
       : 'OFF'}
-Gemini Adaptive Monitor: ${GEMINI_ADAPTIVE_MONITOR_ENABLED
-      ? `ON (model=${GEMINI_MODEL}, accounts=${GEMINI_API_KEYS.length}, interval=${GEMINI_ADAPTIVE_MONITOR_INTERVAL_MS / MINUTE_MS}m, min-confidence=${GEMINI_ADAPTIVE_MONITOR_MIN_CONFIDENCE}, queue=${GEMINI_ADAPTIVE_MONITOR_MIN_REQUEST_INTERVAL_MS}ms, attempts=${GEMINI_ADAPTIVE_MONITOR_MAX_ATTEMPTS}; non-blocking)`
-      : 'OFF'}
 Adaptive Supervisor Outcome Journal: ${ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED
       ? `ON (${ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_MODE}; outcomes=4h/24h; observation only)`
-      : 'OFF'}
-Adaptive Supervisor Learning: ${ADAPTIVE_SUPERVISOR_LEARNING_ENABLED
-      ? `ON (auto-apply=${ADAPTIVE_SUPERVISOR_LEARNING_AUTO_APPLY}; horizon=${ADAPTIVE_SUPERVISOR_LEARNING_HORIZON_HOURS}h; min-episodes=${ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES}; validation=${ADAPTIVE_SUPERVISOR_LEARNING_MIN_VALIDATION_EPISODES}; bucket=${ADAPTIVE_SUPERVISOR_LEARNING_MIN_BUCKET_EPISODES}; rollback=${ADAPTIVE_SUPERVISOR_LEARNING_ROLLBACK_ENABLED}; policy=${this.adaptiveSupervisorLearner.getActivePolicy().version})`
       : 'OFF'}
 `);
     await this.init();
     await this.startUserStream();
     startFuturesDashboardServer(this);
     this.startTelegramCommandProcessing();
-    this.startTelegramStatusReports();
     while (true) {
       await sleep(INTERVAL_MS);
       await this.executeCycle();
@@ -5182,12 +4449,7 @@ module.exports = {
   GridState,
   ProcessLock,
   FuturesGridEngine,
-  GeminiRangeAdvisor,
-  GeminiAdaptiveMonitor,
   AdaptiveSupervisorOutcomeJournal,
-  AdaptiveSupervisorLearner,
-  AIGridValidator,
-  TechnicalIndicators,
   FibonacciDirectionAnalyzer,
   AdaptiveGridSupervisor,
   bootstrap,
