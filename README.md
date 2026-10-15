@@ -280,6 +280,8 @@ FIBONACCI_DIRECTION_MIN_TIMEFRAMES=2
 FIBONACCI_DIRECTION_CONFIRMATIONS=2
 FIBONACCI_DIRECTION_MIN_CONFIDENCE=0.65
 FIBONACCI_DIRECTION_LEVEL_BIAS_PCT=10
+FIBONACCI_DIRECTION_STRATEGY=TREND
+FIBONACCI_DIRECTION_EMA_SLOPE_ATR_THRESHOLD=1
 FIBONACCI_DIRECTION_APPLY_MODE=REPORT_ONLY
 ```
 
@@ -291,6 +293,8 @@ FIBONACCI_DIRECTION_APPLY_MODE=REPORT_ONLY
 - `FIBONACCI_DIRECTION_CONFIRMATIONS`: jumlah pembacaan candle baru berturut-turut dengan arah sama sebelum bias diterapkan. Default `2` meredam perubahan sesaat.
 - `FIBONACCI_DIRECTION_MIN_CONFIDENCE`: threshold agar `BULLISH`/`BEARISH` boleh membias distribusi level.
 - `FIBONACCI_DIRECTION_LEVEL_BIAS_PCT`: persentase jumlah level yang dipindahkan dari sisi berlawanan ke sisi arah, rentang `0-40`. Nilai `10` membuat grid 21 level bullish berubah dari sekitar `10/11` menjadi `8/13` level bawah/atas.
+- `FIBONACCI_DIRECTION_STRATEGY`: `TREND` memakai arah terkonfirmasi, sedangkan `EMA_SLOPE_MEAN_REVERSION` hanya melawan pergerakan ketika slope EMA20 15m sudah ekstrem.
+- `FIBONACCI_DIRECTION_EMA_SLOPE_ATR_THRESHOLD`: minimum nilai absolut slope EMA20 15m terhadap ATR untuk strategi mean-reversion. Default `1`.
 - `FIBONACCI_DIRECTION_APPLY_MODE`: `REPORT_ONLY` hanya mencatat arah tanpa mengubah grid; `LEVEL_BIAS` menerapkan distribusi level setelah confidence dan konfirmasi lolos.
 
 Backtest klasifikasi arah selama 90 hari dapat dijalankan tanpa mengubah bot live:
@@ -299,7 +303,7 @@ Backtest klasifikasi arah selama 90 hari dapat dijalankan tanpa mengubah bot liv
 npm run backtest:fibonacci-direction
 ```
 
-Runner membandingkan konfigurasi saat ini, varian mean-reversion yang membalik arah, beberapa minimum alignment, dan konsensus `4h + satu timeframe lebih rendah`. Periode dapat diubah dengan `BACKTEST_HISTORY_DAYS`, atau tanggal eksplisit melalui `BACKTEST_START` dan `BACKTEST_END`. Data publik Binance disimpan di `backtest-data/`, sedangkan laporan JSON dan Markdown disimpan di `backtest-results/`. Pengujian ini mengukur ketepatan arah 1 jam, 4 jam, dan 24 jam tanpa mengklaim simulasi PnL grid, funding, likuidasi, atau urutan fill intrabar. Gunakan `REPORT_ONLY` dan `SHADOW` jika hasil walk-forward belum menunjukkan keunggulan arah yang konsisten.
+Runner membandingkan konfigurasi saat ini, mean-reversion umum, mean-reversion selektif berbasis slope EMA20 15m, beberapa minimum alignment, dan konsensus `4h + satu timeframe lebih rendah`. Periode dapat diubah dengan `BACKTEST_HISTORY_DAYS`, atau tanggal eksplisit melalui `BACKTEST_START` dan `BACKTEST_END`. Data publik Binance disimpan di `backtest-data/`, sedangkan laporan JSON dan Markdown disimpan di `backtest-results/`. Pengujian ini mengukur ketepatan arah 1 jam, 4 jam, dan 24 jam tanpa mengklaim simulasi PnL grid, funding, likuidasi, atau urutan fill intrabar. Gunakan `REPORT_ONLY` dan `SHADOW` jika hasil walk-forward belum menunjukkan keunggulan arah yang konsisten.
 
 Full-grid PnL backtest membandingkan empat varian: baseline, Adaptive Supervisor deterministik, Adaptive + Gemini, dan Adaptive + learned policy. Keputusan historis Gemini dibuat satu kali sebagai cache agar replay berikutnya reproducible dan tidak memanggil API lagi:
 

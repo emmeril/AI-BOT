@@ -2,6 +2,7 @@ const { retry, roundNumber } = require('./utils');
 const { timeframeToMs } = require('./fibonacci-range-advisor');
 
 const VALID_DIRECTIONS = new Set(['BULLISH', 'BEARISH', 'RANGING', 'UNCERTAIN']);
+const VALID_DIRECTION_STRATEGIES = new Set(['TREND', 'EMA_SLOPE_MEAN_REVERSION']);
 
 function normalizeCandle(raw) {
   if (Array.isArray(raw)) {
@@ -242,6 +243,24 @@ function aggregateTimeframes(results) {
   };
 }
 
+function resolveAppliedDirection(analysis, options = {}) {
+  const strategy = String(options.strategy || 'TREND').toUpperCase();
+  const minimumConfidence = Number(options.minimumConfidence ?? 0.65);
+  if (!analysis || !VALID_DIRECTION_STRATEGIES.has(strategy) ||
+      !(Number(analysis.confidence) >= minimumConfidence)) {
+    return 'RANGING';
+  }
+  if (strategy === 'EMA_SLOPE_MEAN_REVERSION') {
+    const slope = Number(analysis.timeframes?.['15m']?.ema20SlopeAtr);
+    const threshold = Math.max(0, Number(options.emaSlopeAtrThreshold) || 1);
+    if (!Number.isFinite(slope) || Math.abs(slope) < threshold) return 'RANGING';
+    return slope > 0 ? 'BEARISH' : 'BULLISH';
+  }
+  return ['BULLISH', 'BEARISH'].includes(analysis.confirmedDirection)
+    ? analysis.confirmedDirection
+    : 'RANGING';
+}
+
 class FibonacciDirectionAnalyzer {
   constructor(exchange, options = {}) {
     this.exchange = exchange;
@@ -355,6 +374,7 @@ class FibonacciDirectionAnalyzer {
 
 module.exports = {
   VALID_DIRECTIONS,
+  VALID_DIRECTION_STRATEGIES,
   FibonacciDirectionAnalyzer,
   normalizeCandle,
   emaSeries,
@@ -362,4 +382,5 @@ module.exports = {
   findConfirmedPivots,
   analyzeTimeframe,
   aggregateTimeframes,
+  resolveAppliedDirection,
 };

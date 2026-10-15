@@ -78,3 +78,17 @@ test('mean-reversion variant reverses a qualified directional signal', () => {
     'BULLISH'
   );
 });
+
+test('selective mean-reversion variant uses the extreme 15m EMA slope', () => {
+  const aggregate = {
+    confidence: 0.8,
+    alignment: 0,
+    timeframes: { '15m': { ema20SlopeAtr: -1.1 } },
+  };
+
+  assert.equal(directionForVariant({
+    strategy: 'EMA_SLOPE_MEAN_REVERSION',
+    minimumConfidence: 0.65,
+    emaSlopeAtrThreshold: 1,
+  }, aggregate, 'RANGING'), 'BULLISH');
+});

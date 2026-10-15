@@ -7,6 +7,7 @@ const dotenv = require('dotenv');
 const {
   analyzeTimeframe,
   aggregateTimeframes,
+  resolveAppliedDirection,
 } = require('../src/fibonacci-direction-analyzer');
 
 dotenv.config({ path: process.env.DOTENV_CONFIG_PATH || '.env.futures', quiet: true });
@@ -29,6 +30,13 @@ const DEFAULT_SYMBOLS = [
 const VARIANTS = [
   { key: 'current', label: 'Current: confidence only', minimumAlignment: 0 },
   { key: 'mean_reversion', label: 'Mean reversion: inverse direction', minimumAlignment: 0, invert: true },
+  {
+    key: 'ema_slope_mean_reversion',
+    label: 'Selective mean reversion: |15m EMA slope/ATR| >= 1',
+    strategy: 'EMA_SLOPE_MEAN_REVERSION',
+    minimumConfidence: 0.65,
+    emaSlopeAtrThreshold: 1,
+  },
   { key: 'align_055', label: 'Alignment >= 0.55', minimumAlignment: 0.55 },
   { key: 'align_060', label: 'Alignment >= 0.60', minimumAlignment: 0.60 },
   { key: 'align_067', label: 'Alignment >= 0.67', minimumAlignment: 0.67 },
@@ -170,6 +178,13 @@ function applyConfirmation(aggregate, state) {
 }
 
 function directionForVariant(variant, aggregate, confirmedDirection) {
+  if (variant.strategy) {
+    return resolveAppliedDirection({ ...aggregate, confirmedDirection }, {
+      strategy: variant.strategy,
+      minimumConfidence: variant.minimumConfidence,
+      emaSlopeAtrThreshold: variant.emaSlopeAtrThreshold,
+    });
+  }
   if (!['BULLISH', 'BEARISH'].includes(confirmedDirection)) return 'RANGING';
   if (aggregate.confidence < MIN_CONFIDENCE) return 'RANGING';
   let direction;
@@ -350,13 +365,14 @@ function renderMarkdown(report) {
   lines.push('', '## Walk-forward split', '');
   lines.push(`Train: ${report.walkForward.train.period.start} to ${report.walkForward.train.period.end}`);
   lines.push(`Test: ${report.walkForward.test.period.start} to ${report.walkForward.test.period.end}`, '');
-  lines.push('| Variant | Train accuracy 1h | Test accuracy 1h | Train accuracy 24h | Test accuracy 24h | Train coverage | Test coverage |');
-  lines.push('|---|---:|---:|---:|---:|---:|---:|');
+  lines.push('| Variant | Train accuracy 1h | Test accuracy 1h | Train accuracy 4h | Test accuracy 4h | Train accuracy 24h | Test accuracy 24h | Train coverage | Test coverage |');
+  lines.push('|---|---:|---:|---:|---:|---:|---:|---:|---:|');
   for (const variant of VARIANTS) {
     const train = report.walkForward.train.aggregate[variant.key];
     const test = report.walkForward.test.aggregate[variant.key];
     lines.push(
       `| ${variant.label} | ${train.combinedAccuracy1hPct ?? 'N/A'}% | ${test.combinedAccuracy1hPct ?? 'N/A'}% | ` +
+      `${train.combinedAccuracy4hPct ?? 'N/A'}% | ${test.combinedAccuracy4hPct ?? 'N/A'}% | ` +
       `${train.combinedAccuracy24hPct ?? 'N/A'}% | ${test.combinedAccuracy24hPct ?? 'N/A'}% | ` +
       `${train.coveragePct ?? 'N/A'}% | ${test.coveragePct ?? 'N/A'}% |`
     );

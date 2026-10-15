@@ -5,6 +5,7 @@ const { retry, numberOrZero } = require('./utils');
 const { createDashboardAuth } = require('./dashboard-auth');
 const { incomeMetrics } = require('./futures-income');
 const { sellEntryLabel, sellOverview } = require('./futures-display');
+const { resolveAppliedDirection } = require('./fibonacci-direction-analyzer');
 const {
   marketPrice,
   marketPriceText,
@@ -118,10 +119,15 @@ function decisionSnapshot(engine, symbol, symState, orders, position) {
     : numberOrZero(adaptive?.exposurePct);
   const minConfidence = numberOrZero(process.env.FIBONACCI_DIRECTION_MIN_CONFIDENCE || 0.65);
   const applyMode = String(process.env.FIBONACCI_DIRECTION_APPLY_MODE || 'REPORT_ONLY').toUpperCase();
-  const appliedDirection = applyMode === 'LEVEL_BIAS' &&
-    ['BULLISH', 'BEARISH'].includes(fibonacci?.confirmedDirection) &&
-    numberOrZero(fibonacci?.confidence) >= minConfidence
-    ? fibonacci.confirmedDirection
+  const directionStrategy = String(process.env.FIBONACCI_DIRECTION_STRATEGY || 'TREND').toUpperCase();
+  const appliedDirection = applyMode === 'LEVEL_BIAS'
+    ? resolveAppliedDirection(fibonacci, {
+      strategy: directionStrategy,
+      minimumConfidence: minConfidence,
+      emaSlopeAtrThreshold: numberOrZero(
+        process.env.FIBONACCI_DIRECTION_EMA_SLOPE_ATR_THRESHOLD || 1
+      ),
+    })
     : 'RANGING';
   const contracts = numberOrZero(position?.contracts);
   const reservedSell = orders
@@ -135,6 +141,7 @@ function decisionSnapshot(engine, symbol, symState, orders, position) {
       direction: fibonacci?.direction || 'UNKNOWN',
       confirmedDirection: fibonacci?.confirmedDirection || 'RANGING',
       appliedDirection,
+      strategy: directionStrategy,
       score: fibonacci?.score ?? null,
       confidence: fibonacci?.confidence ?? null,
       alignment: fibonacci?.alignment ?? null,

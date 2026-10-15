@@ -5,6 +5,7 @@ const {
   FibonacciDirectionAnalyzer,
   analyzeTimeframe,
   aggregateTimeframes,
+  resolveAppliedDirection,
 } = require('../src/fibonacci-direction-analyzer');
 const { FibonacciRangeAdvisor } = require('../src/fibonacci-range-advisor');
 
@@ -100,6 +101,34 @@ test('direction bias requires consecutive closed-candle confirmations', async ()
   assert.equal(second.direction, 'BULLISH');
   assert.equal(second.confirmedDirection, 'BULLISH');
   assert.equal(second.confirmationCount, 2);
+});
+
+test('EMA slope mean reversion only emits a signal for an extreme 15m slope', () => {
+  const base = {
+    confidence: 0.8,
+    confirmedDirection: 'BULLISH',
+    timeframes: { '15m': { ema20SlopeAtr: 1.2 } },
+  };
+
+  assert.equal(resolveAppliedDirection(base, {
+    strategy: 'EMA_SLOPE_MEAN_REVERSION',
+    minimumConfidence: 0.65,
+    emaSlopeAtrThreshold: 1,
+  }), 'BEARISH');
+  assert.equal(resolveAppliedDirection({
+    ...base,
+    timeframes: { '15m': { ema20SlopeAtr: -1.2 } },
+  }, {
+    strategy: 'EMA_SLOPE_MEAN_REVERSION',
+    minimumConfidence: 0.65,
+    emaSlopeAtrThreshold: 1,
+  }), 'BULLISH');
+  assert.equal(resolveAppliedDirection({
+    ...base,
+    timeframes: { '15m': { ema20SlopeAtr: 0.9 } },
+  }, {
+    strategy: 'EMA_SLOPE_MEAN_REVERSION',
+  }), 'RANGING');
 });
 
 test('bullish direction keeps Fibonacci prices and allocates more levels above current price', () => {

@@ -6,7 +6,10 @@ const https = require('https');
 const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { FibonacciRangeAdvisor } = require('./src/fibonacci-range-advisor');
-const { FibonacciDirectionAnalyzer } = require('./src/fibonacci-direction-analyzer');
+const {
+  FibonacciDirectionAnalyzer,
+  resolveAppliedDirection,
+} = require('./src/fibonacci-direction-analyzer');
 const {
   PROFILES,
   RISK_STATES,
@@ -217,6 +220,10 @@ const FIBONACCI_DIRECTION_CONFIRMATIONS = Config.number('FIBONACCI_DIRECTION_CON
 const FIBONACCI_DIRECTION_MIN_CONFIDENCE = Config.number('FIBONACCI_DIRECTION_MIN_CONFIDENCE', 0.65);
 const FIBONACCI_DIRECTION_LEVEL_BIAS_PCT = Config.number('FIBONACCI_DIRECTION_LEVEL_BIAS_PCT', 10);
 const FIBONACCI_DIRECTION_APPLY_MODE = Config.get('FIBONACCI_DIRECTION_APPLY_MODE', 'REPORT_ONLY').toUpperCase();
+const FIBONACCI_DIRECTION_STRATEGY = Config.get('FIBONACCI_DIRECTION_STRATEGY', 'TREND').toUpperCase();
+const FIBONACCI_DIRECTION_EMA_SLOPE_ATR_THRESHOLD = Config.number(
+  'FIBONACCI_DIRECTION_EMA_SLOPE_ATR_THRESHOLD', 1
+);
 
 // SHADOW only records decisions. LIVE applies them to future BUY placement;
 // existing inventory and every SELL exit remain under the normal grid rules.
@@ -551,6 +558,12 @@ function validateRuntimeConfiguration() {
       }
       if (!['REPORT_ONLY', 'LEVEL_BIAS'].includes(FIBONACCI_DIRECTION_APPLY_MODE)) {
         errors.push('FIBONACCI_DIRECTION_APPLY_MODE must be REPORT_ONLY or LEVEL_BIAS');
+      }
+      if (!['TREND', 'EMA_SLOPE_MEAN_REVERSION'].includes(FIBONACCI_DIRECTION_STRATEGY)) {
+        errors.push('FIBONACCI_DIRECTION_STRATEGY must be TREND or EMA_SLOPE_MEAN_REVERSION');
+      }
+      if (!(FIBONACCI_DIRECTION_EMA_SLOPE_ATR_THRESHOLD > 0)) {
+        errors.push('FIBONACCI_DIRECTION_EMA_SLOPE_ATR_THRESHOLD must be greater than 0');
       }
     }
   }
@@ -1531,11 +1544,12 @@ class FuturesGridEngine {
     let appliedDirection = 'RANGING';
     if ((fibonacciAllowed || ADAPTIVE_GRID_SUPERVISOR_ENABLED) && FIBONACCI_DIRECTION_ANALYZER_ENABLED) {
       fibonacciDirection = await this.fibonacciDirectionAnalyzer.getAnalysis(symbol);
-      if (fibonacciAllowed && FIBONACCI_DIRECTION_APPLY_MODE === 'LEVEL_BIAS' &&
-          fibonacciDirection &&
-          ['BULLISH', 'BEARISH'].includes(fibonacciDirection.confirmedDirection) &&
-          fibonacciDirection.confidence >= FIBONACCI_DIRECTION_MIN_CONFIDENCE) {
-        appliedDirection = fibonacciDirection.confirmedDirection;
+      if (fibonacciAllowed && FIBONACCI_DIRECTION_APPLY_MODE === 'LEVEL_BIAS') {
+        appliedDirection = resolveAppliedDirection(fibonacciDirection, {
+          strategy: FIBONACCI_DIRECTION_STRATEGY,
+          minimumConfidence: FIBONACCI_DIRECTION_MIN_CONFIDENCE,
+          emaSlopeAtrThreshold: FIBONACCI_DIRECTION_EMA_SLOPE_ATR_THRESHOLD,
+        });
       }
       if (fibonacciDirection) {
         const logKey = `${fibonacciDirection.generatedAt}:${appliedDirection}`;
@@ -1544,7 +1558,8 @@ class FuturesGridEngine {
             `[FIB-DIRECTION] ${symbol} direction=${fibonacciDirection.direction} ` +
             `score=${fibonacciDirection.score} confidence=${fibonacciDirection.confidence} ` +
             `alignment=${fibonacciDirection.alignment} confirmation=${fibonacciDirection.confirmationCount}/` +
-            `${fibonacciDirection.confirmationsRequired} applied=${appliedDirection}`
+            `${fibonacciDirection.confirmationsRequired} strategy=${FIBONACCI_DIRECTION_STRATEGY} ` +
+            `applied=${appliedDirection}`
           );
           this.lastFibonacciDirectionLog.set(symbol, logKey);
         }
@@ -1604,6 +1619,7 @@ class FuturesGridEngine {
       direction: fibonacciDirection?.direction || rangeSuggestion.direction,
       directionApplied: appliedDirection,
       directionApplyMode: FIBONACCI_DIRECTION_APPLY_MODE,
+      directionStrategy: FIBONACCI_DIRECTION_STRATEGY,
       directionScore: fibonacciDirection?.score,
       directionConfidence: fibonacciDirection?.confidence,
       directionAlignment: fibonacciDirection?.alignment,
@@ -4379,7 +4395,7 @@ Multi-timeframe Fibonacci: ${FIBONACCI_RANGE_ADVISOR_ENABLED
       ? `ON (timeframes=${FIBONACCI_RANGE_ADVISOR_TIMEFRAMES.join(',')}, min-range-width=${FIBONACCI_RANGE_ADVISOR_MIN_RANGE_WIDTH_PCT}%, trailing=${FIBONACCI_RANGE_ADVISOR_ALLOW_TRAILING ? 'allowed' : 'paused while active'})`
       : 'OFF'}
 Fibonacci Direction (deterministic): ${FIBONACCI_DIRECTION_ANALYZER_ENABLED
-      ? `ON (mode=${FIBONACCI_DIRECTION_APPLY_MODE}, timeframes=${FIBONACCI_DIRECTION_TIMEFRAMES.join(',')}, confirmations=${FIBONACCI_DIRECTION_CONFIRMATIONS}, min-confidence=${FIBONACCI_DIRECTION_MIN_CONFIDENCE}, level-bias=${FIBONACCI_DIRECTION_LEVEL_BIAS_PCT}%)`
+      ? `ON (mode=${FIBONACCI_DIRECTION_APPLY_MODE}, strategy=${FIBONACCI_DIRECTION_STRATEGY}, timeframes=${FIBONACCI_DIRECTION_TIMEFRAMES.join(',')}, confirmations=${FIBONACCI_DIRECTION_CONFIRMATIONS}, min-confidence=${FIBONACCI_DIRECTION_MIN_CONFIDENCE}, ema-slope-threshold=${FIBONACCI_DIRECTION_EMA_SLOPE_ATR_THRESHOLD}, level-bias=${FIBONACCI_DIRECTION_LEVEL_BIAS_PCT}%)`
       : 'OFF'}
 Adaptive Grid Supervisor: ${ADAPTIVE_GRID_SUPERVISOR_ENABLED
       ? `ON (${ADAPTIVE_GRID_SUPERVISOR_MODE}; profile-confirmations=${ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS}, cooldown=${ADAPTIVE_GRID_SUPERVISOR_COOLDOWN_MS / MINUTE_MS}m)`
