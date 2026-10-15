@@ -8,8 +8,8 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/fontawesome/css/fontawesome.min.css?v=7.3.1">
   <link rel="stylesheet" href="/fontawesome/css/solid.min.css?v=7.3.1">
-  <link rel="stylesheet" href="/dashboard.css?v=20261012.3">
-  <script defer src="/dashboard.js?v=20261012.3"></script>
+  <link rel="stylesheet" href="/dashboard.css?v=20261015.1">
+  <script defer src="/dashboard.js?v=20261015.1"></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Lewati ke dashboard</a>
@@ -30,12 +30,26 @@
     <div class="loading-state" id="loading-state" role="status" aria-live="polite"><span class="loading-bar" aria-hidden="true"></span><span>Mengambil posisi, order, dan keputusan terbaru dari bot.</span></div>
 
     <main id="main-content">
+      <nav class="position-tabs" role="tablist" aria-label="Filter sisi posisi">
+        <button class="position-tab" id="long-tab" type="button" role="tab" aria-selected="true" aria-controls="position-detail" data-position-side="LONG"><span>LONG</span><small>BUY → SELL</small></button>
+        <button class="position-tab" id="short-tab" type="button" role="tab" aria-selected="false" aria-controls="position-detail" data-position-side="SHORT" tabindex="-1"><span>SHORT</span><small>SELL → BUY</small></button>
+      </nav>
+
+      <section class="comparison-board" aria-labelledby="comparison-title">
+        <div class="comparison-lead"><p class="eyebrow">Perbandingan pair</p><h2 id="comparison-title">LONG vs SHORT</h2><p>Exposure mencakup posisi dan order entry pending. PnL strategi tidak menggandakan funding akun.</p></div>
+        <div class="comparison-total"><span>Total exposure</span><strong id="combined-exposure">N/A</strong><small id="comparison-scope">Pair terpilih</small></div>
+        <div class="comparison-total"><span>PnL gabungan</span><strong id="combined-pnl">N/A</strong><small>Realisasi + berjalan − fee entry terbuka</small></div>
+        <article class="side-summary long-summary"><div><span>LONG</span><small id="long-runtime">Menunggu</small></div><strong id="long-exposure">N/A</strong><span>Exposure</span><strong id="long-pnl">N/A</strong><span>PnL strategi</span></article>
+        <article class="side-summary short-summary"><div><span>SHORT</span><small id="short-runtime">Menunggu</small></div><strong id="short-exposure">N/A</strong><span>Exposure</span><strong id="short-pnl">N/A</strong><span>PnL strategi</span></article>
+      </section>
+
+      <div id="position-detail" role="tabpanel" aria-labelledby="long-tab">
       <section class="command-strip" aria-labelledby="overview-title">
         <div class="command-lead"><p class="eyebrow">Pair aktif</p><h2 id="overview-title">Menunggu data</h2><p id="overview-copy">Status keputusan bot akan muncul setelah sinkronisasi pertama.</p></div>
         <div class="command-metric"><span class="metric-label">Harga Binance</span><strong class="metric-value" id="market-price">N/A</strong><span class="metric-note" id="market-change">24 jam: N/A</span></div>
-        <div class="command-metric"><span class="metric-label">Profil BUY</span><strong class="metric-value" id="active-profile">Menunggu</strong><span class="metric-note" id="profile-source">Sumber belum tersedia</span></div>
+        <div class="command-metric"><span class="metric-label" id="profile-label">Profil BUY</span><strong class="metric-value" id="active-profile">Menunggu</strong><span class="metric-note" id="profile-source">Sumber belum tersedia</span></div>
         <div class="command-metric"><span class="metric-label">Exposure</span><strong class="metric-value" id="exposure-value">N/A</strong><span class="metric-note" id="exposure-note">Batas investasi belum tersedia</span></div>
-        <div class="command-metric"><span class="metric-label">Net PnL</span><strong class="metric-value" id="net-pnl">N/A</strong><span class="metric-note">Realisasi + funding + posisi</span></div>
+        <div class="command-metric"><span class="metric-label">PnL strategi</span><strong class="metric-value" id="net-pnl">N/A</strong><span class="metric-note">Realisasi + berjalan − fee entry terbuka</span></div>
       </section>
 
       <section class="panel flow-panel" aria-labelledby="flow-title">
@@ -48,17 +62,17 @@
           <div class="flow-grid">
             <button class="flow-node node-market" type="button" data-node="market" data-tone="accent" aria-pressed="false"><span class="node-index">01 / INPUT</span><span class="node-title">Market feed</span><strong class="node-status" id="market-node-status">BINANCE LIVE</strong><span class="node-value" id="market-node-value">N/A</span><span class="node-meta" id="market-node-meta">Menunggu ticker</span></button>
             <button class="flow-node node-fibonacci" type="button" data-node="fibonacci" aria-pressed="false"><span class="node-index">02 / SIGNAL</span><span class="node-title">Fibonacci</span><strong class="node-status" id="fib-node-status">MENUNGGU</strong><span class="node-value" id="fib-node-value">Score N/A</span><span class="node-meta" id="fib-node-meta">Belum ada analisis</span></button>
-            <button class="flow-node node-supervisor" type="button" data-node="supervisor" aria-pressed="true"><span class="node-index">03 / DECISION</span><span class="node-title">Adaptive supervisor</span><strong class="node-status" id="supervisor-node-status">MENUNGGU</strong><span class="node-value" id="supervisor-node-value">Exposure N/A</span><span class="node-meta" id="supervisor-node-meta">Profil belum tersedia</span></button>
-            <button class="flow-node node-buy" type="button" data-node="buy" aria-pressed="false"><span class="node-index">04 / EXECUTE</span><span class="node-title">BUY grid</span><strong class="node-status" id="buy-node-status">0 ORDER</strong><span class="node-value" id="buy-node-value">0 USDT</span><span class="node-meta" id="buy-node-meta">Bobot N/A</span></button>
-            <button class="flow-node node-position" type="button" data-node="position" aria-pressed="false"><span class="node-index">05 / HOLD</span><span class="node-title">LONG position</span><strong class="node-status" id="position-node-status">TIDAK ADA POSISI</strong><span class="node-value" id="position-node-value">0</span><span class="node-meta" id="position-node-meta">PnL berjalan 0 USDT</span></button>
-            <button class="flow-node node-sell" type="button" data-node="sell" aria-pressed="false"><span class="node-index">06 / EXIT</span><span class="node-title">SELL ladder</span><strong class="node-status" id="sell-node-status">0 ORDER</strong><span class="node-value" id="sell-node-value">Coverage N/A</span><span class="node-meta" id="sell-node-meta">Belum ada exit aktif</span></button>
+            <button class="flow-node node-supervisor" type="button" data-node="supervisor" aria-pressed="true"><span class="node-index">03 / DECISION</span><span class="node-title" id="supervisor-node-title">Adaptive supervisor</span><strong class="node-status" id="supervisor-node-status">MENUNGGU</strong><span class="node-value" id="supervisor-node-value">Exposure N/A</span><span class="node-meta" id="supervisor-node-meta">Profil belum tersedia</span></button>
+            <button class="flow-node node-buy" type="button" data-node="buy" aria-pressed="false"><span class="node-index">04 / EXECUTE</span><span class="node-title" id="entry-node-title">BUY grid</span><strong class="node-status" id="buy-node-status">0 ORDER</strong><span class="node-value" id="buy-node-value">0 USDT</span><span class="node-meta" id="buy-node-meta">Bobot N/A</span></button>
+            <button class="flow-node node-position" type="button" data-node="position" aria-pressed="false"><span class="node-index">05 / HOLD</span><span class="node-title" id="position-node-title">LONG position</span><strong class="node-status" id="position-node-status">TIDAK ADA POSISI</strong><span class="node-value" id="position-node-value">0</span><span class="node-meta" id="position-node-meta">PnL berjalan 0 USDT</span></button>
+            <button class="flow-node node-sell" type="button" data-node="sell" aria-pressed="false"><span class="node-index">06 / EXIT</span><span class="node-title" id="exit-node-title">SELL ladder</span><strong class="node-status" id="sell-node-status">0 ORDER</strong><span class="node-value" id="sell-node-value">Coverage N/A</span><span class="node-meta" id="sell-node-meta">Belum ada exit aktif</span></button>
           </div>
         </div>
       </section>
 
       <div class="detail-layout">
         <section class="panel inspector" aria-labelledby="inspector-title"><div class="panel-head"><div><p class="eyebrow">Node inspector</p><h2 class="panel-title" id="inspector-title">Adaptive supervisor</h2></div><span class="status-code" id="inspector-status">MENUNGGU</span></div><div class="inspector-body"><div><p class="inspector-summary" id="inspector-summary">Pilih salah satu node untuk membaca data dan alasan keputusan.</p><div class="tag-list" id="inspector-tags" aria-label="Faktor keputusan"></div></div><dl class="detail-list" id="inspector-details"></dl></div></section>
-        <section class="panel ledger" aria-labelledby="ledger-title"><div class="panel-head"><div><p class="eyebrow">Account ledger</p><h2 class="panel-title" id="ledger-title">Komposisi PnL</h2></div></div><div class="ledger-body"><div class="ledger-row"><span>Realisasi setelah fee</span><strong id="realized-pnl">N/A</strong></div><div class="ledger-row"><span>Funding</span><strong id="funding-pnl">N/A</strong></div><div class="ledger-row"><span>PnL berjalan</span><strong id="unrealized-pnl">N/A</strong></div><div class="ledger-row"><span>Fee tercatat</span><strong id="fees-value">N/A</strong></div><div class="ledger-row"><span>Profit pasangan grid</span><strong id="grid-profit">N/A</strong></div><div class="ledger-row total"><span>Net PnL</span><strong id="ledger-net">N/A</strong></div><p class="formula">Net = realisasi + funding + PnL berjalan. Fee sudah termasuk di realisasi.</p></div></section>
+        <section class="panel ledger" aria-labelledby="ledger-title"><div class="panel-head"><div><p class="eyebrow">Side ledger</p><h2 class="panel-title" id="ledger-title">PnL strategi LONG</h2></div></div><div class="ledger-body"><div class="ledger-row"><span>Realisasi strategi</span><strong id="realized-pnl">N/A</strong></div><div class="ledger-row"><span>Funding akun Binance</span><strong id="funding-pnl">N/A</strong></div><div class="ledger-row"><span>PnL berjalan sisi</span><strong id="unrealized-pnl">N/A</strong></div><div class="ledger-row"><span>Fee strategi tercatat</span><strong id="fees-value">N/A</strong></div><div class="ledger-row"><span>Profit pasangan grid</span><strong id="grid-profit">N/A</strong></div><div class="ledger-row total"><span>PnL strategi sisi</span><strong id="ledger-net">N/A</strong></div><p class="formula">PnL sisi = realisasi + berjalan − fee entry posisi terbuka. Funding ditampilkan sebagai ledger akun dan tidak dijumlahkan dua kali.</p></div></section>
       </div>
 
       <div class="telemetry-layout">
@@ -67,10 +81,11 @@
       </div>
 
       <section class="panel orders-panel" aria-labelledby="orders-title">
-        <div class="panel-head"><div><p class="eyebrow">Exchange state</p><h2 class="panel-title" id="orders-title">Order Binance yang dikelola bot</h2><p class="panel-copy">Urutan level, harga, jumlah, dan hubungan order dengan entry LONG.</p></div><div class="order-summary" aria-label="Ringkasan order"><span class="count-label" id="buy-count">BUY 0</span><span class="count-label" id="sell-count">SELL 0</span></div></div>
+        <div class="panel-head"><div><p class="eyebrow">Exchange state</p><h2 class="panel-title" id="orders-title">Order Binance yang dikelola bot</h2><p class="panel-copy" id="orders-copy">Urutan level, harga, jumlah, dan hubungan order dengan entry LONG.</p></div><div class="order-summary" aria-label="Ringkasan order"><span class="count-label" id="buy-count">BUY 0</span><span class="count-label" id="sell-count">SELL 0</span></div></div>
         <div class="table-wrap"><table><thead><tr><th>Sisi</th><th>Level</th><th>Harga</th><th>Jumlah</th><th>Tersisa</th><th>Keterangan</th><th>Order ID</th></tr></thead><tbody id="orders-body"><tr class="empty-row"><td colspan="7">Mengambil order aktif dari Binance.</td></tr></tbody></table></div>
         <div class="order-cards" id="order-cards" aria-label="Order aktif versi mobile"></div>
       </section>
+      </div>
     </main>
 
     <footer class="app-footer"><span id="updated-at">Belum diperbarui</span><span id="runtime-label">Mode dan sumber data belum tersedia</span></footer>

@@ -4,7 +4,7 @@ const path = require('path');
 const { retry, numberOrZero } = require('./utils');
 const { createDashboardAuth } = require('./dashboard-auth');
 const { incomeMetrics } = require('./futures-income');
-const { sellEntryLabel, sellOverview } = require('./futures-display');
+const { sellEntryLabel } = require('./futures-display');
 const { resolveAppliedDirection } = require('./fibonacci-direction-analyzer');
 const {
   marketPrice,
@@ -49,6 +49,12 @@ if (!Number.isInteger(port) || port > 65535) throw new Error('FUTURES_DASHBOARD_
 const refreshSeconds = Math.max(envNumber('FUTURES_DASHBOARD_REFRESH_SECONDS', 5, 0), 2);
 const timeframe = process.env.FUTURES_DASHBOARD_CHART_TIMEFRAME || '1m';
 const chartLimit = Math.max(envNumber('FUTURES_DASHBOARD_CHART_LIMIT', 120, 0), 20);
+const shortStateFile = path.resolve(
+  process.env.FUTURES_DASHBOARD_SHORT_STATE_FILE || path.join(__dirname, '..', 'grid-state-futures-short.json')
+);
+const shortLockFile = path.resolve(
+  process.env.FUTURES_DASHBOARD_SHORT_LOCK_FILE || `${shortStateFile}.lock`
+);
 const authEnabled = process.env.FUTURES_DASHBOARD_AUTH_ENABLED !== undefined
   ? envBoolean('FUTURES_DASHBOARD_AUTH_ENABLED', false)
   : envBoolean('DASHBOARD_AUTH_ENABLED', false);
@@ -95,12 +101,44 @@ function positionMetrics(position, leverage, openPositionFees = 0) {
   };
 }
 
-function decisionSnapshot(engine, symbol, symState, orders, position) {
-  const fibonacci = engine.fibonacciDirectionAnalyzer?.cache?.[symbol]?.analysis || null;
-  const adaptive = engine.adaptiveGridDecisions?.get?.(symbol) || null;
-  const investmentCap = numberOrZero(process.env.GRID_TOTAL_INVESTMENT_USDT);
+function fibonacciFromState(symState) {
+  const advisor = symState?.config?.rangeAdvisor;
+  if (!advisor) return null;
+  return {
+    direction: advisor.direction || 'UNKNOWN',
+    confirmedDirection: advisor.directionApplied || 'RANGING',
+    appliedDirection: advisor.directionApplied || 'RANGING',
+    strategy: advisor.directionStrategy || 'TREND',
+    score: advisor.directionScore ?? null,
+    confidence: advisor.directionConfidence ?? null,
+    alignment: advisor.directionAlignment ?? null,
+    confirmationCount: numberOrZero(advisor.directionConfirmationCount),
+    confirmationsRequired: numberOrZero(advisor.directionConfirmationsRequired),
+    generatedAt: advisor.appliedAt || null,
+    timeframes: Object.fromEntries(Object.entries(advisor.directionTimeframes || {}).map(([key, value]) => [key, {
+      direction: value?.direction || 'UNKNOWN',
+      score: value?.score ?? null,
+      atrPct: value?.atrPct ?? null,
+      volatilityRatio: value?.volatilityRatio ?? null,
+    }])),
+  };
+}
+
+function decisionSnapshot(engine, symbol, symState, orders, position, options = {}) {
+  const positionSide = String(options.positionSide || 'LONG').toUpperCase();
+  const entrySide = positionSide === 'SHORT' ? 'sell' : 'buy';
+  const exitSide = positionSide === 'SHORT' ? 'buy' : 'sell';
+  const cachedFibonacci = positionSide === 'LONG'
+    ? engine.fibonacciDirectionAnalyzer?.cache?.[symbol]?.analysis || null
+    : null;
+  const persistedFibonacci = fibonacciFromState(symState);
+  const fibonacci = cachedFibonacci || persistedFibonacci;
+  const adaptive = positionSide === 'LONG' ? engine.adaptiveGridDecisions?.get?.(symbol) || null : null;
+  const configuredCap = numberOrZero(process.env.GRID_TOTAL_INVESTMENT_USDT);
+  const stateCap = numberOrZero(symState?.config?.orderSizeUsdt) * numberOrZero(symState?.config?.count);
+  const investmentCap = positionSide === 'LONG' ? configuredCap : stateCap;
   let allocatedInvestment = 0;
-  if (typeof engine.getAllocatedInvestmentUsdt === 'function') {
+  if (positionSide === 'LONG' && typeof engine.getAllocatedInvestmentUsdt === 'function') {
     try {
       allocatedInvestment = numberOrZero(engine.getAllocatedInvestmentUsdt(symbol));
     } catch {
@@ -111,7 +149,7 @@ function decisionSnapshot(engine, symbol, symState, orders, position) {
     allocatedInvestment = Object.values(symState.lastBuyByLevel || {})
       .reduce((sum, buy) => sum + numberOrZero(buy?.totalCostQuote), 0);
     allocatedInvestment += orders
-      .filter(order => order.side === 'buy')
+      .filter(order => order.side === entrySide)
       .reduce((sum, order) => sum + numberOrZero(order.price) * numberOrZero(order.remaining), 0);
   }
   const exposurePct = investmentCap > 0
@@ -120,7 +158,7 @@ function decisionSnapshot(engine, symbol, symState, orders, position) {
   const minConfidence = numberOrZero(process.env.FIBONACCI_DIRECTION_MIN_CONFIDENCE || 0.65);
   const applyMode = String(process.env.FIBONACCI_DIRECTION_APPLY_MODE || 'REPORT_ONLY').toUpperCase();
   const directionStrategy = String(process.env.FIBONACCI_DIRECTION_STRATEGY || 'TREND').toUpperCase();
-  const appliedDirection = applyMode === 'LEVEL_BIAS'
+  const appliedDirection = persistedFibonacci?.appliedDirection || (applyMode === 'LEVEL_BIAS'
     ? resolveAppliedDirection(fibonacci, {
       strategy: directionStrategy,
       minimumConfidence: minConfidence,
@@ -128,12 +166,12 @@ function decisionSnapshot(engine, symbol, symState, orders, position) {
         process.env.FIBONACCI_DIRECTION_EMA_SLOPE_ATR_THRESHOLD || 1
       ),
     })
-    : 'RANGING';
+    : 'RANGING');
   const contracts = numberOrZero(position?.contracts);
-  const reservedSell = orders
-    .filter(order => order.side === 'sell')
+  const reservedExit = orders
+    .filter(order => order.side === exitSide)
     .reduce((sum, order) => sum + numberOrZero(order.remaining), 0);
-  const uncovered = Math.max(0, contracts - reservedSell);
+  const uncovered = Math.max(0, contracts - reservedExit);
 
   return {
     fibonacci: {
@@ -141,7 +179,7 @@ function decisionSnapshot(engine, symbol, symState, orders, position) {
       direction: fibonacci?.direction || 'UNKNOWN',
       confirmedDirection: fibonacci?.confirmedDirection || 'RANGING',
       appliedDirection,
-      strategy: directionStrategy,
+      strategy: fibonacci?.strategy || directionStrategy,
       score: fibonacci?.score ?? null,
       confidence: fibonacci?.confidence ?? null,
       alignment: fibonacci?.alignment ?? null,
@@ -182,22 +220,122 @@ function decisionSnapshot(engine, symbol, symState, orders, position) {
       generatedAt: adaptive?.generatedAt || null,
     },
     execution: {
-      gridCount: numberOrZero(process.env.GRID_COUNT),
+      gridCount: numberOrZero(symState?.config?.count || process.env.GRID_COUNT),
       buyCount: orders.filter(order => order.side === 'buy').length,
       sellCount: orders.filter(order => order.side === 'sell').length,
+      entrySide,
+      exitSide,
+      entryCount: orders.filter(order => order.side === entrySide).length,
+      exitCount: orders.filter(order => order.side === exitSide).length,
       positionContracts: contracts,
-      reservedSell,
+      reservedExit,
+      reservedSell: positionSide === 'LONG' ? reservedExit : 0,
       uncovered,
-      sellCoveragePct: contracts > 0 ? Math.min(100, (reservedSell / contracts) * 100) : null,
+      exitCoveragePct: contracts > 0 ? Math.min(100, (reservedExit / contracts) * 100) : null,
+      sellCoveragePct: positionSide === 'LONG' && contracts > 0
+        ? Math.min(100, (reservedExit / contracts) * 100)
+        : null,
       lastTradeTimestamp: numberOrZero(symState.lastTradeTimestamp),
     },
   };
 }
 
-async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
-  const symbols = engine.constructor.SYMBOLS || String(process.env.SYMBOLS || '').split(',').filter(Boolean);
-  const symbol = symbols.includes(requestedSymbol) ? requestedSymbol : symbols[0];
-  const symState = engine.state.getSymbol(symbol);
+function sideOfPosition(position) {
+  return String(position?.info?.positionSide || position?.side || '').toUpperCase();
+}
+
+function readJsonState(file) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return parsed && typeof parsed.symbols === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function lockIsActive(file) {
+  try {
+    const lock = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const pid = Number(lock.pid);
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function emptySymbolState() {
+  return { config: {}, orders: {}, lastBuyByLevel: {}, filledBuys: 0, filledSells: 0 };
+}
+
+function managedOrders(engine, symbol, exchangeOrders, symState, positionSide) {
+  const managedIds = new Set(Object.keys(symState.orders || {}));
+  return exchangeOrders
+    .filter(order => managedIds.has(String(order.id)) || (
+      positionSide === 'LONG' && engine.getBotOrderLevel(order) !== null
+    ))
+    .map(order => normalizeOrder(engine, symbol, order, symState.orders?.[String(order.id)]));
+}
+
+function openPositionFees(symState) {
+  return Object.values(symState.lastBuyByLevel || {})
+    .reduce((sum, entry) => sum + numberOrZero(entry?.totalFeeQuote), 0);
+}
+
+function sideComparison(positionSide, available, running, symState, orders, rawPosition, leverage) {
+  const entrySide = positionSide === 'SHORT' ? 'sell' : 'buy';
+  const position = positionMetrics(rawPosition, leverage, openPositionFees(symState));
+  const positionExposure = numberOrZero(position?.notional);
+  const pendingEntryExposure = orders
+    .filter(order => order.side === entrySide)
+    .reduce((sum, order) => sum + numberOrZero(order.price) * numberOrZero(order.remaining), 0);
+  const realizedPnl = numberOrZero(symState.realizedGridProfit) + numberOrZero(symState.realizedExitProfit);
+  const unrealizedPnl = numberOrZero(position?.unrealizedPnl);
+  const entryFees = numberOrZero(position?.openPositionFees);
+  return {
+    available,
+    running,
+    exposure: positionExposure + pendingEntryExposure,
+    positionExposure,
+    pendingEntryExposure,
+    strategyPnl: realizedPnl + unrealizedPnl - entryFees,
+    realizedPnl,
+    unrealizedPnl,
+    openPositionFees: entryFees,
+    positionContracts: numberOrZero(position?.contracts),
+    orderCount: orders.length,
+  };
+}
+
+function exitOverview(orders, rawPosition, positionSide) {
+  const exitSide = positionSide === 'SHORT' ? 'buy' : 'sell';
+  const exits = orders.filter(order => order.side === exitSide && Number(order.price) > 0)
+    .sort((a, b) => positionSide === 'SHORT' ? Number(b.price) - Number(a.price) : Number(a.price) - Number(b.price));
+  const entryPrice = Number(rawPosition?.entryPrice);
+  const nearest = exits[0];
+  let nearestLabel = `Belum ada order ${exitSide.toUpperCase()} aktif`;
+  if (nearest && entryPrice > 0) {
+    nearestLabel = positionSide === 'SHORT'
+      ? (nearest.price < entryPrice ? 'Di bawah entry rata-rata' : nearest.price > entryPrice ? 'Di atas entry rata-rata' : 'Sama dengan entry rata-rata')
+      : sellEntryLabel(nearest.price, entryPrice);
+  }
+  return { nearestPrice: nearest ? Number(nearest.price) : null, nearestLabel };
+}
+
+async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedSide = 'LONG', options = {}) {
+  const longSymbols = engine.constructor.SYMBOLS || String(process.env.SYMBOLS || '').split(',').filter(Boolean);
+  const shortState = options.shortState === undefined ? readJsonState(shortStateFile) : options.shortState;
+  const shortSymbols = Object.keys(shortState?.symbols || {});
+  const selectedPositionSide = String(requestedSide || '').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+  const symbols = selectedPositionSide === 'SHORT' ? shortSymbols : longSymbols;
+  const symbol = symbols.includes(requestedSymbol) ? requestedSymbol : symbols[0] || longSymbols[0] || shortSymbols[0];
+  if (!symbol) throw new Error('No futures symbols are configured');
+  const longAvailable = longSymbols.includes(symbol);
+  const shortAvailable = shortSymbols.includes(symbol);
+  const longState = longAvailable ? engine.state.getSymbol(symbol) : emptySymbolState();
+  const selectedShortState = shortAvailable ? shortState.symbols[symbol] : emptySymbolState();
+  const symState = selectedPositionSide === 'SHORT' ? selectedShortState : longState;
   const [ticker, exchangeOrders, candles, balance, positions] = await Promise.all([
     retry(() => engine.exchange.fetchTicker(symbol)),
     retry(() => engine.exchange.fetchOpenOrders(symbol)),
@@ -205,24 +343,30 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
     retry(() => engine.exchange.fetchBalance()),
     retry(() => engine.exchange.fetchPositions([symbol])),
   ]);
-  const managedIds = new Set(Object.keys(symState.orders));
-  const orders = exchangeOrders
-    .filter(order => managedIds.has(String(order.id)) || engine.getBotOrderLevel(order) !== null)
-    .map(order => normalizeOrder(engine, symbol, order, symState.orders[String(order.id)]));
-  const long = positions.find(position => String(position.side || '').toLowerCase() === 'long' && Number(position.contracts) > 0);
+  const longOrders = longAvailable ? managedOrders(engine, symbol, exchangeOrders, longState, 'LONG') : [];
+  const shortOrders = shortAvailable ? managedOrders(engine, symbol, exchangeOrders, selectedShortState, 'SHORT') : [];
+  const orders = selectedPositionSide === 'SHORT' ? shortOrders : longOrders;
+  const long = positions.find(position => sideOfPosition(position) === 'LONG' && Number(position.contracts) > 0);
+  const short = positions.find(position => sideOfPosition(position) === 'SHORT' && Number(position.contracts) > 0);
+  const rawPosition = selectedPositionSide === 'SHORT' ? short : long;
   const freeUsdt = numberOrZero(balance?.free?.USDT);
   const totalUsdt = numberOrZero(balance?.total?.USDT);
   const accountUnrealized = positions.filter(p => p.symbol === symbol)
     .reduce((sum, p) => sum + numberOrZero(p.unrealizedPnl ?? p.info?.unRealizedProfit), 0);
-  const account = incomeMetrics(symState.accountIncome, accountUnrealized);
+  const accountState = longAvailable ? longState : selectedShortState;
+  const account = incomeMetrics(accountState.accountIncome, accountUnrealized);
   const funding = account.funding;
   const fee = account.fees;
-  const openPositionFees = Object.values(symState.lastBuyByLevel || {})
-    .reduce((sum, buy) => sum + numberOrZero(buy?.totalFeeQuote), 0);
+  const trackedOpenPositionFees = openPositionFees(symState);
   const leverage = Number(process.env.LEVERAGE) || 0;
-  const position = positionMetrics(long, leverage, openPositionFees);
+  const position = positionMetrics(rawPosition, leverage, trackedOpenPositionFees);
   for (const order of orders) {
-    order.entryComparison = order.side === 'sell' ? sellEntryLabel(order.price, long?.entryPrice) : 'Menambah LONG';
+    const isEntry = order.side === (selectedPositionSide === 'SHORT' ? 'sell' : 'buy');
+    order.entryComparison = isEntry
+      ? `Menambah ${selectedPositionSide}`
+      : selectedPositionSide === 'SHORT'
+        ? (rawPosition?.entryPrice > 0 && order.price < rawPosition.entryPrice ? 'Exit di bawah entry rata-rata' : 'Exit SHORT')
+        : sellEntryLabel(order.price, rawPosition?.entryPrice);
   }
   const walletInfo = balance?.info || {};
   const walletBalance = numberOrZero(walletInfo.totalWalletBalance ?? balance?.total?.USDT);
@@ -230,13 +374,28 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
   const positionMargin = position ? numberOrZero(position.positionMargin) : 0;
   const openOrderMargin = numberOrZero(walletInfo.totalOpenOrderInitialMargin);
   const usedMargin = numberOrZero(walletInfo.totalInitialMargin ?? balance?.used?.USDT);
-  const net = account.net;
-  const intelligence = decisionSnapshot(engine, symbol, symState, orders, position);
+  const shortRunning = options.shortRunning ?? lockIsActive(shortLockFile);
+  const selectedRunning = selectedPositionSide === 'SHORT' ? shortRunning : engine.circuitAllows();
+  const intelligence = decisionSnapshot(engine, symbol, symState, orders, position, {
+    positionSide: selectedPositionSide,
+  });
+  const longComparison = sideComparison('LONG', longAvailable, engine.circuitAllows(), longState, longOrders, long, leverage);
+  const shortComparison = sideComparison('SHORT', shortAvailable, shortRunning, selectedShortState, shortOrders, short, leverage);
+  const combinedStrategyPnl = longComparison.strategyPnl + shortComparison.strategyPnl;
+  const combinedExposure = longComparison.exposure + shortComparison.exposure;
   return {
     generatedAt: new Date().toISOString(), refreshSeconds, dashboardAuthEnabled: authEnabled,
     source: 'Binance USDⓈ-M Futures',
-    mode: process.env.EXCHANGE_MODE || 'testnet', running: engine.circuitAllows(),
-    tradingEnabled: engine.canPlaceNewOrders(), symbols, selectedSymbol: symbol,
+    mode: process.env.EXCHANGE_MODE || 'testnet', running: selectedRunning,
+    tradingEnabled: selectedRunning && engine.canPlaceNewOrders(), symbols, selectedSymbol: symbol,
+    positionSides: ['LONG', 'SHORT'], selectedPositionSide,
+    sideAvailable: selectedPositionSide === 'SHORT' ? shortAvailable : longAvailable,
+    comparison: {
+      scope: 'selected-pair',
+      combined: { exposure: combinedExposure, strategyPnl: combinedStrategyPnl },
+      LONG: longComparison,
+      SHORT: shortComparison,
+    },
     market: {
       price: marketPrice(engine, symbol, ticker.last), priceText: marketPriceText(engine, symbol, ticker.last),
       priceDigits: precisionDigits(marketPriceText(engine, symbol, ticker.last)), changePercent: numberOrZero(ticker.percentage),
@@ -254,18 +413,20 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol) {
       sellValue: orders.filter(order => order.side === 'sell').reduce((sum, order) => sum + order.price * order.remaining, 0),
     },
     profit: {
-      realized: account.realized,
-      totalRealized: symbols.every(s => incomeMetrics(engine.state.getSymbol(s).accountIncome).ready)
-        ? symbols.reduce((sum, s) => sum + incomeMetrics(engine.state.getSymbol(s).accountIncome).realized, 0) : null,
+      realized: numberOrZero(symState.realizedGridProfit) + numberOrZero(symState.realizedExitProfit),
+      totalRealized: null,
       gridPairProfit: numberOrZero(symState.realizedGridProfit),
       accounting: account,
       filledBuys: numberOrZero(symState.filledBuys), filledSells: numberOrZero(symState.filledSells), quoteAsset: 'USDT',
-      funding, fees: fee, openPositionFees, unrealizedPnl: accountUnrealized, net,
+      funding, fees: numberOrZero(symState.tradingFees), openPositionFees: trackedOpenPositionFees,
+      unrealizedPnl: numberOrZero(position?.unrealizedPnl), net: selectedPositionSide === 'SHORT'
+        ? shortComparison.strategyPnl : longComparison.strategyPnl,
+      accountNet: account.net,
     },
     futures: {
       leverage, marginMode: process.env.MARGIN_MODE || '', positionMode: 'HEDGE',
-      positionSide: 'LONG', freeUsdt, totalUsdt, walletBalance, availableBalance, usedMargin,
-      positionMargin, openOrderMargin, position, exits: sellOverview(orders, long),
+      positionSide: selectedPositionSide, freeUsdt, totalUsdt, walletBalance, availableBalance, usedMargin,
+      positionMargin, openOrderMargin, position, exits: exitOverview(orders, rawPosition, selectedPositionSide),
     },
   };
 }
@@ -298,7 +459,11 @@ function startFuturesDashboardServer(engine) {
       if (await auth.handleRoute(request, response, url)) return;
       if (!auth.requireAuthentication(request, response, url)) return;
       if (request.method === 'GET' && url.pathname === '/api/dashboard') {
-        sendJson(response, 200, await buildFuturesDashboardSnapshot(engine, url.searchParams.get('symbol')));
+        sendJson(response, 200, await buildFuturesDashboardSnapshot(
+          engine,
+          url.searchParams.get('symbol'),
+          url.searchParams.get('positionSide')
+        ));
         return;
       }
       if (request.method === 'GET' && dashboardAssets.has(url.pathname)) {

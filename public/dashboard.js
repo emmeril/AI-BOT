@@ -1,20 +1,20 @@
 (() => {
   'use strict';
 
-  const state = { data: null, activeNode: 'supervisor', timer: null, controller: null, requestId: 0, loading: true, refreshSpinTimer: null, flowLayoutFrame: null, flowBounceTimer: null, flowBounceIndex: 0, motionPreference: 'on' };
+  const state = { data: null, positionSide: 'LONG', activeNode: 'supervisor', timer: null, controller: null, requestId: 0, loading: true, refreshSpinTimer: null, flowLayoutFrame: null, motionPreference: 'on' };
   const MOTION_STORAGE_KEY = 'grid-flow-motion';
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   const FLOW_EDGES = [
     ['market', 'fibonacci'], ['fibonacci', 'supervisor'],
     ['supervisor', 'buy'], ['buy', 'position'], ['position', 'sell'],
   ];
-  const FLOW_STAGES = [['market'], ['fibonacci'], ['supervisor'], ['buy'], ['position'], ['sell']];
   const byId = id => document.getElementById(id);
   const num = value => Number.isFinite(Number(value)) ? Number(value) : 0;
   const nullable = value => value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Number(value);
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
   const intel = () => state.data?.intelligence || {};
   const quote = () => state.data?.profit?.quoteAsset || 'USDT';
+  const isShort = () => state.positionSide === 'SHORT';
 
   function text(id, value) { const element = byId(id); if (element) element.textContent = value; }
   function money(value, digits = 4) {
@@ -102,42 +102,6 @@
     if (state.flowLayoutFrame !== null) cancelAnimationFrame(state.flowLayoutFrame);
     state.flowLayoutFrame = requestAnimationFrame(layoutFlowConnections);
   }
-  function motionEnabled() {
-    if (state.motionPreference === 'on') return true;
-    if (state.motionPreference === 'off') return false;
-    return !reducedMotion.matches;
-  }
-  function clearFlowBounce() {
-    clearTimeout(state.flowBounceTimer); state.flowBounceTimer = null;
-    document.querySelectorAll('.flow-node').forEach(node => node.getAnimations().filter(animation => animation.id === 'flow-node-bounce').forEach(animation => animation.cancel()));
-  }
-  function runFlowBounce() {
-    state.flowBounceTimer = null;
-    if (!state.data?.running || !motionEnabled()) return;
-    const stage = FLOW_STAGES[state.flowBounceIndex];
-    for (const name of stage) {
-      const node = document.querySelector(`[data-node="${name}"]`);
-      if (!node) continue;
-      if (!['active', 'safety'].includes(node.dataset.flowState)) continue;
-      const style = getComputedStyle(node);
-      const pulseColor = node.dataset.flowState === 'safety' ? '#ffbe66' : '#c6f36f';
-      const animation = node.animate([
-        { borderColor: style.borderColor, boxShadow: style.boxShadow },
-        { borderColor: pulseColor, boxShadow: `0 0 0 4px ${node.dataset.flowState === 'safety' ? 'rgba(255,190,102,.24)' : 'rgba(198,243,111,.24)'}`, offset: .48 },
-        { borderColor: style.borderColor, boxShadow: style.boxShadow },
-      ], { duration: 480, easing: 'cubic-bezier(.2,.8,.3,1)' });
-      animation.id = 'flow-node-bounce';
-    }
-    state.flowBounceIndex = (state.flowBounceIndex + 1) % FLOW_STAGES.length;
-    state.flowBounceTimer = setTimeout(runFlowBounce, state.flowBounceIndex === 0 ? 1050 : 560);
-  }
-  function syncFlowBounce({ restart = false } = {}) {
-    if (restart || !state.data?.running || !motionEnabled()) clearFlowBounce();
-    if (state.data?.running && motionEnabled() && state.flowBounceTimer === null) {
-      if (restart) state.flowBounceIndex = 0;
-      state.flowBounceTimer = setTimeout(runFlowBounce, 180);
-    }
-  }
   function savedMotionPreference() {
     try {
       const value = localStorage.getItem(MOTION_STORAGE_KEY);
@@ -151,7 +115,6 @@
     const description = preference === 'on' ? 'Animasi dashboard aktif.' : preference === 'off' ? 'Animasi dashboard dimatikan.' : `Animasi mengikuti sistem dan saat ini ${reducedMotion.matches ? 'mati' : 'aktif'}.`;
     text('motion-state', description); byId('motion-control').title = description;
     if (persist) { try { localStorage.setItem(MOTION_STORAGE_KEY, preference); } catch {} }
-    syncFlowBounce({ restart: true });
   }
   function profileCopy(profile) {
     return ({
@@ -162,17 +125,46 @@
     })[String(profile || '').toUpperCase()] || 'Keputusan adaptive belum tersedia.';
   }
 
+  function renderPositionTabs() {
+    document.querySelectorAll('.position-tab').forEach(tab => {
+      const selected = tab.dataset.positionSide === state.positionSide;
+      tab.setAttribute('aria-selected', String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+    });
+    byId('position-detail').setAttribute('aria-labelledby', `${state.positionSide.toLowerCase()}-tab`);
+  }
+
+  function renderComparison() {
+    const comparison = state.data.comparison || {};
+    const combined = comparison.combined || {};
+    text('combined-exposure', `${money(combined.exposure, 2)} ${quote()}`);
+    text('combined-pnl', `${signed(combined.strategyPnl, 4)} ${quote()}`);
+    pnlTone(byId('combined-pnl'), combined.strategyPnl);
+    for (const side of ['LONG', 'SHORT']) {
+      const metrics = comparison[side] || {};
+      const prefix = side.toLowerCase();
+      text(`${prefix}-exposure`, metrics.available ? `${money(metrics.exposure, 2)} ${quote()}` : 'Tidak dikelola');
+      text(`${prefix}-pnl`, metrics.available ? `${signed(metrics.strategyPnl, 4)} ${quote()}` : 'N/A');
+      text(`${prefix}-runtime`, !metrics.available ? 'Pair tidak aktif' : metrics.running ? 'Bot online' : 'Bot offline');
+      pnlTone(byId(`${prefix}-pnl`), metrics.available ? metrics.strategyPnl : null);
+    }
+  }
+
   function renderOverview() {
     const data = state.data;
     const adaptive = intel().adaptive || {};
-    const profile = adaptive.profile || 'PENDING';
+    const fib = intel().fibonacci || {};
+    const profile = isShort() ? (fib.appliedDirection || 'RANGING') : (adaptive.profile || 'PENDING');
     text('source-label', data.source || 'Binance');
-    text('overview-title', data.selectedSymbol || 'Pair belum dipilih');
-    text('overview-copy', profileCopy(profile));
+    text('overview-title', `${data.selectedSymbol || 'Pair belum dipilih'} · ${state.positionSide}`);
+    text('overview-copy', isShort()
+      ? (fib.appliedDirection === 'BEARISH' ? 'Entry SELL diizinkan oleh konfirmasi Fibonacci bearish.' : 'Entry SELL menunggu arah Fibonacci BEARISH yang terkonfirmasi.')
+      : profileCopy(profile));
     text('market-price', `${data.market?.priceText || price(data.market?.price)} ${quote()}`);
     text('market-change', `24 jam: ${signed(data.market?.changePercent, 2)}%`);
+    text('profile-label', isShort() ? 'Gate SELL' : 'Profil BUY');
     text('active-profile', profile);
-    text('profile-source', adaptive.source ? `Sumber ${adaptive.source}` : 'Sumber belum tersedia');
+    text('profile-source', isShort() ? `Arah wajib BEARISH · raw ${fib.direction || 'UNKNOWN'}` : (adaptive.source ? `Sumber ${adaptive.source}` : 'Sumber belum tersedia'));
     text('exposure-value', percent(adaptive.exposurePct));
     text('exposure-note', adaptive.investmentCap > 0 ? `${money(adaptive.allocatedInvestment, 2)} dari ${money(adaptive.investmentCap, 0)} USDT` : 'Batas investasi belum tersedia');
     text('net-pnl', `${signed(data.profit?.net, 4)} ${quote()}`);
@@ -189,35 +181,47 @@
     const position = data.futures?.position;
     const weights = adaptive.recommendation?.buyWeight;
     const weightText = weights ? `${weights.upper}/${weights.middle}/${weights.lower}` : 'N/A';
-    const coverage = execution.sellCoveragePct;
+    const coverage = execution.exitCoveragePct ?? execution.sellCoveragePct;
+    const entrySide = isShort() ? 'SELL' : 'BUY';
+    const exitSide = isShort() ? 'BUY' : 'SELL';
+    const entryCount = num(execution.entryCount ?? data.orders?.[`${entrySide.toLowerCase()}Count`]);
+    const exitCount = num(execution.exitCount ?? data.orders?.[`${exitSide.toLowerCase()}Count`]);
+    const entryValue = num(data.orders?.[`${entrySide.toLowerCase()}Value`]);
     const marketAvailable = Boolean(data.running && num(data.market?.price) > 0);
     const fibonacciAvailable = Boolean(marketAvailable && fib.available);
     const adaptiveAvailable = Boolean(data.running && adaptive.available);
+    const shortGateAvailable = Boolean(data.running && fib.available);
+    const decisionAvailable = isShort() ? shortGateAvailable : adaptiveAvailable;
     const safetyOverride = Boolean(adaptiveAvailable && (String(adaptive.profile).toUpperCase() === 'RISK_OFF' || String(adaptive.source).toUpperCase().includes('SAFETY')));
     const adaptiveBuyAvailable = Boolean(adaptiveAvailable && String(adaptive.mode).toUpperCase() === 'LIVE');
-    const buyAvailable = Boolean(data.running && (data.tradingEnabled || num(data.orders?.buyCount) > 0));
+    const shortEntryAllowed = Boolean(shortGateAvailable && fib.appliedDirection === 'BEARISH');
+    const entryAvailable = Boolean(data.running && (data.tradingEnabled || entryCount > 0));
     const positionAvailable = Boolean(data.running && position && num(position.contracts) > 0);
-    const sellNeedsAttention = Boolean(positionAvailable && num(execution.uncovered) > 0);
-    const sellAvailable = Boolean(positionAvailable && !sellNeedsAttention && coverage !== null && coverage !== undefined && num(coverage) >= 99.999);
+    const exitNeedsAttention = Boolean(positionAvailable && num(execution.uncovered) > 0);
+    const exitAvailable = Boolean(positionAvailable && !exitNeedsAttention && coverage !== null && coverage !== undefined && num(coverage) >= 99.999);
+    text('flow-title', `Dari sinyal pasar ke exit ${exitSide}`);
+    text('supervisor-node-title', isShort() ? 'Fibonacci entry gate' : 'Adaptive supervisor');
+    text('entry-node-title', `${entrySide} grid`);
+    text('position-node-title', `${state.positionSide} position`);
+    text('exit-node-title', `${exitSide} ladder`);
     setNode('market', 'accent', String(data.mode || 'LIVE').toUpperCase(), `${data.market?.priceText || price(data.market?.price)} ${quote()}`, `${signed(data.market?.changePercent, 2)}% dalam 24 jam`);
     setNode('fibonacci', toneFor(fib.direction), fib.direction || 'MENUNGGU', `Score ${fib.score ?? 'N/A'}`, fib.available ? `Applied ${fib.appliedDirection} · conf ${percent(num(fib.confidence) * 100, 1)}` : 'Belum ada analisis');
-    setNode('supervisor', toneFor(adaptive.profile), adaptive.profile || 'MENUNGGU', `Exposure ${percent(adaptive.exposurePct)}`, `${adaptive.source || 'PENDING'} · spacing ${adaptive.recommendation?.spacingMultiplier ?? 'N/A'}`);
-    setNode('buy', 'positive', `${num(data.orders?.buyCount)} ORDER`, `${money(data.orders?.buyValue, 2)} ${quote()}`, `Bobot atas/tengah/bawah ${weightText}`);
-    setNode('position', position ? (num(data.profit?.unrealizedPnl) >= 0 ? 'positive' : 'negative') : 'accent', position ? 'LONG AKTIF' : 'TIDAK ADA POSISI', position ? compact(position.contracts) : '0', `PnL berjalan ${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`);
-    setNode('sell', coverage !== null && coverage !== undefined && coverage < 99.999 ? 'negative' : 'positive', `${num(data.orders?.sellCount)} ORDER`, coverage == null ? 'Coverage N/A' : `Coverage ${percent(coverage, 0)}`, execution.uncovered > 0 ? `${compact(execution.uncovered)} kontrak belum tertutup` : 'Tidak ada posisi tanpa exit');
+    setNode('supervisor', isShort() ? toneFor(fib.appliedDirection) : toneFor(adaptive.profile), isShort() ? (shortEntryAllowed ? 'ENTRY AKTIF' : 'MENUNGGU') : (adaptive.profile || 'MENUNGGU'), isShort() ? `Applied ${fib.appliedDirection || 'RANGING'}` : `Exposure ${percent(adaptive.exposurePct)}`, isShort() ? `Wajib BEARISH · raw ${fib.direction || 'UNKNOWN'}` : `${adaptive.source || 'PENDING'} · spacing ${adaptive.recommendation?.spacingMultiplier ?? 'N/A'}`);
+    setNode('buy', entrySide === 'BUY' ? 'positive' : 'warning', `${entryCount} ORDER`, `${money(entryValue, 2)} ${quote()}`, isShort() ? 'Entry hanya saat gate BEARISH aktif' : `Bobot atas/tengah/bawah ${weightText}`);
+    setNode('position', position ? (num(data.profit?.unrealizedPnl) >= 0 ? 'positive' : 'negative') : 'accent', position ? `${state.positionSide} AKTIF` : 'TIDAK ADA POSISI', position ? compact(position.contracts) : '0', `PnL berjalan ${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`);
+    setNode('sell', coverage !== null && coverage !== undefined && coverage < 99.999 ? 'negative' : 'positive', `${exitCount} ORDER`, coverage == null ? 'Coverage N/A' : `Coverage ${percent(coverage, 0)}`, execution.uncovered > 0 ? `${compact(execution.uncovered)} kontrak belum tertutup` : 'Tidak ada posisi tanpa exit');
     setFlowNodeState('market', marketAvailable ? 'active' : 'waiting');
     setFlowNodeState('fibonacci', fibonacciAvailable ? 'active' : 'waiting');
-    setFlowNodeState('supervisor', safetyOverride ? 'safety' : adaptiveAvailable ? 'active' : 'waiting');
-    setFlowNodeState('buy', safetyOverride && adaptiveBuyAvailable ? 'safety' : buyAvailable ? 'active' : 'waiting');
+    setFlowNodeState('supervisor', isShort() ? (shortEntryAllowed ? 'active' : 'waiting') : safetyOverride ? 'safety' : adaptiveAvailable ? 'active' : 'waiting');
+    setFlowNodeState('buy', !isShort() && safetyOverride && adaptiveBuyAvailable ? 'safety' : entryAvailable ? 'active' : 'waiting');
     setFlowNodeState('position', positionAvailable ? 'active' : 'waiting');
-    setFlowNodeState('sell', sellNeedsAttention ? 'error' : sellAvailable ? 'active' : 'waiting');
+    setFlowNodeState('sell', exitNeedsAttention ? 'error' : exitAvailable ? 'active' : 'waiting');
     setFlowEdge('market', 'fibonacci', fibonacciAvailable ? 'active' : 'waiting');
-    setFlowEdge('fibonacci', 'supervisor', fibonacciAvailable && adaptiveAvailable ? 'active' : 'waiting');
-    setFlowEdge('supervisor', 'buy', safetyOverride && adaptiveBuyAvailable ? 'safety' : adaptiveBuyAvailable ? 'active' : 'waiting');
+    setFlowEdge('fibonacci', 'supervisor', fibonacciAvailable && decisionAvailable ? 'active' : 'waiting');
+    setFlowEdge('supervisor', 'buy', !isShort() && safetyOverride && adaptiveBuyAvailable ? 'safety' : (isShort() ? shortEntryAllowed : adaptiveBuyAvailable) ? 'active' : 'waiting');
     setFlowEdge('buy', 'position', positionAvailable ? 'active' : 'waiting');
-    setFlowEdge('position', 'sell', sellNeedsAttention ? 'error' : sellAvailable ? 'active' : 'waiting');
+    setFlowEdge('position', 'sell', exitNeedsAttention ? 'error' : exitAvailable ? 'active' : 'waiting');
     queueFlowLayout();
-    syncFlowBounce();
   }
 
   function inspectorModel() {
@@ -227,14 +231,22 @@
     const execution = intel().execution || {};
     const position = data.futures?.position;
     const weights = adaptive.recommendation?.buyWeight;
+    const entrySide = isShort() ? 'SELL' : 'BUY';
+    const exitSide = isShort() ? 'BUY' : 'SELL';
+    const entryCount = num(execution.entryCount ?? data.orders?.[`${entrySide.toLowerCase()}Count`]);
+    const exitCount = num(execution.exitCount ?? data.orders?.[`${exitSide.toLowerCase()}Count`]);
+    const entryValue = num(data.orders?.[`${entrySide.toLowerCase()}Value`]);
+    const coverage = execution.exitCoveragePct ?? execution.sellCoveragePct;
     const tfTags = Object.entries(fib.timeframes || {}).map(([key, value]) => `${key}: ${value.direction}`);
     return ({
       market: { title: 'Market feed', status: String(data.mode || 'LIVE').toUpperCase(), summary: 'Ticker dan candle Binance menjadi input harga untuk range, sinyal, dan penempatan level grid.', tags: data.market?.timeframe ? [`Chart ${data.market.timeframe}`] : [], details: [['Harga terakhir', `${data.market?.priceText || price(data.market?.price)} ${quote()}`], ['Perubahan 24 jam', `${signed(data.market?.changePercent, 2)}%`], ['High 24 jam', `${data.market?.highText || price(data.market?.high)} ${quote()}`], ['Low 24 jam', `${data.market?.lowText || price(data.market?.low)} ${quote()}`]] },
       fibonacci: { title: 'Fibonacci direction', status: fib.direction || 'MENUNGGU', summary: fib.available ? `Arah mentah ${fib.direction}. Arah yang diterapkan ke bias level saat ini ${fib.appliedDirection}.` : 'Analisis Fibonacci belum tersedia untuk pair ini.', tags: tfTags, details: [['Score', fib.score ?? 'N/A'], ['Confidence', fib.confidence == null ? 'N/A' : percent(num(fib.confidence) * 100, 1)], ['Alignment', fib.alignment == null ? 'N/A' : percent(num(fib.alignment) * 100, 1)], ['Konfirmasi', `${num(fib.confirmationCount)}/${num(fib.confirmationsRequired)}`], ['Confirmed', fib.confirmedDirection || 'RANGING'], ['Diperbarui', time(fib.generatedAt)]] },
-      supervisor: { title: 'Adaptive supervisor', status: adaptive.profile || 'MENUNGGU', summary: profileCopy(adaptive.profile), tags: adaptive.reasons || [], details: [['Profil aktif', adaptive.profile || 'N/A'], ['Kandidat raw', adaptive.rawProfile || 'N/A'], ['Sumber', adaptive.source || 'PENDING'], ['Exposure', percent(adaptive.exposurePct)], ['Konfirmasi profil', `${num(adaptive.candidateCount)}/${num(adaptive.confirmationsRequired)}`], ['Spacing', adaptive.recommendation?.spacingMultiplier ?? 'N/A'], ['Bobot BUY', weights ? `${weights.upper} / ${weights.middle} / ${weights.lower}` : 'N/A'], ['Mode', adaptive.mode || 'OFF']] },
-      buy: { title: 'BUY grid', status: `${num(data.orders?.buyCount)} ORDER AKTIF`, summary: 'Order BUY baru mengikuti profil adaptive. Batas investasi tetap berasal dari konfigurasi pengguna.', tags: weights ? [`Upper ${weights.upper}x`, `Middle ${weights.middle}x`, `Lower ${weights.lower}x`] : [], details: [['Order aktif', num(data.orders?.buyCount)], ['Nilai pending', `${money(data.orders?.buyValue, 4)} ${quote()}`], ['Grid count', num(execution.gridCount) || 'N/A'], ['Investment cap', adaptive.investmentCap > 0 ? `${money(adaptive.investmentCap, 0)} ${quote()}` : 'N/A'], ['Allocated', `${money(adaptive.allocatedInvestment, 4)} ${quote()}`], ['Spacing', adaptive.recommendation?.spacingMultiplier ?? 'N/A']] },
-      position: { title: 'LONG position', status: position ? 'AKTIF' : 'KOSONG', summary: position ? 'Posisi LONG berasal dari BUY grid yang sudah terisi. PnL berjalan mengikuti mark price Binance.' : 'Tidak ada kontrak LONG terbuka pada pair ini.', tags: position ? [`${data.futures?.leverage || 0}x`, data.futures?.marginMode || 'N/A', data.futures?.positionSide || 'LONG'] : [], details: [['Kontrak', position ? compact(position.contracts) : '0'], ['Entry', position ? price(position.entryPrice) : 'N/A'], ['Mark', position ? price(position.markPrice) : 'N/A'], ['Likuidasi', position?.liquidationPrice > 0 ? price(position.liquidationPrice) : 'N/A'], ['Margin posisi', `${money(data.futures?.positionMargin, 4)} ${quote()}`], ['ROI posisi', position ? percent(position.roiPct, 2) : 'N/A'], ['PnL berjalan', `${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`]] },
-      sell: { title: 'SELL ladder', status: execution.uncovered > 0 ? 'PERLU REKONSILIASI' : 'TERLINDUNGI', summary: execution.uncovered > 0 ? 'Sebagian posisi belum memiliki jumlah SELL yang setara pada snapshot ini. Bot akan merekonsiliasi pada siklus berikutnya.' : 'Jumlah kontrak LONG sudah dicadangkan oleh SELL aktif, atau tidak ada posisi terbuka.', tags: data.futures?.exits?.nearestLabel ? [data.futures.exits.nearestLabel] : [], details: [['Order SELL', num(data.orders?.sellCount)], ['Reserved SELL', compact(execution.reservedSell)], ['Kontrak LONG', compact(execution.positionContracts)], ['Belum tertutup', compact(execution.uncovered)], ['Coverage', execution.sellCoveragePct == null ? 'N/A' : percent(execution.sellCoveragePct, 0)], ['SELL terdekat', data.futures?.exits?.nearestPrice ? `${price(data.futures.exits.nearestPrice)} ${quote()}` : 'N/A']] },
+      supervisor: isShort()
+        ? { title: 'Fibonacci entry gate', status: fib.appliedDirection === 'BEARISH' ? 'ENTRY AKTIF' : 'MENUNGGU', summary: fib.appliedDirection === 'BEARISH' ? 'Arah terapan BEARISH mengizinkan bot memasang entry SELL.' : 'Entry SELL ditahan sampai arah terapan Fibonacci menjadi BEARISH.', tags: tfTags, details: [['Arah mentah', fib.direction || 'UNKNOWN'], ['Arah terapan', fib.appliedDirection || 'RANGING'], ['Arah wajib', 'BEARISH'], ['Confidence', fib.confidence == null ? 'N/A' : percent(num(fib.confidence) * 100, 1)], ['Konfirmasi', `${num(fib.confirmationCount)}/${num(fib.confirmationsRequired)}`], ['Mode', fib.strategy || 'N/A']] }
+        : { title: 'Adaptive supervisor', status: adaptive.profile || 'MENUNGGU', summary: profileCopy(adaptive.profile), tags: adaptive.reasons || [], details: [['Profil aktif', adaptive.profile || 'N/A'], ['Kandidat raw', adaptive.rawProfile || 'N/A'], ['Sumber', adaptive.source || 'PENDING'], ['Exposure', percent(adaptive.exposurePct)], ['Konfirmasi profil', `${num(adaptive.candidateCount)}/${num(adaptive.confirmationsRequired)}`], ['Spacing', adaptive.recommendation?.spacingMultiplier ?? 'N/A'], ['Bobot BUY', weights ? `${weights.upper} / ${weights.middle} / ${weights.lower}` : 'N/A'], ['Mode', adaptive.mode || 'OFF']] },
+      buy: { title: `${entrySide} grid`, status: `${entryCount} ORDER AKTIF`, summary: isShort() ? 'Order SELL membuka posisi SHORT hanya setelah gate Fibonacci mengizinkan entry.' : 'Order BUY baru mengikuti profil adaptive. Batas investasi tetap berasal dari konfigurasi pengguna.', tags: isShort() ? [`Gate ${fib.appliedDirection || 'RANGING'}`] : (weights ? [`Upper ${weights.upper}x`, `Middle ${weights.middle}x`, `Lower ${weights.lower}x`] : []), details: [['Order aktif', entryCount], ['Nilai pending', `${money(entryValue, 4)} ${quote()}`], ['Grid count', num(execution.gridCount) || 'N/A'], ['Investment cap', adaptive.investmentCap > 0 ? `${money(adaptive.investmentCap, 0)} ${quote()}` : 'N/A'], ['Allocated', `${money(adaptive.allocatedInvestment, 4)} ${quote()}`], ['Sisi entry', entrySide]] },
+      position: { title: `${state.positionSide} position`, status: position ? 'AKTIF' : 'KOSONG', summary: position ? `Posisi ${state.positionSide} berasal dari ${entrySide} grid yang sudah terisi. PnL berjalan mengikuti mark price Binance.` : `Tidak ada kontrak ${state.positionSide} terbuka pada pair ini.`, tags: position ? [`${data.futures?.leverage || 0}x`, data.futures?.marginMode || 'N/A', data.futures?.positionSide || state.positionSide] : [], details: [['Kontrak', position ? compact(position.contracts) : '0'], ['Entry', position ? price(position.entryPrice) : 'N/A'], ['Mark', position ? price(position.markPrice) : 'N/A'], ['Likuidasi', position?.liquidationPrice > 0 ? price(position.liquidationPrice) : 'N/A'], ['Margin posisi', `${money(data.futures?.positionMargin, 4)} ${quote()}`], ['ROI posisi', position ? percent(position.roiPct, 2) : 'N/A'], ['PnL berjalan', `${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`]] },
+      sell: { title: `${exitSide} ladder`, status: execution.uncovered > 0 ? 'PERLU REKONSILIASI' : 'TERLINDUNGI', summary: execution.uncovered > 0 ? `Sebagian posisi belum memiliki jumlah ${exitSide} yang setara pada snapshot ini. Bot akan merekonsiliasi pada siklus berikutnya.` : `Jumlah kontrak ${state.positionSide} sudah dicadangkan oleh ${exitSide} aktif, atau tidak ada posisi terbuka.`, tags: data.futures?.exits?.nearestLabel ? [data.futures.exits.nearestLabel] : [], details: [[`Order ${exitSide}`, exitCount], [`Reserved ${exitSide}`, compact(execution.reservedExit)], [`Kontrak ${state.positionSide}`, compact(execution.positionContracts)], ['Belum tertutup', compact(execution.uncovered)], ['Coverage', coverage == null ? 'N/A' : percent(coverage, 0)], [`${exitSide} terdekat`, data.futures?.exits?.nearestPrice ? `${price(data.futures.exits.nearestPrice)} ${quote()}` : 'N/A']] },
     })[state.activeNode];
   }
 
@@ -257,6 +269,7 @@
   }
   function renderLedger() {
     const profit = state.data.profit || {};
+    text('ledger-title', `PnL strategi ${state.positionSide}`);
     for (const [id, value] of [['realized-pnl', profit.realized], ['funding-pnl', profit.accounting?.ready ? profit.funding : null], ['unrealized-pnl', profit.unrealizedPnl], ['grid-profit', profit.gridPairProfit], ['ledger-net', profit.net]]) { text(id, `${signed(value, 4)} ${quote()}`); pnlTone(byId(id), value); }
     text('fees-value', `${money(profit.fees, 4)} ${quote()}`);
   }
@@ -274,6 +287,7 @@
   function renderOrders() {
     const orders = state.data.orders?.active || [];
     text('buy-count', `BUY ${num(state.data.orders?.buyCount)}`); text('sell-count', `SELL ${num(state.data.orders?.sellCount)}`);
+    text('orders-copy', `Urutan level, harga, jumlah, dan fungsi order untuk posisi ${state.positionSide}.`);
     const body = byId('orders-body'); const cards = byId('order-cards'); body.replaceChildren(); cards.replaceChildren();
     if (!orders.length) {
       const row = document.createElement('tr'); row.className = 'empty-row'; const cell = document.createElement('td'); cell.colSpan = 7; cell.textContent = state.loading ? 'Mengambil order aktif dari Binance.' : 'Tidak ada order grid aktif untuk pair ini.'; row.append(cell); body.append(row);
@@ -281,7 +295,7 @@
     }
     for (const order of [...orders].sort((a, b) => b.price - a.price || String(a.side).localeCompare(String(b.side)))) {
       const row = document.createElement('tr');
-      const values = [{ value: String(order.side || '').toUpperCase(), className: `side-label ${order.side}` }, { value: `L${order.level ?? 'N/A'}` }, { value: order.priceText || price(order.price) }, { value: order.amountText || compact(order.amount) }, { value: order.remainingText || compact(order.remaining) }, { value: order.entryComparison || (order.side === 'buy' ? 'Menambah LONG' : 'Exit LONG') }, { value: order.id }];
+      const values = [{ value: String(order.side || '').toUpperCase(), className: `side-label ${order.side}` }, { value: `L${order.level ?? 'N/A'}` }, { value: order.priceText || price(order.price) }, { value: order.amountText || compact(order.amount) }, { value: order.remainingText || compact(order.remaining) }, { value: order.entryComparison || 'Order grid' }, { value: order.id }];
       for (const item of values) { const cell = document.createElement('td'); if (item.className) { const span = document.createElement('span'); span.className = item.className; span.textContent = item.value; cell.append(span); } else cell.textContent = item.value; row.append(cell); } body.append(row);
       const card = document.createElement('article'); card.className = 'order-card';
       const side = document.createElement('span'); side.className = `side-label ${order.side}`; side.textContent = String(order.side || '').toUpperCase();
@@ -310,10 +324,10 @@
   }
   function renderChartMeta() { const range = state.data.range || {}; text('range-copy', range.lower > 0 && range.upper > 0 ? `Grid ${range.lowerText || price(range.lower)} sampai ${range.upperText || price(range.upper)} ${quote()}` : 'Range grid belum tersedia untuk pair ini.'); text('timeframe-label', state.data.market?.timeframe || 'N/A'); requestAnimationFrame(drawChart); }
   function renderRuntime() {
-    const data = state.data; text('status-text', state.loading ? 'Memperbarui' : data.tradingEnabled ? 'Live · Trading aktif' : 'Live · Order dijeda'); byId('status-mark').dataset.state = state.loading ? '' : data.tradingEnabled ? 'active' : 'paused';
+    const data = state.data; text('status-text', state.loading ? 'Memperbarui' : !data.running ? `${state.positionSide} · Bot offline` : data.tradingEnabled ? `${state.positionSide} · Trading aktif` : `${state.positionSide} · Order dijeda`); byId('status-mark').dataset.state = state.loading ? '' : data.tradingEnabled ? 'active' : data.running ? 'paused' : 'error';
     text('updated-at', `Diperbarui ${time(data.generatedAt)}`); text('runtime-label', `${String(data.mode || '').toUpperCase()} · ${data.source || 'Binance'} · refresh ${num(data.refreshSeconds) || 5} detik`); byId('logout-form').hidden = !data.dashboardAuthEnabled;
   }
-  function render() { renderOverview(); renderFlow(); renderInspector(); renderLedger(); renderRisk(); renderOrders(); renderChartMeta(); renderRuntime(); }
+  function render() { renderPositionTabs(); renderComparison(); renderOverview(); renderFlow(); renderInspector(); renderLedger(); renderRisk(); renderOrders(); renderChartMeta(); renderRuntime(); }
   function renderSymbols(symbols, selected) {
     const select = byId('symbol-select'); const current = [...select.options].map(option => option.value);
     if (JSON.stringify(current) !== JSON.stringify(symbols)) { select.replaceChildren(); for (const symbol of symbols) { const option = document.createElement('option'); option.value = symbol; option.textContent = symbol; select.append(option); } }
@@ -344,11 +358,14 @@
   async function load(options = {}) {
     const initial = !state.data; const announced = Boolean(options.announced); const requestId = ++state.requestId; state.controller?.abort(); state.controller = new AbortController(); setLoading(true, initial, announced); byId('error-notice').hidden = true; clearTimeout(state.timer);
     try {
-      const selected = options.symbol ?? byId('symbol-select').value; const query = selected ? `?symbol=${encodeURIComponent(selected)}` : '';
-      const response = await fetch(`/api/dashboard${query}`, { signal: state.controller.signal, cache: 'no-store' });
+      const selected = options.symbol ?? byId('symbol-select').value;
+      const positionSide = options.positionSide || state.positionSide;
+      const query = new URLSearchParams({ positionSide });
+      if (selected) query.set('symbol', selected);
+      const response = await fetch(`/api/dashboard?${query.toString()}`, { signal: state.controller.signal, cache: 'no-store' });
       if (response.status === 401) { window.location.assign('/login'); return; }
       if (!response.ok) throw new Error('Binance atau bot belum memberikan snapshot dashboard.');
-      const data = await response.json(); if (requestId !== state.requestId) return; state.data = data; renderSymbols(data.symbols || [], data.selectedSymbol); setLoading(false); render(); state.timer = setTimeout(() => load(), Math.max(2, num(data.refreshSeconds) || 5) * 1000);
+      const data = await response.json(); if (requestId !== state.requestId) return; state.data = data; state.positionSide = data.selectedPositionSide || positionSide; renderSymbols(data.symbols || [], data.selectedSymbol); setLoading(false); render(); state.timer = setTimeout(() => load(), Math.max(2, num(data.refreshSeconds) || 5) * 1000);
     } catch (error) {
       if (error.name === 'AbortError') return; setLoading(false); text('error-text', error.message || 'Data dashboard tidak tersedia.'); byId('error-notice').hidden = false; text('status-text', 'Offline · mencoba lagi'); byId('status-mark').dataset.state = 'error'; state.timer = setTimeout(() => load(), 5000);
     }
@@ -357,6 +374,25 @@
     document.querySelectorAll('.flow-node').forEach(node => node.addEventListener('click', () => { state.activeNode = node.dataset.node; if (state.data) renderInspector(); }));
     byId('symbol-select').addEventListener('change', event => load({ symbol: event.target.value, announced: true })); byId('refresh-button').addEventListener('click', () => { spinRefreshButton(); load({ announced: true }); }); byId('retry-button').addEventListener('click', () => load({ announced: true }));
     byId('motion-select').addEventListener('change', event => applyMotionPreference(event.target.value, { persist: true }));
+    document.querySelectorAll('.position-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const positionSide = tab.dataset.positionSide;
+        if (positionSide === state.positionSide) return;
+        state.positionSide = positionSide;
+        state.activeNode = 'supervisor';
+        renderPositionTabs();
+        load({ positionSide, announced: true });
+      });
+      tab.addEventListener('keydown', event => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const tabs = [...document.querySelectorAll('.position-tab')];
+        const current = tabs.indexOf(event.currentTarget);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : event.key === 'ArrowRight' ? (current + 1) % tabs.length : (current - 1 + tabs.length) % tabs.length;
+        tabs[next].focus();
+        tabs[next].click();
+      });
+    });
     reducedMotion.addEventListener?.('change', () => { if (state.motionPreference === 'system') applyMotionPreference('system'); });
     let resizeTimer; window.addEventListener('resize', () => { queueFlowLayout(); clearTimeout(resizeTimer); resizeTimer = setTimeout(drawChart, 100); });
     if ('ResizeObserver' in window) {

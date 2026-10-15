@@ -16,19 +16,36 @@ test('dashboard pipeline shows only the active deterministic execution flow', ()
   assert.doesNotMatch(html, /class="panel learning-panel"/);
   assert.match(script, /const FLOW_EDGES = \[/);
   assert.match(script, /ResizeObserver\(queueFlowLayout\)/);
-  assert.match(script, /const FLOW_STAGES = \[\['market'\]/);
   assert.match(script, /\['market', 'fibonacci'\], \['fibonacci', 'supervisor'\]/);
-  assert.match(script, /animation\.id = 'flow-node-bounce'/);
-  assert.match(script, /node\.dataset\.flowState === 'safety'/);
+  assert.doesNotMatch(script, /flowBounce|flow-node-bounce/);
+  assert.doesNotMatch(css, /flow-travel/);
   assert.doesNotMatch(script, /translateY\(-5px\) scale\(1\.01\)/);
   assert.doesNotMatch(css, /@media\(max-width:1180px\)[^}]*\.flow-lines\{display:none\}/);
   assert.match(css, /\.flow-signal path\[data-state=safety\]\{stroke:var\(--warning\)/);
   assert.match(css, /\.flow-signal path\[data-state=error\]\{stroke:var\(--negative\)/);
-  assert.match(css, /\.flow-map\[data-running=true\] \.flow-signal path\[data-state=active\]/);
-  assert.match(script, /setFlowEdge\('fibonacci', 'supervisor', fibonacciAvailable && adaptiveAvailable/);
-  assert.match(script, /setFlowEdge\('supervisor', 'buy', safetyOverride/);
-  assert.match(script, /setFlowEdge\('position', 'sell', sellNeedsAttention/);
+  assert.match(css, /\.flow-signal path\[data-state=active\]\{stroke:var\(--accent\);opacity:\.9\}/);
+  assert.match(script, /setFlowEdge\('fibonacci', 'supervisor', fibonacciAvailable && decisionAvailable/);
+  assert.match(script, /setFlowEdge\('supervisor', 'buy', !isShort\(\) && safetyOverride/);
+  assert.match(script, /setFlowEdge\('position', 'sell', exitNeedsAttention/);
   assert.match(css, /\.flow-grid\{[^}]*grid-template-columns:repeat\(6/);
+});
+
+test('futures dashboard combines LONG and SHORT with accessible side filters', () => {
+  const html = publicFile('dashboard.html');
+  const css = publicFile('dashboard.css');
+  const script = publicFile('dashboard.js');
+
+  assert.match(html, /role="tablist" aria-label="Filter sisi posisi"/);
+  assert.match(html, /data-position-side="LONG"/);
+  assert.match(html, /data-position-side="SHORT"/);
+  assert.match(html, /id="combined-exposure"/);
+  assert.match(html, /id="long-pnl"/);
+  assert.match(html, /id="short-pnl"/);
+  assert.match(css, /\.comparison-board\{/);
+  assert.match(css, /@media\(max-width:620px\).*\.comparison-board\{grid-template-columns:1fr\}/s);
+  assert.match(script, /new URLSearchParams\(\{ positionSide \}\)/);
+  assert.match(script, /\['ArrowLeft', 'ArrowRight', 'Home', 'End'\]/);
+  assert.match(script, /function renderComparison\(\)/);
 });
 
 test('dashboard motion preference can override or follow reduced motion', () => {
