@@ -312,6 +312,14 @@ npm run backtest:gemini-cache
 npm run backtest:full-grid-pnl
 ```
 
+Untuk menguji Supervisor deterministik tanpa ketergantungan pada rentang cache Gemini:
+
+```bash
+BACKTEST_START=2026-07-17T07:00:55.385Z \
+BACKTEST_END=2026-10-15T07:00:55.385Z \
+npm run backtest:adaptive-deterministic
+```
+
 Pembuatan cache bersifat resumable. Default-nya mengambil snapshot tiap 120 menit dengan exposure tetap 50%; deterministic safety tetap menerima exposure yang benar dari masing-masing simulasi. Cache berada di `backtest-data/gemini-adaptive-decisions.jsonl`, sedangkan laporan berada di `backtest-results/adaptive-variants-full-grid-backtest.{json,md}`. Laporan mencatat SHA-256 cache dan policy yang dipakai. Learned policy hanya dilatih dari separuh periode pertama dan baru aktif setelah titik split.
 
 Risk State Machine tetap memiliki backtest terpisah:

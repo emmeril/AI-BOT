@@ -137,22 +137,22 @@ function trainLearningPolicy(cache, rowsBySymbol, start, splitAt, options = {}) 
   return { events: events.length, candidate, policy };
 }
 
-function simulateVariants(simulator, input, replay, learnedPolicy, learnedFrom) {
-  return {
-    baseline: simulator.simulate({ ...input, adaptive: false, variant: 'baseline' }),
-    adaptiveDeterministic: simulator.simulate({
+function simulateVariants(simulator, input, replay, learnedPolicy, learnedFrom, variants = VARIANTS) {
+  const simulations = {
+    baseline: () => simulator.simulate({ ...input, adaptive: false, variant: 'baseline' }),
+    adaptiveDeterministic: () => simulator.simulate({
       ...input,
       adaptive: true,
       variant: 'adaptive-deterministic',
     }),
-    adaptiveGemini: simulator.simulate({
+    adaptiveGemini: () => simulator.simulate({
       ...input,
       adaptive: true,
       monitorDecisionProvider: replay,
       learningPolicyProvider: () => DEFAULT_POLICY,
       variant: 'adaptive-gemini',
     }),
-    adaptiveLearned: simulator.simulate({
+    adaptiveLearned: () => simulator.simulate({
       ...input,
       adaptive: true,
       monitorDecisionProvider: replay,
@@ -160,14 +160,15 @@ function simulateVariants(simulator, input, replay, learnedPolicy, learnedFrom) 
       variant: 'adaptive-learned',
     }),
   };
+  return Object.fromEntries(variants.map(variant => [variant, simulations[variant]()]));
 }
 
-function aggregateScope(scope, symbols, options) {
-  scope.aggregate = Object.fromEntries(VARIANTS.map(variant => [
+function aggregateScope(scope, symbols, options, variants = VARIANTS) {
+  scope.aggregate = Object.fromEntries(variants.map(variant => [
     variant,
     aggregate(symbols.map(symbol => scope.perSymbol[symbol][variant]), options),
   ]));
-  scope.comparison = Object.fromEntries(VARIANTS.slice(1).map(variant => [
+  scope.comparison = Object.fromEntries(variants.filter(variant => variant !== 'baseline').map(variant => [
     variant,
     comparison(scope.aggregate.baseline, scope.aggregate[variant]),
   ]));
@@ -193,13 +194,11 @@ function renderMarkdown(report) {
     '',
     `Symbols: ${report.symbols.join(', ')}`,
     '',
-    `Gemini cache SHA-256: \`${report.geminiCache.sha256}\``,
-    '',
     '| Scope | Variant | Net liquidation PnL | Return / notional | Fees | Funding | Grid cycles | Sum max DD |',
     '|---|---|---:|---:|---:|---:|---:|---:|',
   ];
   for (const scope of ['full', 'outOfSample']) {
-    for (const variant of VARIANTS) {
+    for (const variant of report.variants) {
       const item = report[scope].aggregate[variant];
       lines.push(
         `| ${scope === 'full' ? 'Full period' : 'Out-of-sample'} | ${labels[variant]} | ` +
@@ -210,7 +209,7 @@ function renderMarkdown(report) {
     }
   }
   lines.push('', '## Out-of-sample differences versus baseline', '');
-  for (const variant of VARIANTS.slice(1)) {
+  for (const variant of report.variants.filter(variant => variant !== 'baseline')) {
     const item = report.outOfSample.comparison[variant];
     lines.push(`- ${labels[variant]}: PnL ${item.netPnlDelta} USDT; drawdown ${item.drawdownDelta} USDT (negative is better).`);
   }
@@ -218,31 +217,28 @@ function renderMarkdown(report) {
     '',
     '## Out-of-sample PnL per symbol',
     '',
-    '| Symbol | Baseline | Deterministic | Gemini | Learned |',
-    '|---|---:|---:|---:|---:|'
+    `| Symbol | ${report.variants.map(variant => labels[variant]).join(' | ')} |`,
+    `|---|${report.variants.map(() => '---:').join('|')}|`
   );
   for (const symbol of report.symbols) {
     const item = report.outOfSample.perSymbol[symbol];
+    lines.push(`| ${symbol} | ${report.variants.map(variant => item[variant].netLiquidationPnl).join(' | ')} |`);
+  }
+  if (report.geminiCache) lines.splice(8, 0, `Gemini cache SHA-256: \`${report.geminiCache.sha256}\``, '');
+  if (report.learning) {
     lines.push(
-      `| ${symbol} | ${item.baseline.netLiquidationPnl} | ` +
-      `${item.adaptiveDeterministic.netLiquidationPnl} | ${item.adaptiveGemini.netLiquidationPnl} | ` +
-      `${item.adaptiveLearned.netLiquidationPnl} |`
+      '',
+      '## Learned policy',
+      '',
+      `- Status: ${report.learning.candidate.status}.`,
+      `- Eligible: ${report.learning.candidate.eligible}.`,
+      `- Episodes: ${report.learning.candidate.episodes}.`,
+      `- Policy used after split: aligned >= ${report.learning.policy.alignedMinConfidence}; conflict >= ${report.learning.policy.conflictMinConfidence}.`,
+      `- Validation accuracy: active ${report.learning.candidate.validation?.active?.accuracy ?? 'n/a'}; candidate ${report.learning.candidate.validation?.candidate?.accuracy ?? 'n/a'}.`,
+      `- Reasons: ${(report.learning.candidate.reasons || []).join(', ') || 'none'}.`
     );
   }
-  lines.push(
-    '',
-    '## Learned policy',
-    '',
-    `- Status: ${report.learning.candidate.status}.`,
-    `- Eligible: ${report.learning.candidate.eligible}.`,
-    `- Episodes: ${report.learning.candidate.episodes}.`,
-    `- Policy used after split: aligned >= ${report.learning.policy.alignedMinConfidence}; conflict >= ${report.learning.policy.conflictMinConfidence}.`,
-    `- Validation accuracy: active ${report.learning.candidate.validation?.active?.accuracy ?? 'n/a'}; candidate ${report.learning.candidate.validation?.candidate?.accuracy ?? 'n/a'}.`,
-    `- Reasons: ${(report.learning.candidate.reasons || []).join(', ') || 'none'}.`,
-    '',
-    '## Assumptions and limitations',
-    ''
-  );
+  lines.push('', '## Assumptions and limitations', '');
   for (const assumption of report.assumptions) lines.push(`- ${assumption}`);
   lines.push('');
   return `${lines.join('\n')}\n`;
@@ -255,19 +251,21 @@ async function main() {
   const dataDirectory = path.join(projectRoot, 'backtest-data', 'fibonacci-direction');
   const fundingDirectory = path.join(projectRoot, 'backtest-data', 'funding');
   const resultsDirectory = path.join(projectRoot, 'backtest-results');
+  const deterministicOnly = /^(1|true|yes)$/i.test(process.env.BACKTEST_DETERMINISTIC_ONLY || '');
+  const variants = deterministicOnly ? ['baseline', 'adaptiveDeterministic'] : VARIANTS;
   const cachePath = path.resolve(
     process.env.BACKTEST_GEMINI_CACHE || 'backtest-data/gemini-adaptive-decisions.jsonl'
   );
-  const cache = loadGeminiBacktestCache(cachePath, { minimumConfidence: 0.6 });
+  const cache = deterministicOnly ? null : loadGeminiBacktestCache(cachePath, { minimumConfidence: 0.6 });
   const rowsBySymbol = Object.fromEntries(symbols.map(symbol => [symbol, loadCachedRows(dataDirectory, symbol)]));
   const commonAvailableEnd = Math.min(...symbols.map(symbol => rowsBySymbol[symbol].at(-1)[0] + BASE_TIMEFRAME_MS));
   const end = parseDate(process.env.BACKTEST_END, Math.min(Date.now(), commonAvailableEnd));
   const start = parseDate(process.env.BACKTEST_START, end - 365 * DAY_MS);
   if (!(start < end)) throw new Error('BACKTEST_START must be before BACKTEST_END');
   const splitAt = start + Math.floor((end - start) / 2);
-  const intervalMinutes = Number(cache.metadata.intervalMinutes) || 120;
-  const replay = createGeminiReplay(cache, { maximumAgeMs: intervalMinutes * 60_000 + 1 });
-  const learning = trainLearningPolicy(cache, rowsBySymbol, start, splitAt, {
+  const intervalMinutes = Number(cache?.metadata.intervalMinutes) || 120;
+  const replay = cache ? createGeminiReplay(cache, { maximumAgeMs: intervalMinutes * 60_000 + 1 }) : null;
+  const learning = cache ? trainLearningPolicy(cache, rowsBySymbol, start, splitAt, {
     minimumEpisodes: Number(process.env.ADAPTIVE_SUPERVISOR_LEARNING_MIN_EPISODES) || 60,
     validationRatio: Number(process.env.ADAPTIVE_SUPERVISOR_LEARNING_VALIDATION_RATIO) || 0.3,
     minimumValidationEpisodes: Number(process.env.ADAPTIVE_SUPERVISOR_LEARNING_MIN_VALIDATION_EPISODES) || 15,
@@ -277,7 +275,7 @@ async function main() {
     horizonHours: Number(process.env.ADAPTIVE_SUPERVISOR_LEARNING_HORIZON_HOURS) || 4,
     episodeGapMinutes: Number(process.env.ADAPTIVE_SUPERVISOR_LEARNING_EPISODE_GAP_MINUTES) || 120,
     moveThresholdPct: Number(process.env.ADAPTIVE_SUPERVISOR_LEARNING_MOVE_THRESHOLD_PCT) || 0.5,
-  });
+  }) : null;
   const exchange = new ccxt.binanceusdm({ enableRateLimit: true });
   await exchange.loadMarkets();
   const options = {
@@ -289,6 +287,11 @@ async function main() {
     maxRefills: Number(process.env.GRID_MAX_REFILLS) || 2,
     makerFeeRate: Number(process.env.BINANCE_FUTURES_MAKER_FEE_RATE) || 0.0002,
     minimumNetProfitPct: Number(process.env.GRID_MIN_NET_PROFIT_PCT) || 0.05,
+    directionMinimumConfidence: Number(process.env.FIBONACCI_DIRECTION_MIN_CONFIDENCE) || 0.65,
+    directionStrategy: String(process.env.FIBONACCI_DIRECTION_STRATEGY || 'TREND').toUpperCase(),
+    directionEmaSlopeAtrThreshold:
+      Number(process.env.FIBONACCI_DIRECTION_EMA_SLOPE_ATR_THRESHOLD) || 1,
+    directionLevelBiasPct: Number(process.env.FIBONACCI_DIRECTION_LEVEL_BIAS_PCT) || 10,
   };
   const full = { perSymbol: {} };
   const outOfSample = { perSymbol: {} };
@@ -298,12 +301,14 @@ async function main() {
       if (rows[0][0] > start || rows.at(-1)[0] + BASE_TIMEFRAME_MS < end) {
         throw new Error(`${symbol} candle cache does not cover requested period`);
       }
-      const symbolCache = cache.recordsBySymbol.get(symbol) || [];
-      if (!symbolCache.some(record => record.timestamp <= start + intervalMinutes * 60_000) ||
-          !symbolCache.some(record => record.timestamp >= end - intervalMinutes * 60_000)) {
-        throw new Error(`${symbol} Gemini cache does not cover requested period`);
+      if (cache) {
+        const symbolCache = cache.recordsBySymbol.get(symbol) || [];
+        if (!symbolCache.some(record => record.timestamp <= start + intervalMinutes * 60_000) ||
+            !symbolCache.some(record => record.timestamp >= end - intervalMinutes * 60_000)) {
+          throw new Error(`${symbol} Gemini cache does not cover requested period`);
+        }
       }
-      console.log(`[BACKTEST] ${symbol}: simulating four variants`);
+      console.log(`[BACKTEST] ${symbol}: simulating ${variants.join(', ')}`);
       const fundingRates = await fetchFundingRates(exchange, symbol, start, end, fundingDirectory);
       const minimumNotional = Number(exchange.market(symbol)?.limits?.cost?.min) || 5;
       const simulator = new FullGridBacktester(exchange, { ...options, minimumNotional });
@@ -311,22 +316,24 @@ async function main() {
         simulator,
         { symbol, rows, fundingRates, start, end },
         replay,
-        learning.policy,
-        splitAt
+        learning?.policy,
+        splitAt,
+        variants
       );
       outOfSample.perSymbol[symbol] = simulateVariants(
         simulator,
         { symbol, rows, fundingRates, start: splitAt, end },
         replay,
-        learning.policy,
-        splitAt
+        learning?.policy,
+        splitAt,
+        variants
       );
     }
   } finally {
     await exchange.close();
   }
-  aggregateScope(full, symbols, options);
-  aggregateScope(outOfSample, symbols, options);
+  aggregateScope(full, symbols, options, variants);
+  aggregateScope(outOfSample, symbols, options, variants);
   const report = {
     generatedAt: new Date().toISOString(),
     period: {
@@ -335,20 +342,25 @@ async function main() {
       splitAt: new Date(splitAt).toISOString(),
     },
     symbols,
+    variants,
     configuration: options,
-    geminiCache: {
+    geminiCache: cache ? {
       path: path.relative(projectRoot, cache.path),
       sha256: cache.sha256,
       records: cache.records.length,
       metadata: cache.metadata,
-    },
+    } : null,
     learning,
     assumptions: [
-      'Gemini decisions are replayed from an immutable local cache; the PnL run never calls Gemini.',
-      `Gemini snapshots are sampled every ${intervalMinutes} minutes with fixed ${cache.metadata.fixedExposurePct}% exposure so the cache is independent of each simulation path.`,
+      ...(cache ? [
+        'Gemini decisions are replayed from an immutable local cache; the PnL run never calls Gemini.',
+        `Gemini snapshots are sampled every ${intervalMinutes} minutes with fixed ${cache.metadata.fixedExposurePct}% exposure so the cache is independent of each simulation path.`,
+      ] : []),
       'Actual simulated exposure still reaches the deterministic Supervisor safety rule and can force RISK_OFF.',
-      'The learned policy is trained only on the first half and becomes active at the train/test split.',
-      'If the learning candidate fails the configured promotion gates, adaptive + learned policy uses the default policy.',
+      ...(learning ? [
+        'The learned policy is trained only on the first half and becomes active at the train/test split.',
+        'If the learning candidate fails the configured promotion gates, adaptive + learned policy uses the default policy.',
+      ] : []),
       '15-minute OHLC candles cannot reproduce queue position, slippage, latency, rejected post-only orders, or exact intrabar sequencing.',
       'Liquidation and maintenance-margin tiers are not simulated.',
     ],

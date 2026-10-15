@@ -1,6 +1,7 @@
 const {
   analyzeTimeframe,
   aggregateTimeframes,
+  resolveAppliedDirection,
 } = require('./fibonacci-direction-analyzer');
 const { FibonacciRangeAdvisor, timeframeToMs } = require('./fibonacci-range-advisor');
 const {
@@ -33,6 +34,8 @@ const DEFAULT_OPTIONS = Object.freeze({
   rangeRebuildThresholdPct: 2,
   rangeRebuildCooldownMs: 120 * MINUTE_MS,
   directionMinimumConfidence: 0.65,
+  directionStrategy: 'TREND',
+  directionEmaSlopeAtrThreshold: 1,
   directionLevelBiasPct: 10,
   riskCautionExposureRatio: 0.75,
   riskExposureRatio: 0.9,
@@ -402,10 +405,11 @@ class FullGridBacktester {
         if (riskStateMachine && lastDecision.riskState === 'RISK_OFF') pendingBuys.clear();
       }
 
-      const direction = lastAnalysis?.confidence >= options.directionMinimumConfidence &&
-        ['BULLISH', 'BEARISH'].includes(lastAnalysis.confirmedDirection)
-        ? lastAnalysis.confirmedDirection
-        : 'RANGING';
+      const direction = resolveAppliedDirection(lastAnalysis, {
+        strategy: options.directionStrategy,
+        minimumConfidence: options.directionMinimumConfidence,
+        emaSlopeAtrThreshold: options.directionEmaSlopeAtrThreshold,
+      });
       const outsideActiveRange = activeSuggestion &&
         (close <= activeSuggestion.lower || close >= activeSuggestion.upper);
       const shouldEvaluateRange = !activeSuggestion || outsideActiveRange ||

@@ -9,6 +9,7 @@
     "start:futures:live": "DOTENV_CONFIG_PATH=.env.futures node -r dotenv/config futures-grid.js",
     "backtest:fibonacci-direction": "node scripts/backtest-fibonacci-direction.js",
     "backtest:adaptive-supervisor": "node scripts/backtest-adaptive-grid-supervisor.js",
+    "backtest:adaptive-deterministic": "BACKTEST_DETERMINISTIC_ONLY=true node scripts/backtest-adaptive-variants.js",
     "backtest:gemini-cache": "node scripts/cache-gemini-backtest-decisions.js",
     "backtest:full-grid-pnl": "node scripts/backtest-adaptive-variants.js",
     "backtest:adaptive-variants": "node scripts/backtest-adaptive-variants.js",
