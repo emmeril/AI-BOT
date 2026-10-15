@@ -293,13 +293,13 @@ FIBONACCI_DIRECTION_APPLY_MODE=REPORT_ONLY
 - `FIBONACCI_DIRECTION_LEVEL_BIAS_PCT`: persentase jumlah level yang dipindahkan dari sisi berlawanan ke sisi arah, rentang `0-40`. Nilai `10` membuat grid 21 level bullish berubah dari sekitar `10/11` menjadi `8/13` level bawah/atas.
 - `FIBONACCI_DIRECTION_APPLY_MODE`: `REPORT_ONLY` hanya mencatat arah tanpa mengubah grid; `LEVEL_BIAS` menerapkan distribusi level setelah confidence dan konfirmasi lolos.
 
-Backtest klasifikasi arah selama 12 bulan dapat dijalankan tanpa mengubah bot live:
+Backtest klasifikasi arah selama 90 hari dapat dijalankan tanpa mengubah bot live:
 
 ```bash
 npm run backtest:fibonacci-direction
 ```
 
-Runner membandingkan konfigurasi saat ini, beberapa minimum alignment, dan konsensus `4h + satu timeframe lebih rendah`. Data publik Binance disimpan di `backtest-data/`, sedangkan laporan JSON dan Markdown disimpan di `backtest-results/`. Pengujian ini mengukur ketepatan arah 4 jam dan 24 jam tanpa mengklaim simulasi PnL grid, funding, likuidasi, atau urutan fill intrabar.
+Runner membandingkan konfigurasi saat ini, beberapa minimum alignment, dan konsensus `4h + satu timeframe lebih rendah`. Periode dapat diubah dengan `BACKTEST_HISTORY_DAYS`, atau tanggal eksplisit melalui `BACKTEST_START` dan `BACKTEST_END`. Data publik Binance disimpan di `backtest-data/`, sedangkan laporan JSON dan Markdown disimpan di `backtest-results/`. Pengujian ini mengukur ketepatan arah 4 jam dan 24 jam tanpa mengklaim simulasi PnL grid, funding, likuidasi, atau urutan fill intrabar. Gunakan `REPORT_ONLY` dan `SHADOW` jika hasil walk-forward belum menunjukkan keunggulan arah yang konsisten.
 
 Full-grid PnL backtest membandingkan empat varian: baseline, Adaptive Supervisor deterministik, Adaptive + Gemini, dan Adaptive + learned policy. Keputusan historis Gemini dibuat satu kali sebagai cache agar replay berikutnya reproducible dan tidak memanggil API lagi:
 

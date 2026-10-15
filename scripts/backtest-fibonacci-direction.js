@@ -14,7 +14,7 @@ dotenv.config({ path: process.env.DOTENV_CONFIG_PATH || '.env.futures', quiet: t
 const MINUTE_MS = 60_000;
 const BASE_TIMEFRAME = '15m';
 const BASE_TIMEFRAME_MS = 15 * MINUTE_MS;
-const DEFAULT_HISTORY_DAYS = 365;
+const DEFAULT_HISTORY_DAYS = 90;
 const WARMUP_DAYS = 21;
 const CANDLE_LIMIT = 100;
 const CONFIRMATIONS = 2;
