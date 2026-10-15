@@ -186,7 +186,7 @@ function renderMarkdown(report) {
     adaptiveLearned: 'adaptive + learned policy',
   };
   const lines = [
-    '# Adaptive Variants Full-grid Backtest',
+    `# ${report.configuration.positionSide === 'SHORT' ? 'SHORT Futures' : 'Adaptive Variants'} Full-grid Backtest`,
     '',
     `Period: ${report.period.start} to ${report.period.end}`,
     '',
@@ -251,12 +251,17 @@ async function main() {
   const dataDirectory = path.join(projectRoot, 'backtest-data', 'fibonacci-direction');
   const fundingDirectory = path.join(projectRoot, 'backtest-data', 'funding');
   const resultsDirectory = path.join(projectRoot, 'backtest-results');
+  const baselineOnly = /^(1|true|yes)$/i.test(process.env.BACKTEST_BASELINE_ONLY || '');
   const deterministicOnly = /^(1|true|yes)$/i.test(process.env.BACKTEST_DETERMINISTIC_ONLY || '');
-  const variants = deterministicOnly ? ['baseline', 'adaptiveDeterministic'] : VARIANTS;
+  const variants = baselineOnly
+    ? ['baseline']
+    : deterministicOnly ? ['baseline', 'adaptiveDeterministic'] : VARIANTS;
   const cachePath = path.resolve(
     process.env.BACKTEST_GEMINI_CACHE || 'backtest-data/gemini-adaptive-decisions.jsonl'
   );
-  const cache = deterministicOnly ? null : loadGeminiBacktestCache(cachePath, { minimumConfidence: 0.6 });
+  const cache = deterministicOnly || baselineOnly
+    ? null
+    : loadGeminiBacktestCache(cachePath, { minimumConfidence: 0.6 });
   const rowsBySymbol = Object.fromEntries(symbols.map(symbol => [symbol, loadCachedRows(dataDirectory, symbol)]));
   const commonAvailableEnd = Math.min(...symbols.map(symbol => rowsBySymbol[symbol].at(-1)[0] + BASE_TIMEFRAME_MS));
   const end = parseDate(process.env.BACKTEST_END, Math.min(Date.now(), commonAvailableEnd));
@@ -287,6 +292,8 @@ async function main() {
     maxRefills: Number(process.env.GRID_MAX_REFILLS) || 2,
     makerFeeRate: Number(process.env.BINANCE_FUTURES_MAKER_FEE_RATE) || 0.0002,
     minimumNetProfitPct: Number(process.env.GRID_MIN_NET_PROFIT_PCT) || 0.05,
+    positionSide: String(process.env.BACKTEST_POSITION_SIDE || 'LONG').toUpperCase(),
+    shortEntryDirection: String(process.env.BACKTEST_SHORT_ENTRY_DIRECTION || 'ALWAYS').toUpperCase(),
     directionMinimumConfidence: Number(process.env.FIBONACCI_DIRECTION_MIN_CONFIDENCE) || 0.65,
     directionStrategy: String(process.env.FIBONACCI_DIRECTION_STRATEGY || 'TREND').toUpperCase(),
     directionEmaSlopeAtrThreshold:
@@ -356,7 +363,9 @@ async function main() {
         'Gemini decisions are replayed from an immutable local cache; the PnL run never calls Gemini.',
         `Gemini snapshots are sampled every ${intervalMinutes} minutes with fixed ${cache.metadata.fixedExposurePct}% exposure so the cache is independent of each simulation path.`,
       ] : []),
-      'Actual simulated exposure still reaches the deterministic Supervisor safety rule and can force RISK_OFF.',
+      ...(variants.some(variant => variant !== 'baseline') ? [
+        'Actual simulated exposure still reaches the deterministic Supervisor safety rule and can force RISK_OFF.',
+      ] : []),
       ...(learning ? [
         'The learned policy is trained only on the first half and becomes active at the train/test split.',
         'If the learning candidate fails the configured promotion gates, adaptive + learned policy uses the default policy.',
@@ -368,8 +377,11 @@ async function main() {
     outOfSample,
   };
   fs.mkdirSync(resultsDirectory, { recursive: true });
-  const jsonPath = path.join(resultsDirectory, 'adaptive-variants-full-grid-backtest.json');
-  const markdownPath = path.join(resultsDirectory, 'adaptive-variants-full-grid-backtest.md');
+  const reportName = options.positionSide === 'SHORT'
+    ? 'futures-short-full-grid-backtest'
+    : 'adaptive-variants-full-grid-backtest';
+  const jsonPath = path.join(resultsDirectory, `${reportName}.json`);
+  const markdownPath = path.join(resultsDirectory, `${reportName}.md`);
   fs.writeFileSync(jsonPath, JSON.stringify(report, null, 2));
   fs.writeFileSync(markdownPath, renderMarkdown(report));
   console.log(renderMarkdown(report));

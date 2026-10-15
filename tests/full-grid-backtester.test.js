@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const {
   FullGridBacktester,
   chooseSpacedLevels,
+  maximumProfitableShortBuyPrice,
   minimumProfitableSellPrice,
   zoneForRank,
 } = require('../src/full-grid-backtester');
@@ -64,7 +65,7 @@ test('the counter sell becomes eligible on the next candle', () => {
   assert.equal(result.buyFills, 1);
   assert.equal(result.sellFills, 1);
   assert.ok(result.netLiquidationPnl > 0);
-  assert.equal(result.accountingIdentityDelta, 0);
+  assert.ok(Math.abs(result.accountingIdentityDelta) === 0);
 });
 
 test('minimum profitable sell includes entry fee, exit fee, and requested net profit', () => {
@@ -74,6 +75,38 @@ test('minimum profitable sell includes entry fee, exit fee, and requested net pr
   );
   assert.ok(price > 100.09);
   assert.ok(price < 100.11);
+});
+
+test('maximum profitable SHORT buy includes entry fee, exit fee, and requested net profit', () => {
+  const price = maximumProfitableShortBuyPrice(
+    { entryCost: 100, buyFee: 0.02, quantity: 1 },
+    { makerFeeRate: 0.0002, minimumNetProfitPct: 0.05 }
+  );
+  assert.ok(price < 99.92);
+  assert.ok(price > 99.9);
+});
+
+test('SHORT simulation opens with SELL and closes with a lower BUY', () => {
+  const simulator = new FixedRangeBacktester(exchange, {
+    positionSide: 'SHORT',
+    gridCount: 2,
+    totalInvestment: 10,
+    maxActiveBuyOrders: 2,
+    candleLimit: 100,
+    rangeRebuildCooldownMs: Infinity,
+  });
+  const rows = [
+    candle(0, 100, 101, 99, 100),
+    candle(1, 100, 120, 99, 100),
+    candle(2, 100, 101, 80, 90),
+  ];
+  const result = simulator.simulate({
+    symbol: 'TEST/USDT:USDT', rows, start: 0, end: 3 * INTERVAL, adaptive: false,
+  });
+  assert.equal(result.buyFills, 1);
+  assert.equal(result.sellFills, 1);
+  assert.ok(result.netLiquidationPnl > 0);
+  assert.ok(Math.abs(result.accountingIdentityDelta) === 0);
 });
 
 test('adaptive spacing removes adjacent levels when the requested gap is wider', () => {

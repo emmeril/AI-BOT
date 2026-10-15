@@ -108,14 +108,16 @@ const MINUTE_MS = 60 * 1000;
 const LEVERAGE = Config.number('LEVERAGE', 5);
 const VALID_MARGIN_MODES = new Set(['ISOLATED', 'CROSSED']);
 const MARGIN_MODE = Config.get('MARGIN_MODE', 'ISOLATED').toUpperCase();
-// Position mode is fixed to Hedge Mode (dual-side position). The grid only
-// ever trades the LONG side of the position (buy low to open/add to LONG,
-// sell high to reduce/close LONG) - identical strategy to the spot grid,
-// just running on leveraged futures with an explicit positionSide instead of
-// relying on spot base-asset ownership. Hedge mode is required so this bot
-// can safely coexist with any manually-opened SHORT position on the same
-// symbol/account without the two interfering with each other.
-const POSITION_SIDE = 'LONG';
+// Each process owns exactly one Hedge Mode side. Running LONG and SHORT as
+// separate processes keeps their state, locks, and order reconciliation
+// isolated while Binance keeps both positions open on the same symbol.
+const POSITION_SIDE = Config.get('FUTURES_POSITION_SIDE', 'LONG').toUpperCase();
+const ENTRY_SIDE = POSITION_SIDE === 'SHORT' ? 'sell' : 'buy';
+const EXIT_SIDE = POSITION_SIDE === 'SHORT' ? 'buy' : 'sell';
+const ORDER_ID_PREFIX = POSITION_SIDE === 'SHORT' ? 'sgrid' : 'grid';
+const FUTURES_SHORT_ENTRY_DIRECTION = Config.get(
+  'FUTURES_SHORT_ENTRY_DIRECTION', 'BEARISH'
+).toUpperCase();
 const INTERVAL_MINUTES = Config.number('INTERVAL_MINUTES', 1);
 const INTERVAL_MS = INTERVAL_MINUTES * MINUTE_MS;
 const FUTURES_USER_STREAM_ENABLED = Config.boolean('FUTURES_USER_STREAM_ENABLED', true);
@@ -573,6 +575,12 @@ function validateRuntimeConfiguration() {
   if (LEVERAGE > 125) errors.push('LEVERAGE must not exceed Binance USD-M maximum of 125');
   if (!VALID_MARGIN_MODES.has(MARGIN_MODE)) {
     errors.push(`MARGIN_MODE must be one of: ${[...VALID_MARGIN_MODES].join(', ')}`);
+  }
+  if (!['LONG', 'SHORT'].includes(POSITION_SIDE)) {
+    errors.push('FUTURES_POSITION_SIDE must be LONG or SHORT');
+  }
+  if (!['ALWAYS', 'BEARISH'].includes(FUTURES_SHORT_ENTRY_DIRECTION)) {
+    errors.push('FUTURES_SHORT_ENTRY_DIRECTION must be ALWAYS or BEARISH');
   }
 
   const hasLower = GRID_LOWER_PRICE > 0;
@@ -1121,6 +1129,7 @@ class FuturesGridEngine {
     this.adaptiveMinimumWarnings = new Set();
     this.adaptiveGridDecisions = new Map();
     this.lastFibonacciDirectionLog = new Map();
+    this.appliedFibonacciDirections = new Map();
     this.adaptiveSupervisorOutcomeJournal = new AdaptiveSupervisorOutcomeJournal({
       enabled: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED,
       mode: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_MODE,
@@ -1568,6 +1577,7 @@ class FuturesGridEngine {
         await this.evaluateAdaptiveSupervisor(symbol, fibonacciDirection, currentPrice);
       }
     }
+    this.appliedFibonacciDirections.set(symbol, appliedDirection);
     const rangeSuggestion = fibonacciAllowed
       ? await this.fibonacciRangeAdvisor.getSuggestion(symbol, currentPrice, Date.now(), {
         direction: appliedDirection,
@@ -1777,7 +1787,7 @@ class FuturesGridEngine {
       if (Number.isInteger(nextSource)) remap.sourceBuyLevelIndex = nextSource;
     }
     for (const [orderId, order] of staleOrders) {
-      if (String(order?.side).toLowerCase() !== 'sell') continue;
+      if (String(order?.side).toLowerCase() !== EXIT_SIDE) continue;
       const nextSource = sourceLevelRemap[order.sourceBuyLevelIndex];
       if (!Number.isInteger(nextSource)) continue;
       symState.remappedSellSources[orderId] = {
@@ -2466,7 +2476,7 @@ class FuturesGridEngine {
     ]);
     const currentPrice = Number(ticker.last);
     if (!this.latestPositions) this.latestPositions = new Map();
-    this.latestPositions.set(symbol, this.getActiveLongPosition(positions, symbol));
+    this.latestPositions.set(symbol, this.getActivePosition(positions, symbol));
     const range = await this.buildRange(symbol, currentPrice);
     const { lower, upper } = range;
     const levels = Array.isArray(range.levels)
@@ -2504,9 +2514,11 @@ class FuturesGridEngine {
   }
 
   getBotOrderMeta(order) {
-    const match = this.getOrderClientId(order).match(
-      /^grid-[a-z0-9]+-([bs])-(\d+)(?:-b(\d+))?-(?:r(\d+)-)?/
-    );
+    const clientOrderId = this.getOrderClientId(order);
+    const pattern = POSITION_SIDE === 'SHORT'
+      ? /^sgrid-[a-z0-9]+-([bs])-(\d+)(?:-e(\d+))?-(?:r(\d+)-)?/
+      : /^grid-[a-z0-9]+-([bs])-(\d+)(?:-[be](\d+))?-(?:r(\d+)-)?/;
+    const match = clientOrderId.match(pattern);
     if (!match) return null;
     const meta = {
       side: match[1] === 'b' ? 'buy' : 'sell',
@@ -2520,11 +2532,11 @@ class FuturesGridEngine {
   makeClientOrderId(symbol, side, levelIndex, refillCount = 0, sourceBuyLevelIndex = null) {
     const market = symbol.replace(/[^a-z0-9]/gi, '').slice(0, 10).toLowerCase();
     const nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-    const source = side === 'sell' && sourceBuyLevelIndex !== null &&
+    const source = side === EXIT_SIDE && sourceBuyLevelIndex !== null &&
       sourceBuyLevelIndex !== undefined && Number.isInteger(Number(sourceBuyLevelIndex))
-      ? `-b${Number(sourceBuyLevelIndex)}`
+      ? `-e${Number(sourceBuyLevelIndex)}`
       : '';
-    return `grid-${market}-${side[0]}-${levelIndex}${source}-r${refillCount}-${nonce}`.slice(0, 36);
+    return `${ORDER_ID_PREFIX}-${market}-${side[0]}-${levelIndex}${source}-r${refillCount}-${nonce}`.slice(0, 36);
   }
 
   async cancelGridOrders(symbol, reason) {
@@ -2579,12 +2591,8 @@ class FuturesGridEngine {
     const clientOrderId = this.makeClientOrderId(
       symbol, side, levelIndex, refillCount, sourceBuyLevelIndex
     );
-    // In Hedge Mode, positionSide tells Binance which side of the position
-    // this order affects. Since the grid only ever trades the LONG side,
-    // a BUY here opens/adds to LONG and a SELL reduces/closes LONG -
-    // Binance enforces this automatically for positionSide=LONG orders, so
-    // no separate reduceOnly flag is needed (and Binance rejects reduceOnly
-    // in Hedge Mode).
+    // Binance rejects reduceOnly in Hedge Mode. positionSide makes BUY/SELL
+    // unambiguous: LONG opens with BUY and exits with SELL; SHORT is reversed.
     const orderParams = { newClientOrderId: clientOrderId, positionSide: POSITION_SIDE };
     if (GRID_POST_ONLY) {
       orderParams.postOnly = true;
@@ -2599,17 +2607,17 @@ class FuturesGridEngine {
       price,
       orderParams
     );
-    if (side !== 'buy' || !this.exposureLimits) return submit();
+    if (side !== ENTRY_SIDE || !this.exposureLimits) return submit();
     return this.withExposureLock(async () => {
       let exposure;
       try { exposure = await this.fetchExposure(); } catch (err) {
-        console.warn(`[EXPOSURE] ${symbol} BUY blocked: cannot verify exposure (${err.message})`);
+        console.warn(`[EXPOSURE] ${symbol} ${ENTRY_SIDE.toUpperCase()} blocked: cannot verify exposure (${err.message})`);
         return null;
       }
       const cost = Number(amount) * Number(price);
       if (exposure.values[symbol] + cost > this.exposureLimits.symbol + 1e-8 ||
           exposure.total + cost > this.exposureLimits.total + 1e-8) {
-        console.warn(`[EXPOSURE] ${symbol} BUY blocked: symbol=${exposure.values[symbol]} total=${exposure.total} new=${cost}`);
+        console.warn(`[EXPOSURE] ${symbol} ${ENTRY_SIDE.toUpperCase()} blocked: symbol=${exposure.values[symbol]} total=${exposure.total} new=${cost}`);
         return null;
       }
       return submit();
@@ -2629,7 +2637,7 @@ class FuturesGridEngine {
     const orders = groups.flatMap((group, index) => group.map(order => ({ ...order, symbol: order.symbol || SYMBOLS[index] })));
     // Reading positions after orders conservatively counts fills during the snapshot twice.
     const positions = await this.exchange.fetchPositions(SYMBOLS);
-    const exposure = exposureBySymbol(SYMBOLS, positions, orders);
+    const exposure = exposureBySymbol(SYMBOLS, positions, orders, POSITION_SIDE);
     return { ...exposure, orders };
   }
 
@@ -2686,20 +2694,23 @@ class FuturesGridEngine {
         return null;
       }
 
-      if (side === 'sell') {
+      if (side === EXIT_SIDE) {
         const entryFloor = this.getPositionEntryFloor(symbol);
-        if (entryFloor > 0 && preciseNum + 1e-12 < entryFloor) {
+        const violatesEntryGuard = POSITION_SIDE === 'LONG'
+          ? entryFloor > 0 && preciseNum + 1e-12 < entryFloor
+          : entryFloor > 0 && preciseNum - 1e-12 > entryFloor;
+        if (violatesEntryGuard) {
           console.warn(
-            `[SKIP] ${symbol} SELL level=${levelIndex} price=${preciseNum} below ` +
-            `position average entry ${entryFloor}`
+            `[SKIP] ${symbol} ${side.toUpperCase()} exit level=${levelIndex} price=${preciseNum} ` +
+            `${POSITION_SIDE === 'LONG' ? 'below' : 'above'} position average entry ${entryFloor}`
           );
           return null;
         }
-        const minCost = this.getMinCost(symbol);
-        if (minCost > 0 && notional < minCost - 1e-8) {
-          console.warn(`[SKIP] ${symbol} SELL level=${levelIndex} | notional ${notional.toFixed(8)} below min ${minCost}, skipping order (dust)`);
-          return null;
-        }
+      }
+      const minCost = this.getMinCost(symbol);
+      if (minCost > 0 && notional < minCost - 1e-8) {
+        console.warn(`[SKIP] ${symbol} ${side.toUpperCase()} level=${levelIndex} | notional ${notional.toFixed(8)} below min ${minCost}, skipping order (dust)`);
+        return null;
       }
 
       if (!(preciseAmountNum > 0) || !(preciseNum > 0)) {
@@ -2719,10 +2730,10 @@ class FuturesGridEngine {
       return order;
     } catch (err) {
       if (this.isMaxOpenOrdersError(err)) {
-        if (side === 'buy') {
+        if (side === ENTRY_SIDE) {
           console.warn(
-            `[SKIP] ${symbol} BUY level=${levelIndex} | exchange open-order limit reached; ` +
-            `preserving capacity for SELL exits`
+            `[SKIP] ${symbol} ${ENTRY_SIDE.toUpperCase()} level=${levelIndex} | exchange open-order limit reached; ` +
+            `preserving capacity for ${EXIT_SIDE.toUpperCase()} exits`
           );
           return null;
         }
@@ -2834,6 +2845,41 @@ class FuturesGridEngine {
     }
   }
 
+  async placeShortExitLimit(
+    symbol, levelIndex, price, amount,
+    { refillCount = 0, sourceEntryLevelIndex, referencePrice = price } = {}
+  ) {
+    const symState = this.state.getSymbol(symbol);
+    if (this.countActiveOrders(symState, EXIT_SIDE) >= GRID_MAX_ACTIVE_SELL_ORDERS) {
+      console.warn(
+        `[EXIT-PRIORITY] ${symbol} placing SHORT BUY exit sourceEntry=${sourceEntryLevelIndex} ` +
+        `above soft threshold ${GRID_MAX_ACTIVE_SELL_ORDERS}`
+      );
+    }
+    const options = { refillCount, sourceBuyLevelIndex: sourceEntryLevelIndex };
+    try {
+      return await this.placeLimit(symbol, EXIT_SIDE, levelIndex, price, amount, options);
+    } catch (err) {
+      if (!this.isMaxOpenOrdersError(err)) throw err;
+      const freedSlot = await this.cancelFarthestShortEntryForExit(symbol, Number(referencePrice));
+      if (!freedSlot) throw err;
+      return this.placeLimit(symbol, EXIT_SIDE, levelIndex, price, amount, options);
+    }
+  }
+
+  async cancelFarthestShortEntryForExit(symbol, referencePrice) {
+    const openOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+    const managed = await this.getManagedOpenOrders(symbol, openOrders);
+    const candidate = managed
+      .filter(order => String(order.side).toLowerCase() === ENTRY_SIDE)
+      .sort((a, b) =>
+        Math.abs(Number(b.price) - referencePrice) - Math.abs(Number(a.price) - referencePrice)
+      )[0];
+    if (!candidate) return false;
+    await this.cancelOrder(symbol, candidate, 'free exchange order slot for priority SHORT BUY exit');
+    return true;
+  }
+
   // Free margin available to open new positions, in the symbol's quote/margin
   // asset (USDT for USDⓈ-M futures). This replaces spot's "quote free
   // balance" - buying on margin doesn't spend the full notional up front,
@@ -2842,22 +2888,23 @@ class FuturesGridEngine {
     return Number(balance?.free?.[this.getQuoteAsset(symbol)] || 0);
   }
 
-  // Amount of the LONG position currently open for `symbol` (Hedge Mode),
-  // i.e. how much is available to reduce/close via a SELL order. This
-  // replaces spot's "base asset wallet balance" - on futures there is no
-  // base-asset wallet holding, only an open position size.
+  // Amount available to close on the configured Hedge Mode side.
   getBaseFree(positions, symbol) {
-    const position = this.getActiveLongPosition(positions, symbol);
+    const position = this.getActivePosition(positions, symbol);
     return Math.abs(Number(position?.contracts) || 0);
   }
 
-  getActiveLongPosition(positions, symbol) {
+  getActivePosition(positions, symbol) {
     return (positions || []).find(p =>
       p.symbol === symbol && (
-        String(p.side || '').toLowerCase() === 'long' ||
+        String(p.side || '').toUpperCase() === POSITION_SIDE ||
         String(p.info?.positionSide || '').toUpperCase() === POSITION_SIDE
       ) && Math.abs(Number(p.contracts) || 0) > 0
     );
+  }
+
+  getActiveLongPosition(positions, symbol) {
+    return this.getActivePosition(positions, symbol);
   }
 
   getPositionRoiPct(position) {
@@ -2875,7 +2922,7 @@ class FuturesGridEngine {
     const positionAmount = this.getBaseFree(positions, symbol);
     if (positionAmount <= 0) {
       this.roiCloseOrders?.delete(symbol);
-      console.log(`[EXIT] ${symbol} has no active LONG position | ${reason}`);
+      console.log(`[EXIT] ${symbol} has no active ${POSITION_SIDE} position | ${reason}`);
       return null;
     }
 
@@ -2889,15 +2936,15 @@ class FuturesGridEngine {
           status = String(remote?.status || remote?.info?.status || '').toLowerCase() || 'unknown';
           filledAmount = Number(remote?.filled ?? remote?.info?.executedQty) || 0;
         } catch (err) {
-          throw new Error(`${symbol} could not verify pending LONG close order ${pendingClose.id}: ${err.message}`, { cause: err });
+          throw new Error(`${symbol} could not verify pending ${POSITION_SIDE} close order ${pendingClose.id}: ${err.message}`, { cause: err });
         }
       }
       if (['open', 'new', 'partially_filled', 'pending', 'unknown'].includes(status)) {
-        throw new Error(`${symbol} LONG close order ${pendingClose.id || 'unknown'} is still pending; refusing duplicate exit`);
+        throw new Error(`${symbol} ${POSITION_SIDE} close order ${pendingClose.id || 'unknown'} is still pending; refusing duplicate exit`);
       }
       if (status === 'closed' && pendingClose.amount > 0 && filledAmount >= pendingClose.amount - 1e-8) {
         throw new Error(
-          `${symbol} LONG close order ${pendingClose.id || 'unknown'} was fully filled but the position is still reported active; refusing duplicate exit`
+          `${symbol} ${POSITION_SIDE} close order ${pendingClose.id || 'unknown'} was fully filled but the position is still reported active; refusing duplicate exit`
         );
       }
       this.roiCloseOrders.delete(symbol);
@@ -2905,18 +2952,18 @@ class FuturesGridEngine {
 
     const preciseAmount = Number(this.exchange.amountToPrecision(symbol, positionAmount));
     if (!Number.isFinite(preciseAmount) || preciseAmount <= 0) {
-      throw new Error(`Cannot close ${symbol} LONG: invalid precise amount for position ${positionAmount}`);
+      throw new Error(`Cannot close ${symbol} ${POSITION_SIDE}: invalid precise amount for position ${positionAmount}`);
     }
 
     const order = await retry(() => this.exchange.createOrder(
       symbol,
       'market',
-      'sell',
+      EXIT_SIDE,
       preciseAmount,
       undefined,
       {
         positionSide: POSITION_SIDE,
-        newClientOrderId: this.makeClientOrderId(symbol, 'sell', 'exit'),
+        newClientOrderId: this.makeClientOrderId(symbol, EXIT_SIDE, 'exit'),
       }
     ));
     if (!this.roiCloseOrders) this.roiCloseOrders = new Map();
@@ -2934,7 +2981,7 @@ class FuturesGridEngine {
     }
     if (remainingAmount > 0) {
       throw new Error(
-        `${symbol} LONG close order ${order?.id || 'unknown'} left ${remainingAmount} contracts active`
+        `${symbol} ${POSITION_SIDE} close order ${order?.id || 'unknown'} left ${remainingAmount} contracts active`
       );
     }
 
@@ -2943,7 +2990,7 @@ class FuturesGridEngine {
     symState.lastBuyByLevel = {};
     await this.state.save();
 
-    console.log(`[EXIT] ${symbol} closed LONG ${preciseAmount} contracts at market | ${reason}`);
+    console.log(`[EXIT] ${symbol} closed ${POSITION_SIDE} ${preciseAmount} contracts at market | ${reason}`);
     return order;
   }
 
@@ -3304,6 +3351,135 @@ class FuturesGridEngine {
     }
   }
 
+  async handleShortEntryFill(symbol, levels, symState, trade, orderMeta, openOrderIds) {
+    const price = Number(trade.price);
+    const amount = Number(trade.amount);
+    const levelIndex = Number(orderMeta.levelIndex);
+    const refillCount = Math.max(0, Number(orderMeta.refillCount) || 0);
+    const feeQuote = this.feeToQuote(
+      this.getTradeFeeCost(trade), this.getTradeFeeCurrency(trade), price,
+      this.getBaseAsset(symbol), this.getQuoteAsset(symbol)
+    );
+    symState.refillCountByLevel ||= {};
+    symState.lastBuyByLevel[levelIndex] = this.mergeBuyRecords(
+      symState.lastBuyByLevel[levelIndex],
+      {
+        price,
+        amount,
+        sellableAmount: amount,
+        totalCostQuote: price * amount,
+        totalFeeQuote: feeQuote,
+        refillCount,
+        at: trade.datetime,
+      }
+    );
+    symState.refillCountByLevel[levelIndex] = refillCount;
+    symState.filledSells = numberOrZero(symState.filledSells) + 1;
+    this.state.data.totals.filledSells++;
+    symState.tradingFees += feeQuote;
+    this.state.data.totals.tradingFees += feeQuote;
+    this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
+    this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
+    await this.state.save();
+    await this.sendAlert([
+      `[SHORT ENTRY] ${symbol}`,
+      `${displayNumber(amount, 8)} @ ${displayNumber(price, 8)}`,
+      `Fee: ${signedUsdt(feeQuote)}`,
+    ].join('\n'));
+
+    if (!this.canPlaceNewOrders() || !levels.length) return;
+    const trackedEntry = symState.lastBuyByLevel[levelIndex];
+    const exitAmount = Math.max(0, Number(trackedEntry?.sellableAmount ?? trackedEntry?.amount) || 0);
+    if (!(exitAmount > 0)) return;
+    await this.syncManagedOrdersWithExchange(symbol, symState, openOrderIds);
+    const existingOrder = this.getActiveShortExitForEntry(symState, levelIndex);
+    const target = this.findBuyTargetForShort(symbol, levels, levelIndex, trackedEntry, {
+      amount: exitAmount,
+    });
+    if (!target) {
+      this.warnNoShortExitTarget(symbol, levelIndex, levels, trackedEntry, exitAmount);
+      return;
+    }
+    this.clearSellTargetWarning(symbol, levelIndex);
+    if (existingOrder) return;
+    await this.placeShortExitLimit(
+      symbol, target.buyLevelIndex, target.buyPrice, exitAmount,
+      { refillCount, sourceEntryLevelIndex: levelIndex, referencePrice: price }
+    );
+  }
+
+  async handleShortExitFill(symbol, levels, symState, trade, orderMeta, openOrderIds) {
+    const price = Number(trade.price);
+    const amount = Number(trade.amount);
+    const exitLevelIndex = Number(orderMeta.levelIndex);
+    const entryLevelIndex = this.getSellSourceBuyLevelIndex(orderMeta);
+    const entry = symState.lastBuyByLevel[entryLevelIndex];
+    if (!entry) {
+      throw new Error(
+        `${symbol} SHORT BUY exit level ${exitLevelIndex} has no entry record at level ${entryLevelIndex}`
+      );
+    }
+    const trackedAmount = Number(entry.sellableAmount ?? entry.amount) || 0;
+    if (!(trackedAmount > 0) || amount > trackedAmount + 1e-8) {
+      throw new Error(
+        `${symbol} SHORT BUY exit amount ${amount} exceeds tracked amount ${trackedAmount}`
+      );
+    }
+    const feeQuote = this.feeToQuote(
+      this.getTradeFeeCost(trade), this.getTradeFeeCurrency(trade), price,
+      this.getBaseAsset(symbol), this.getQuoteAsset(symbol)
+    );
+    const proportion = Math.min(amount / trackedAmount, 1);
+    const allocatedEntryProceeds = Number(entry.totalCostQuote) * proportion;
+    const allocatedEntryFee = Number(entry.totalFeeQuote) * proportion;
+    const profit = (allocatedEntryProceeds - allocatedEntryFee) - (price * amount + feeQuote);
+    const refillCount = Math.max(0, Number(orderMeta.refillCount ?? entry.refillCount) || 0);
+
+    symState.realizedGridProfit += profit;
+    this.state.data.totals.realizedGridProfit += profit;
+    symState.tradingFees += feeQuote;
+    this.state.data.totals.tradingFees += feeQuote;
+    symState.filledBuys = numberOrZero(symState.filledBuys) + 1;
+    this.state.data.totals.filledBuys++;
+    symState.refillCountByLevel ||= {};
+    symState.refillCountByLevel[entryLevelIndex] = refillCount;
+    this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
+    const remaining = trackedAmount - amount;
+    if (remaining > 1e-12) {
+      const remainingRatio = remaining / trackedAmount;
+      symState.lastBuyByLevel[entryLevelIndex] = {
+        ...entry,
+        sellableAmount: remaining,
+        amount: Number(entry.amount) * remainingRatio,
+        totalCostQuote: Number(entry.totalCostQuote) * remainingRatio,
+        totalFeeQuote: Number(entry.totalFeeQuote) * remainingRatio,
+      };
+    } else {
+      delete symState.lastBuyByLevel[entryLevelIndex];
+    }
+    this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
+    await this.state.save();
+    await this.sendAlert([
+      `[SHORT EXIT] ${symbol}`,
+      `${displayNumber(amount, 8)} @ ${displayNumber(price, 8)}`,
+      `Grid PnL: ${signedUsdt(profit)}`,
+      `Fee: ${signedUsdt(feeQuote)}`,
+    ].join('\n'));
+
+    if (!GRID_REFILL_ON_FILLED || !this.canPlaceNewOrders()) return;
+    const nextRefillCount = refillCount + 1;
+    if (nextRefillCount > GRID_MAX_REFILLS) return;
+    const entryPrice = Number(levels[entryLevelIndex]);
+    if (!(entryPrice > 0) || this.hasActiveOrderAtLevel(symState, ENTRY_SIDE, entryLevelIndex)) return;
+    if (this.countActiveOrders(symState, ENTRY_SIDE) >= GRID_MAX_ACTIVE_BUY_ORDERS) return;
+    const remainingInvestment = this.getRemainingInvestmentUsdt(symbol);
+    const refillAmount = this.amountForBuy(symbol, entryPrice, remainingInvestment, 1);
+    if (!(refillAmount > 0)) return;
+    await this.placeLimit(symbol, ENTRY_SIDE, entryLevelIndex, entryPrice, refillAmount, {
+      refillCount: nextRefillCount,
+    });
+  }
+
   getTradeId(trade) {
     return String(trade.id || `${trade.order}-${trade.timestamp}`);
   }
@@ -3337,8 +3513,13 @@ class FuturesGridEngine {
     symState.tradingFees += feeQuote;
     this.state.data.totals.realizedExitProfit += netExitProfit;
     this.state.data.totals.tradingFees += feeQuote;
-    symState.filledSells = numberOrZero(symState.filledSells) + 1;
-    this.state.data.totals.filledSells++;
+    if (EXIT_SIDE === 'buy') {
+      symState.filledBuys = numberOrZero(symState.filledBuys) + 1;
+      this.state.data.totals.filledBuys++;
+    } else {
+      symState.filledSells = numberOrZero(symState.filledSells) + 1;
+      this.state.data.totals.filledSells++;
+    }
     this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
     this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
@@ -3500,6 +3681,11 @@ class FuturesGridEngine {
     for (const trade of trades.sort((a, b) => a.timestamp - b.timestamp)) {
       const id = this.getTradeId(trade);
       if (this.state.processedTrade(symbol, id)) continue;
+      const tradePositionSide = String(trade.info?.positionSide || '').toUpperCase();
+      if (tradePositionSide && tradePositionSide !== POSITION_SIDE) {
+        this.state.markProcessedTradeLocal(symbol, id);
+        continue;
+      }
 
       // Attempt to get order metadata from state, falling back to clientOrderId
       // embedded in the trade so fills are never lost across restarts.
@@ -3543,8 +3729,9 @@ class FuturesGridEngine {
             `from clientOrderId="${resolvedClientId}" (level=${orderMeta.levelIndex}, ` +
             `side=${orderMeta.side}, refill=${orderMeta.refillCount})`
           );
-        } else if (/^grid-[a-z0-9]+-s-exit-/.test(resolvedClientId)) {
-          orderMeta = { side: 'sell', isPositionExit: true };
+        } else if (resolvedClientId.startsWith(`${ORDER_ID_PREFIX}-`) &&
+            resolvedClientId.includes(`-${EXIT_SIDE[0]}-exit-`)) {
+          orderMeta = { side: EXIT_SIDE, isPositionExit: true };
         } else {
           // Cannot determine which grid level this fill belongs to; skip it
           // but mark as processed so we don't retry on every cycle.
@@ -3558,12 +3745,16 @@ class FuturesGridEngine {
       }
 
       const side = String(trade.side).toLowerCase();
-      if (side === 'sell' && !orderMeta.isPositionExit) {
+      if (side === EXIT_SIDE && !orderMeta.isPositionExit) {
         orderMeta = this.remapDelayedSellOrderMeta(symbol, symState, trade, orderMeta);
         orderMetadataById.set(tradeOrderId, orderMeta);
       }
       if (orderMeta.isPositionExit) {
         await this.handleExitFill(symbol, symState, trade, openOrderIds);
+      } else if (POSITION_SIDE === 'SHORT' && side === ENTRY_SIDE) {
+        await this.handleShortEntryFill(symbol, levels, symState, trade, orderMeta, openOrderIds);
+      } else if (POSITION_SIDE === 'SHORT' && side === EXIT_SIDE) {
+        await this.handleShortExitFill(symbol, levels, symState, trade, orderMeta, openOrderIds);
       } else if (side === 'buy') {
         await this.handleBuyFill(symbol, levels, symState, trade, orderMeta, openOrderIds);
       } else if (side === 'sell') {
@@ -3574,7 +3765,9 @@ class FuturesGridEngine {
         await this.state.save();
       }
     }
-    await this.retryUnreconciledSells(symbol, levels, symState, openOrderIds);
+    if (POSITION_SIDE === 'LONG') {
+      await this.retryUnreconciledSells(symbol, levels, symState, openOrderIds);
+    }
     // Every trade in this batch was processed without throwing — safe to
     // advance the watermark now so these trades aren't re-fetched. If any
     // handler above had thrown, execution would never reach here, so
@@ -3592,7 +3785,7 @@ class FuturesGridEngine {
   }
 
   async enforceRangeExits(symbol, _currentPrice, positions = []) {
-    const activeLong = this.getActiveLongPosition(positions, symbol);
+    const activeLong = this.getActivePosition(positions, symbol);
     const exitAlreadyRequested = this.roiExitedSymbols?.has(symbol) || false;
     if (exitAlreadyRequested && !activeLong) {
       this.roiCloseOrders?.delete(symbol);
@@ -3654,7 +3847,7 @@ class FuturesGridEngine {
     if (Number.isFinite(triggerRoi)) {
       rows.push(['ROI', `${this.formatFuturesNumber(triggerRoi, 2)}%`]);
     }
-    rows.push(['Position', 'LONG closed']);
+    rows.push(['Position', `${POSITION_SIDE} closed`]);
     await this.sendAlert(this.formatFuturesTelegramMessage(`FUTURES ${exitType.toUpperCase()}`, rows));
     this.roiExitAlertedSymbols.add(symbol);
   }
@@ -3695,6 +3888,7 @@ class FuturesGridEngine {
   }
 
   async reconcileSymbolUnlocked(symbol) {
+    if (POSITION_SIDE === 'SHORT') return this.reconcileShortSymbolUnlocked(symbol);
     await this.syncAccountIncome(symbol);
     if (!this.canPlaceNewOrders()) {
       const freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
@@ -3708,7 +3902,7 @@ class FuturesGridEngine {
     let context = await this.fetchContext(symbol);
     let { currentPrice, balance, positions, lower, upper, levels } = context;
     if (!this.latestPositions) this.latestPositions = new Map();
-    this.latestPositions.set(symbol, this.getActiveLongPosition(positions, symbol));
+    this.latestPositions.set(symbol, this.getActivePosition(positions, symbol));
 
     const canContinue = await this.enforceRangeExits(symbol, currentPrice, positions);
 
@@ -3723,14 +3917,14 @@ class FuturesGridEngine {
         newContext = await this.fetchContext(symbol);
         newContext.trailingUpJustShifted = true;
         ({ currentPrice, balance, positions, lower, upper, levels } = newContext);
-        this.latestPositions.set(symbol, this.getActiveLongPosition(positions, symbol));
+        this.latestPositions.set(symbol, this.getActivePosition(positions, symbol));
       } else {
         trailedDown = await this.maybeTrailDownRange(symbol, currentPrice, lower, upper);
         if (trailedDown) {
           newContext = await this.fetchContext(symbol);
           newContext.trailingDownJustShifted = true;
           ({ currentPrice, balance, positions, lower, upper, levels } = newContext);
-          this.latestPositions.set(symbol, this.getActiveLongPosition(positions, symbol));
+          this.latestPositions.set(symbol, this.getActivePosition(positions, symbol));
         }
       }
     }
@@ -3924,6 +4118,204 @@ class FuturesGridEngine {
     );
   }
 
+  async reconcileShortSymbolUnlocked(symbol) {
+    await this.syncAccountIncome(symbol);
+    if (!this.canPlaceNewOrders()) {
+      const openOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+      await this.handleFilledTrades(symbol, [], openOrders);
+      await this.syncFundingHistory(symbol);
+      if (this.exchange.fetchPositions) {
+        this.updatePositionSnapshot(symbol, await this.exchange.fetchPositions([symbol]));
+      }
+      console.log(`[SYNC] ${symbol} SHORT trading paused; fills reconciled`);
+      return;
+    }
+
+    let context = await this.fetchContext(symbol);
+    let { currentPrice, balance, positions, lower, upper, levels } = context;
+    this.updatePositionSnapshot(symbol, positions);
+    const canContinue = await this.enforceRangeExits(symbol, currentPrice, positions);
+
+    const fibonacciOwnsRange = this.state.getSymbol(symbol).config.rangeAdvisor?.source === 'FIBONACCI';
+    const trailingAllowed = !fibonacciOwnsRange || FIBONACCI_RANGE_ADVISOR_ALLOW_TRAILING;
+    if (canContinue && trailingAllowed) {
+      const trailedUp = await this.maybeTrailUpRange(symbol, currentPrice, lower, upper);
+      const trailedDown = trailedUp
+        ? null
+        : await this.maybeTrailDownRange(symbol, currentPrice, lower, upper);
+      if (trailedUp || trailedDown) {
+        context = await this.fetchContext(symbol);
+        ({ currentPrice, balance, positions, lower, upper, levels } = context);
+        this.updatePositionSnapshot(symbol, positions);
+      }
+    }
+
+    let freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+    await this.handleFilledTrades(symbol, canContinue ? levels : [], freshOpenOrders);
+    await this.syncFundingHistory(symbol);
+    if (!canContinue) return;
+
+    try { await this.trimExcessShortEntries(symbol); } catch (err) {
+      console.warn(`[EXPOSURE] ${symbol} could not trim pending SHORT entries: ${err.message}`);
+    }
+    [balance, positions, freshOpenOrders] = await Promise.all([
+      retry(() => this.exchange.fetchBalance()),
+      retry(() => this.exchange.fetchPositions([symbol])),
+      retry(() => this.exchange.fetchOpenOrders(symbol)),
+    ]);
+    this.updatePositionSnapshot(symbol, positions);
+    let managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+    if (await this.cancelShortBuysAbovePositionEntry(symbol, managedOrders)) {
+      freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+      managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+    }
+
+    if (GRID_CANCEL_OUT_OF_RANGE) {
+      for (const order of managedOrders) {
+        if (String(order.side).toLowerCase() !== ENTRY_SIDE) continue;
+        const orderTimestamp = Number(order.timestamp) || Date.parse(order.datetime || 0) || 0;
+        if (Date.now() - orderTimestamp < GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MS) continue;
+        if (this.isOrderCloseToPriceLevel(order.price, levels, this.exchange.markets[symbol])) continue;
+        if (!this.isOrderInsideRange(order, lower, upper)) {
+          await this.cancelOrder(symbol, order, `outside SHORT range ${roundNumber(lower)}-${roundNumber(upper)}`);
+        }
+      }
+      freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+      managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+    }
+
+    const symState = this.state.getSymbol(symbol);
+    symState.refillCountByLevel ||= {};
+    const activeEntryLevels = new Set();
+    for (const order of managedOrders) {
+      if (String(order.side).toLowerCase() === ENTRY_SIDE) {
+        activeEntryLevels.add(this.getLevelIndex(levels, Number(order.price)));
+      }
+    }
+    for (const order of Object.values(symState.orders)) {
+      if (String(order.side).toLowerCase() === ENTRY_SIDE) {
+        activeEntryLevels.add(Number(order.levelIndex));
+      }
+    }
+
+    const appliedDirection = this.appliedFibonacciDirections.get(symbol) || 'RANGING';
+    const shortEntryAllowed = FUTURES_SHORT_ENTRY_DIRECTION === 'ALWAYS' ||
+      appliedDirection === FUTURES_SHORT_ENTRY_DIRECTION;
+    const entries = shortEntryAllowed
+      ? this.getNearestLevels(levels, currentPrice, ENTRY_SIDE, GRID_MAX_ACTIVE_BUY_ORDERS)
+      : [];
+    if (!shortEntryAllowed) {
+      console.log(
+        `[SHORT-GATE] ${symbol} no new SELL entries: applied direction=${appliedDirection}, ` +
+        `required=${FUTURES_SHORT_ENTRY_DIRECTION}`
+      );
+    }
+    let quoteFree = this.getQuoteFree(balance, symbol);
+    let remainingInvestment = this.getRemainingInvestmentUsdt(symbol);
+    for (const level of entries) {
+      if (this.countActiveOrders(symState, ENTRY_SIDE) >= GRID_MAX_ACTIVE_BUY_ORDERS) break;
+      if (activeEntryLevels.has(level.index) || symState.lastBuyByLevel[level.index]) continue;
+      const previousRefillCount = symState.refillCountByLevel[level.index];
+      if (previousRefillCount !== undefined && !GRID_REFILL_ON_FILLED) continue;
+      const refillCount = previousRefillCount === undefined
+        ? 0
+        : Math.max(0, Number(previousRefillCount) || 0) + 1;
+      if (refillCount > GRID_MAX_REFILLS) continue;
+      let amount = this.amountForBuy(symbol, level.price, remainingInvestment, 1);
+      if (!(amount > 0)) break;
+      let precise = this.getPreciseOrderNumbers(symbol, level.price, amount);
+      const minCost = this.getMinCost(symbol);
+      if (minCost > 0 && precise.notional < minCost - 1e-8) {
+        amount = minCost / level.price;
+        precise = this.getPreciseOrderNumbers(symbol, level.price, amount);
+      }
+      if (precise.notional > remainingInvestment + 1e-8 ||
+          quoteFree < precise.notional / LEVERAGE) break;
+      const order = await this.placeLimit(
+        symbol, ENTRY_SIDE, level.index, level.price, amount, { refillCount }
+      );
+      if (!order) break;
+      quoteFree -= precise.notional / LEVERAGE;
+      remainingInvestment = Math.max(0, remainingInvestment - precise.notional);
+    }
+
+    const positionAmount = this.getBaseFree(positions, symbol);
+    const reservedExitAmount = managedOrders
+      .filter(order => String(order.side).toLowerCase() === EXIT_SIDE)
+      .reduce((sum, order) => sum + this.getOpenOrderRemainingAmount(order), 0);
+    let closableAmount = Math.max(0, positionAmount - reservedExitAmount);
+    const trackedEntries = Object.entries(symState.lastBuyByLevel)
+      .map(([entryLevelIndex, entry]) => ({ entryLevelIndex: Number(entryLevelIndex), entry }))
+      .filter(item => Number.isInteger(item.entryLevelIndex) && item.entry)
+      .sort((left, right) => left.entryLevelIndex - right.entryLevelIndex);
+    for (const { entryLevelIndex, entry } of trackedEntries) {
+      if (this.getActiveShortExitForEntry(symState, entryLevelIndex)) continue;
+      const trackedAmount = Math.max(0, Number(entry.sellableAmount ?? entry.amount) || 0);
+      const amount = Math.min(trackedAmount, closableAmount);
+      if (!(amount > 0)) continue;
+      const target = this.findBuyTargetForShort(symbol, levels, entryLevelIndex, entry, {
+        amount,
+        maximumPrice: currentPrice,
+      });
+      if (!target) {
+        this.warnNoShortExitTarget(symbol, entryLevelIndex, levels, entry, amount);
+        continue;
+      }
+      this.clearSellTargetWarning(symbol, entryLevelIndex);
+      const order = await this.placeShortExitLimit(
+        symbol, target.buyLevelIndex, target.buyPrice, amount,
+        {
+          refillCount: Math.max(0, Number(entry.refillCount) || 0),
+          sourceEntryLevelIndex: entryLevelIndex,
+          referencePrice: currentPrice,
+        }
+      );
+      if (order) closableAmount -= amount;
+    }
+
+    const activePosition = this.getActivePosition(positions, symbol);
+    console.log(
+      `[SYNC-SHORT] ${symbol} price=${roundNumber(currentPrice)} ` +
+      `range=${roundNumber(lower)}-${roundNumber(upper)} orders=${managedOrders.length} ` +
+      `position=${roundNumber(Math.abs(Number(activePosition?.contracts) || 0), 8)} ` +
+      `gridPair=${roundNumber(symState.realizedGridProfit, 4)} ${this.getQuoteAsset(symbol)}`
+    );
+  }
+
+  async trimExcessShortEntries(symbol) {
+    if (!this.exposureLimits) return;
+    await this.withExposureLock(async () => {
+      let exposure = await this.fetchExposure();
+      const managed = await this.getManagedOpenOrders(
+        symbol, exposure.orders.filter(order => order.symbol === symbol)
+      );
+      const entries = managed
+        .filter(order => String(order.side).toLowerCase() === ENTRY_SIDE)
+        .sort((left, right) => Number(right.price) - Number(left.price));
+      for (const order of entries) {
+        if (exposure.values[symbol] <= this.exposureLimits.symbol + 1e-8 &&
+            exposure.total <= this.exposureLimits.total + 1e-8) break;
+        await this.cancelOrder(symbol, order, 'SHORT exposure cap; preserve BUY exits');
+        exposure = await this.fetchExposure();
+      }
+    });
+  }
+
+  async cancelShortBuysAbovePositionEntry(symbol, managedOrders) {
+    const entryPrice = this.getPositionEntryFloor(symbol);
+    if (!(entryPrice > 0)) return 0;
+    const invalid = managedOrders.filter(order =>
+      String(order.side).toLowerCase() === EXIT_SIDE && Number(order.price) - 1e-12 > entryPrice
+    );
+    for (const order of invalid) {
+      await this.cancelOrder(
+        symbol, order,
+        `SHORT BUY exit ${Number(order.price)} above position average entry ${entryPrice}`
+      );
+    }
+    return invalid.length;
+  }
+
   amountForTrackedSell(symbol, sellLevelIndex) {
     const symState = this.state.getSymbol(symbol);
     const buy = symState.lastBuyByLevel[sellLevelIndex - 1];
@@ -3941,7 +4333,7 @@ class FuturesGridEngine {
   updatePositionSnapshot(symbol, positions) {
     if (!this.latestPositions) this.latestPositions = new Map();
     if (!this.latestAccountUnrealized) this.latestAccountUnrealized = new Map();
-    this.latestPositions.set(symbol, this.getActiveLongPosition(positions, symbol));
+    this.latestPositions.set(symbol, this.getActivePosition(positions, symbol));
     this.latestAccountUnrealized.set(symbol, positions.filter(p => p.symbol === symbol)
       .reduce((sum, p) => sum + numberOrZero(p.unrealizedPnl ?? p.info?.unRealizedProfit), 0));
   }
@@ -4029,6 +4421,91 @@ class FuturesGridEngine {
     this.sellTargetWarnings.delete(`${symbol}|${buyLevelIndex}`);
   }
 
+  getMaximumProfitableShortExitPrice(entry) {
+    const amount = Number(entry?.sellableAmount ?? entry?.amount) || 0;
+    const proceeds = Number(entry?.totalCostQuote) || 0;
+    const entryFee = Number(entry?.totalFeeQuote) || 0;
+    if (!(amount > 0) || !(proceeds > entryFee)) return 0;
+    const targetProfit = proceeds * GRID_MIN_NET_PROFIT_PCT / 100;
+    return (proceeds - entryFee - targetProfit) /
+      (amount * (1 + BINANCE_FUTURES_MAKER_FEE_RATE));
+  }
+
+  isTrackedShortExitProfitable(symbol, entry, buyPrice) {
+    let precise = Number(buyPrice);
+    try { precise = Number(this.exchange.priceToPrecision(symbol, buyPrice)); } catch {}
+    return precise > 0 && precise <= this.getMaximumProfitableShortExitPrice(entry) + 1e-12;
+  }
+
+  getActiveShortExitForEntry(symState, entryLevelIndex) {
+    return Object.values(symState.orders || {}).find(order =>
+      String(order.side).toLowerCase() === EXIT_SIDE &&
+      this.getSellSourceBuyLevelIndex(order) === Number(entryLevelIndex)
+    ) || null;
+  }
+
+  findBuyTargetForShort(
+    symbol, levels, entryLevelIndex, trackedEntry,
+    { amount = null, maximumPrice = Infinity } = {}
+  ) {
+    const sourceLevel = Number(entryLevelIndex);
+    if (!Number.isInteger(sourceLevel) || sourceLevel < 0 || !levels.length) return null;
+    const exitAmount = Math.max(0, Number(
+      amount ?? trackedEntry?.sellableAmount ?? trackedEntry?.amount
+    ) || 0);
+    if (!(exitAmount > 0)) return null;
+    const positionEntry = this.getPositionEntryFloor(symbol);
+    const effectiveMaximum = Math.min(
+      maximumPrice,
+      positionEntry > 0 ? positionEntry : Infinity,
+      this.getMaximumProfitableShortExitPrice(trackedEntry)
+    );
+    const minCost = this.getMinCost(symbol);
+    for (let buyLevelIndex = sourceLevel - 1; buyLevelIndex >= 0; buyLevelIndex--) {
+      const buyPrice = Number(levels[buyLevelIndex]);
+      if (!(buyPrice < effectiveMaximum) ||
+          !this.isTrackedShortExitProfitable(symbol, trackedEntry, buyPrice)) continue;
+      let precise;
+      try { precise = this.getPreciseOrderNumbers(symbol, buyPrice, exitAmount); } catch { continue; }
+      if (!(Number(precise.amountNum ?? precise.preciseAmount) > 0)) continue;
+      if (minCost > 0 && precise.notional < minCost - 1e-8) continue;
+      return {
+        entryLevelIndex: sourceLevel,
+        buyLevelIndex,
+        buyPrice,
+        amount: Number(precise.amountNum ?? precise.preciseAmount),
+        notional: precise.notional,
+      };
+    }
+    const tick = this.getMarketTickSize(symbol);
+    const preciseAmount = Number(this.exchange.amountToPrecision(symbol, exitAmount));
+    if (!(tick > 0) || !(preciseAmount > 0) || !Number.isFinite(effectiveMaximum)) return null;
+    const rawPrice = Math.min(Number(levels[0]) - tick, effectiveMaximum - tick);
+    const buyPrice = Number(this.exchange.priceToPrecision(symbol, Math.floor(rawPrice / tick) * tick));
+    if (!(buyPrice > 0) || !this.isTrackedShortExitProfitable(symbol, trackedEntry, buyPrice)) return null;
+    const precise = this.getPreciseOrderNumbers(symbol, buyPrice, preciseAmount);
+    if (minCost > 0 && precise.notional < minCost - 1e-8) return null;
+    return {
+      entryLevelIndex: sourceLevel,
+      buyLevelIndex: 0,
+      buyPrice,
+      amount: preciseAmount,
+      notional: precise.notional,
+      outsideGrid: true,
+    };
+  }
+
+  warnNoShortExitTarget(symbol, entryLevelIndex, levels, trackedEntry, amount) {
+    const key = `${symbol}|${entryLevelIndex}`;
+    if (this.sellTargetWarnings.has(key)) return;
+    this.sellTargetWarnings.add(key);
+    console.warn(
+      `[SKIP] ${symbol} SHORT BUY exit sourceEntry=${entryLevelIndex} | no lower level satisfies ` +
+      `profit/min-notional constraints (maxPrice=${this.getMaximumProfitableShortExitPrice(trackedEntry)}, ` +
+      `lowestLevel=${Number(levels[0]) || 0}, amount=${amount}, minNotional=${this.getMinCost(symbol)})`
+    );
+  }
+
   getAllocatedInvestmentUsdt(symbol) {
     if (!(GRID_TOTAL_INVESTMENT_USDT > 0)) return 0;
     const symState = this.state.getSymbol(symbol);
@@ -4039,13 +4516,9 @@ class FuturesGridEngine {
       allocated += Number(buy.totalCostQuote) || 0;
     }
 
-    // Sum cost of ALL open (pending) buy orders. A level can simultaneously
-    // have a filled buy record in lastBuyByLevel (e.g. partially sold) AND a
-    // new pending replenishment buy order open at that same level — both
-    // amounts are real allocated capital and must both be counted, or the
-    // investment cap is under-reported and the bot can over-allocate funds.
+    // Pending opening orders count toward the configured side's notional cap.
     for (const order of Object.values(symState.orders)) {
-      if (String(order.side).toLowerCase() !== 'buy') continue;
+      if (String(order.side).toLowerCase() !== ENTRY_SIDE) continue;
       allocated += (Number(order.amount) || 0) * (Number(order.price) || 0);
     }
 
@@ -4071,7 +4544,7 @@ class FuturesGridEngine {
       if (!this.adaptiveMinimumWarnings?.has(warningKey)) {
         this.adaptiveMinimumWarnings?.add(warningKey);
         console.log(
-          `[ADAPTIVE-LIVE] ${symbol} skipping ${weight}x BUY weight: target ` +
+          `[ADAPTIVE-LIVE] ${symbol} skipping ${weight}x ${ENTRY_SIDE.toUpperCase()} weight: target ` +
           `${roundNumber(weightedTarget, 8)} USDT is below minimum notional ${minCost} USDT`
         );
       }
@@ -4095,7 +4568,7 @@ class FuturesGridEngine {
     console.warn(
       `[CONFIG] ${symbol} remaining investment ${roundNumber(availableInvestmentUsdt, 8)} USDT is below the ` +
       `exchange minimum order cost ${minCost} USDT. This leftover is PERMANENTLY stuck and cannot be used for ` +
-      `new buy orders until a sell adds funds back. Consider lowering GRID_COUNT, raising ` +
+      `new ${ENTRY_SIDE.toUpperCase()} orders until an exit adds funds back. Consider lowering GRID_COUNT, raising ` +
       `GRID_TOTAL_INVESTMENT_USDT, or accepting fewer active buy levels.`
     );
   }
@@ -4380,8 +4853,8 @@ Range: ${GRID_LOWER_PRICE && GRID_UPPER_PRICE ? `${GRID_LOWER_PRICE}-${GRID_UPPE
 Trailing Range: ${GRID_TRAILING_RANGE_ENABLED ? 'ON (auto up/down)' : 'OFF'}
 Trailing Up: ${GRID_TRAILING_UP_ENABLED ? `ON (range-follow trigger, cooldown=${GRID_TRAILING_UP_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
 Trailing Down: ${GRID_TRAILING_DOWN_ENABLED ? `ON (range-follow trigger, cooldown=${GRID_TRAILING_DOWN_COOLDOWN_MS / MINUTE_MS}m)` : 'OFF'}
-Active Order Policy: buy hard-limit=${GRID_MAX_ACTIVE_BUY_ORDERS}, sell soft-warning=${GRID_MAX_ACTIVE_SELL_ORDERS} (tracked exits remain priority)
-Exposure caps (positions + pending BUY): symbol=${FUTURES_MAX_SYMBOL_EXPOSURE_USDT} USDT, total=${FUTURES_MAX_TOTAL_EXPOSURE_USDT} USDT
+Active Order Policy: ${ENTRY_SIDE} entry hard-limit=${GRID_MAX_ACTIVE_BUY_ORDERS}, ${EXIT_SIDE} exit soft-warning=${GRID_MAX_ACTIVE_SELL_ORDERS}
+Exposure caps (${POSITION_SIDE} position + pending ${ENTRY_SIDE.toUpperCase()}): symbol=${FUTURES_MAX_SYMBOL_EXPOSURE_USDT} USDT, total=${FUTURES_MAX_TOTAL_EXPOSURE_USDT} USDT
 Max Refills Per Level: ${GRID_MAX_REFILLS}
 Aggregated Exit Ladder: ${GRID_AGGREGATED_EXIT_LADDER_ENABLED
       ? `ON (max ${GRID_AGGREGATED_EXIT_LADDER_MAX_ORDERS} orders; symbols=${GRID_AGGREGATED_EXIT_LADDER_SYMBOLS.join(',') || 'all'})`

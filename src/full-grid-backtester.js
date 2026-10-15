@@ -29,6 +29,8 @@ const DEFAULT_OPTIONS = Object.freeze({
   makerFeeRate: 0.0002,
   minimumNetProfitPct: 0.05,
   minimumNotional: 5,
+  positionSide: 'LONG',
+  shortEntryDirection: 'ALWAYS',
   candleLimit: 100,
   rangeWidthPct: 20,
   rangeRebuildThresholdPct: 2,
@@ -59,6 +61,12 @@ function minimumProfitableSellPrice(lot, options) {
   const costWithEntryFee = lot.entryCost + lot.buyFee;
   return (costWithEntryFee / lot.quantity) * (1 + options.minimumNetProfitPct / 100) /
     (1 - options.makerFeeRate);
+}
+
+function maximumProfitableShortBuyPrice(lot, options) {
+  const netEntryProceeds = lot.entryCost - lot.buyFee;
+  const targetProfit = lot.entryCost * options.minimumNetProfitPct / 100;
+  return (netEntryProceeds - targetProfit) / lot.quantity / (1 + options.makerFeeRate);
 }
 
 function chooseSpacedLevels(candidates, multiplier) {
@@ -168,6 +176,7 @@ class FullGridBacktester {
     variant = null,
   }) {
     const options = this.options;
+    const short = String(options.positionSide).toUpperCase() === 'SHORT';
     const adaptiveEnabled = adaptive || riskStateMachine;
     const series = this.prepareSeries(rows);
     const rangeAdvisor = this.createRangeAdvisor();
@@ -218,15 +227,21 @@ class FullGridBacktester {
       for (const lot of lots) {
         if (lot.sellTarget && lot.sellPlacedAt < lot.lastRangeResetAt) lot.sellTarget = null;
         if (lot.sellTarget) continue;
-        const minimum = Math.max(minimumProfitableSellPrice(lot, options), currentPrice);
-        let target = activeSuggestion.levels.find(level => level > minimum + 1e-12);
-        if (!target) {
-          const highest = activeSuggestion.levels.at(-1);
-          const tickGuess = highest * 1e-8;
-          target = minimum + Math.max(tickGuess, minimum * 1e-8);
+        let target;
+        if (short) {
+          const maximum = Math.min(maximumProfitableShortBuyPrice(lot, options), currentPrice);
+          target = [...activeSuggestion.levels].reverse().find(level => level < maximum - 1e-12);
+          if (!target) target = maximum - Math.max(maximum * 1e-8, 1e-12);
+        } else {
+          const minimum = Math.max(minimumProfitableSellPrice(lot, options), currentPrice);
+          target = activeSuggestion.levels.find(level => level > minimum + 1e-12);
+          if (!target) target = minimum + Math.max(minimum * 1e-8, 1e-12);
         }
         target = getMarketNumber(this.exchange, 'priceToPrecision', symbol, target);
-        if (target > minimumProfitableSellPrice(lot, options) && target > currentPrice) {
+        const profitable = short
+          ? target < maximumProfitableShortBuyPrice(lot, options) && target < currentPrice
+          : target > minimumProfitableSellPrice(lot, options) && target > currentPrice;
+        if (profitable) {
           lot.sellTarget = target;
           lot.sellPlacedAt = lot.lastUpdatedAt;
         }
@@ -259,8 +274,10 @@ class FullGridBacktester {
       metrics.rangeResets++;
     };
 
-    const placeBuyOrders = (currentPrice, now) => {
+    const placeBuyOrders = (currentPrice, now, appliedDirection) => {
       if (!activeSuggestion?.levels?.length) return;
+      const requiredShortDirection = String(options.shortEntryDirection || 'ALWAYS').toUpperCase();
+      if (short && requiredShortDirection !== 'ALWAYS' && appliedDirection !== requiredShortDirection) return;
       const recommendation = adaptiveEnabled && lastDecision
         ? lastDecision.recommendation
         : { buyWeight: { upper: 1, middle: 1, lower: 1 }, spacingMultiplier: 1 };
@@ -268,8 +285,9 @@ class FullGridBacktester {
       const occupied = new Set(lots.filter(lot => lot.generation === rangeGeneration).map(lot => lot.levelIndex));
       const candidates = activeSuggestion.levels
         .map((price, levelIndex) => ({ price, levelIndex }))
-        .filter(item => item.price < currentPrice && !occupied.has(item.levelIndex) && !pendingBuys.has(item.levelIndex))
-        .sort((left, right) => right.price - left.price);
+        .filter(item => (short ? item.price > currentPrice : item.price < currentPrice) &&
+          !occupied.has(item.levelIndex) && !pendingBuys.has(item.levelIndex))
+        .sort((left, right) => short ? left.price - right.price : right.price - left.price);
       const spaced = chooseSpacedLevels(candidates, recommendation.spacingMultiplier)
         .slice(0, options.maxActiveBuyOrders);
       const count = spaced.length;
@@ -320,7 +338,7 @@ class FullGridBacktester {
       while (fundingIndex < funding.length && funding[fundingIndex].timestamp < timestamp + BASE_TIMEFRAME_MS) {
         const event = funding[fundingIndex];
         if (event.timestamp >= timestamp) {
-          const pnl = -positionQuantity() * open * event.rate;
+          const pnl = (short ? 1 : -1) * positionQuantity() * open * event.rate;
           metrics.fundingPnl += pnl;
           metrics.cashPnl += pnl;
         }
@@ -329,12 +347,16 @@ class FullGridBacktester {
 
       for (let index = lots.length - 1; index >= 0; index--) {
         const lot = lots[index];
-        if (!(lot.sellTarget > 0) || lot.sellPlacedAt > timestamp || high + 1e-12 < lot.sellTarget) continue;
+        const exitTouched = short
+          ? low - 1e-12 <= lot.sellTarget
+          : high + 1e-12 >= lot.sellTarget;
+        if (!(lot.sellTarget > 0) || lot.sellPlacedAt > timestamp || !exitTouched) continue;
         const proceeds = lot.quantity * lot.sellTarget;
         const sellFee = proceeds * options.makerFeeRate;
-        metrics.grossGridProfit += proceeds - lot.entryCost;
+        const grossProfit = short ? lot.entryCost - proceeds : proceeds - lot.entryCost;
+        metrics.grossGridProfit += grossProfit;
         metrics.sellFees += sellFee;
-        metrics.cashPnl += proceeds - lot.entryCost - sellFee;
+        metrics.cashPnl += grossProfit - sellFee;
         metrics.sellFills++;
         metrics.gridCycles++;
         slotFillCounts.set(lot.levelIndex, (slotFillCounts.get(lot.levelIndex) || 0) + 1);
@@ -342,7 +364,8 @@ class FullGridBacktester {
       }
 
       for (const [levelIndex, order] of [...pendingBuys.entries()]) {
-        if (order.generation !== rangeGeneration || order.placedAt > timestamp || low - 1e-12 > order.price) continue;
+        const entryTouched = short ? high + 1e-12 >= order.price : low - 1e-12 <= order.price;
+        if (order.generation !== rangeGeneration || order.placedAt > timestamp || !entryTouched) continue;
         const buyFee = order.notional * options.makerFeeRate;
         metrics.buyFees += buyFee;
         metrics.cashPnl -= buyFee;
@@ -385,7 +408,8 @@ class FullGridBacktester {
         const entryNotional = inventoryEntryNotional();
         const estimatedExitFee = inventoryMarketNotional * options.makerFeeRate;
         const unrealizedPnlPct = entryNotional > 0
-          ? ((inventoryMarketNotional - entryNotional - estimatedExitFee) / entryNotional) * 100
+          ? (((short ? entryNotional - inventoryMarketNotional : inventoryMarketNotional - entryNotional) -
+            estimatedExitFee) / entryNotional) * 100
           : null;
         lastDecision = supervisor.evaluate(symbol, {
           analysis: lastAnalysis,
@@ -440,7 +464,7 @@ class FullGridBacktester {
 
       for (const lot of lots) lot.lastUpdatedAt = evaluationTime;
       updateSellTargets(close);
-      placeBuyOrders(close, evaluationTime);
+      placeBuyOrders(close, evaluationTime, direction);
       const marketNotional = positionQuantity() * close;
       const pending = pendingNotional();
       metrics.maxInventoryNotional = Math.max(metrics.maxInventoryNotional, marketNotional);
@@ -449,7 +473,9 @@ class FullGridBacktester {
       if ((marketNotional + pending) / options.totalInvestment >= 0.9) metrics.exposureAbove90Samples++;
 
       const estimatedExitFee = marketNotional * options.makerFeeRate;
-      const unrealized = marketNotional - inventoryEntryNotional() - estimatedExitFee;
+      const unrealized = (short
+        ? inventoryEntryNotional() - marketNotional
+        : marketNotional - inventoryEntryNotional()) - estimatedExitFee;
       const equity = options.totalInvestment / options.leverage + metrics.cashPnl + unrealized;
       peakEquity = Math.max(peakEquity, equity);
       maximumDrawdown = Math.max(maximumDrawdown, peakEquity - equity);
@@ -458,7 +484,9 @@ class FullGridBacktester {
 
     const finalMarketNotional = positionQuantity() * (lastClose || 0);
     const finalExitFee = finalMarketNotional * options.makerFeeRate;
-    const liquidationComponent = finalMarketNotional - inventoryEntryNotional();
+    const liquidationComponent = short
+      ? inventoryEntryNotional() - finalMarketNotional
+      : finalMarketNotional - inventoryEntryNotional();
     const netLiquidationPnl = metrics.cashPnl + liquidationComponent - finalExitFee;
     const fees = metrics.buyFees + metrics.sellFees + finalExitFee;
     const durationDays = firstEvaluationAt ? Math.max(0, (Math.min(end, rows.at(-1)[0] + BASE_TIMEFRAME_MS) - firstEvaluationAt) / 86_400_000) : 0;
@@ -517,5 +545,6 @@ module.exports = {
   chooseSpacedLevels,
   geometricLevels,
   minimumProfitableSellPrice,
+  maximumProfitableShortBuyPrice,
   zoneForRank,
 };

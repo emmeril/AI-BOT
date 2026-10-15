@@ -63,7 +63,8 @@ node index.js
 ### Versi Futures USD-M
 
 Implementasi futures terpisah tersedia di `futures-grid.js`. Bot memakai Binance
-USD-M perpetual, Hedge Mode, dan hanya mengelola sisi `LONG`. Mulai dengan
+USD-M perpetual dan Hedge Mode. Proses utama mengelola sisi `LONG`. Proses
+kedua yang terisolasi dapat mengelola sisi `SHORT`. Mulai dengan
 credential Binance Futures Demo Trading dan simbol unified CCXT seperti
 `BTC/USDT:USDT`.
 
@@ -71,16 +72,25 @@ credential Binance Futures Demo Trading dan simbol unified CCXT seperti
 npm run start:futures
 ```
 
+SHORT memakai state, lock, dan prefix client order terpisah. Entry memakai
+`SELL positionSide=SHORT`, sedangkan exit profit memakai `BUY positionSide=SHORT`.
+Default live SHORT dibatasi 60 USDT notional per pair, 10 grid, dan hanya membuka
+entry ketika strategi Fibonacci mean-reversion menghasilkan arah `BEARISH`.
+
+```bash
+npm run start:futures:short
+```
+
 Gunakan `futures-env.example` sebagai template `.env`. Saat startup bot mengatur
-Hedge Mode, margin `ISOLATED`/`CROSSED`, dan leverage per simbol. Order grid
-selalu membawa `positionSide=LONG`; `reduceOnly` tidak dikirim karena Binance
-menolaknya pada Hedge Mode. Jika `GRID_POST_ONLY=true`, order yang akan langsung
+Hedge Mode, margin `ISOLATED`/`CROSSED`, dan leverage per simbol. Setiap order
+membawa `positionSide=LONG` atau `positionSide=SHORT`; `reduceOnly` tidak dikirim
+karena Binance menolaknya pada Hedge Mode. Jika `GRID_POST_ONLY=true`, order yang akan langsung
 match ditolak dan tidak diulang sebagai taker order.
 
 Khusus versi futures, `GRID_STOP_LOSS_PRICE` dan `GRID_TAKE_PROFIT_PRICE`
 digunakan sebagai persentase ROI posisi meskipun nama variabelnya masih memakai
 akhiran `PRICE`. Default `-100` dan `100`: bot menutup seluruh LONG ketika ROI
-mencapai -100% atau +100%. Bot membatalkan semua order grid sebelum market SELL,
+mencapai -100% atau +100%. Bot membatalkan semua order grid sebelum market exit,
 lalu menghentikan simbol tersebut sampai bot direstart. Nilai `0` menonaktifkan
 batas ROI yang bersangkutan.
 
@@ -92,8 +102,8 @@ sinkronisasi funding dengan default 60 menit.
 
 Range futures dibangun oleh advisor Fibonacci multi-timeframe. Jika rekomendasi
 Fibonacci tidak lolos validasi, bot mempertahankan range atau level lokal yang
-sudah ada; pengelolaan posisi tetap long-only dan exit tetap mengikuti batas ROI
-futures.
+sudah ada. LONG dan SHORT hanya mengelola sisi posisinya sendiri dan exit tetap
+mengikuti batas ROI futures.
 
 Referensi resmi Binance:
 
@@ -318,6 +328,15 @@ Untuk menguji Supervisor deterministik tanpa ketergantungan pada rentang cache G
 BACKTEST_START=2026-07-17T07:00:55.385Z \
 BACKTEST_END=2026-10-15T07:00:55.385Z \
 npm run backtest:adaptive-deterministic
+```
+
+Backtest SHORT memakai `SELL` sebagai entry, `BUY` sebagai exit, funding dengan
+arah SHORT, serta gate Fibonacci yang sama dengan proses live:
+
+```bash
+BACKTEST_START=2026-07-17T07:00:55.385Z \
+BACKTEST_END=2026-10-15T07:00:55.385Z \
+npm run backtest:futures-short
 ```
 
 Pembuatan cache bersifat resumable. Default-nya mengambil snapshot tiap 120 menit dengan exposure tetap 50%; deterministic safety tetap menerima exposure yang benar dari masing-masing simulasi. Cache berada di `backtest-data/gemini-adaptive-decisions.jsonl`, sedangkan laporan berada di `backtest-results/adaptive-variants-full-grid-backtest.{json,md}`. Laporan mencatat SHA-256 cache dan policy yang dipakai. Learned policy hanya dilatih dari separuh periode pertama dan baru aktif setelah titik split.

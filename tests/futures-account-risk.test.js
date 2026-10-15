@@ -56,6 +56,17 @@ test('exposure includes positions at entry or mark, pending remaining BUY, and b
   assert.throws(() => exposureBySymbol(['A'], [{ symbol: 'A', contracts: 1 }], []), /exposure/);
 });
 
+test('SHORT exposure counts only SHORT positions and pending SELL entries', () => {
+  const result = exposureBySymbol(['A'], [
+    { symbol: 'A', side: 'long', contracts: 2, entryPrice: 100, markPrice: 110 },
+    { symbol: 'A', side: 'short', contracts: 3, entryPrice: 100, markPrice: 90 },
+  ], [
+    { symbol: 'A', side: 'sell', remaining: 1, price: 120, info: { positionSide: 'SHORT' } },
+    { symbol: 'A', side: 'buy', remaining: 3, price: 80, info: { positionSide: 'SHORT' } },
+  ], 'SHORT');
+  assert.deepEqual(result, { values: { A: 420 }, total: 420 });
+});
+
 function riskEngine() {
   const engine = Object.create(FuturesGridEngine.prototype);
   engine.exposureLimits = { symbol: 100, total: 150 };
