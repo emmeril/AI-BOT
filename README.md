@@ -299,7 +299,7 @@ Backtest klasifikasi arah selama 90 hari dapat dijalankan tanpa mengubah bot liv
 npm run backtest:fibonacci-direction
 ```
 
-Runner membandingkan konfigurasi saat ini, beberapa minimum alignment, dan konsensus `4h + satu timeframe lebih rendah`. Periode dapat diubah dengan `BACKTEST_HISTORY_DAYS`, atau tanggal eksplisit melalui `BACKTEST_START` dan `BACKTEST_END`. Data publik Binance disimpan di `backtest-data/`, sedangkan laporan JSON dan Markdown disimpan di `backtest-results/`. Pengujian ini mengukur ketepatan arah 4 jam dan 24 jam tanpa mengklaim simulasi PnL grid, funding, likuidasi, atau urutan fill intrabar. Gunakan `REPORT_ONLY` dan `SHADOW` jika hasil walk-forward belum menunjukkan keunggulan arah yang konsisten.
+Runner membandingkan konfigurasi saat ini, varian mean-reversion yang membalik arah, beberapa minimum alignment, dan konsensus `4h + satu timeframe lebih rendah`. Periode dapat diubah dengan `BACKTEST_HISTORY_DAYS`, atau tanggal eksplisit melalui `BACKTEST_START` dan `BACKTEST_END`. Data publik Binance disimpan di `backtest-data/`, sedangkan laporan JSON dan Markdown disimpan di `backtest-results/`. Pengujian ini mengukur ketepatan arah 1 jam, 4 jam, dan 24 jam tanpa mengklaim simulasi PnL grid, funding, likuidasi, atau urutan fill intrabar. Gunakan `REPORT_ONLY` dan `SHADOW` jika hasil walk-forward belum menunjukkan keunggulan arah yang konsisten.
 
 Full-grid PnL backtest membandingkan empat varian: baseline, Adaptive Supervisor deterministik, Adaptive + Gemini, dan Adaptive + learned policy. Keputusan historis Gemini dibuat satu kali sebagai cache agar replay berikutnya reproducible dan tidak memanggil API lagi:
 

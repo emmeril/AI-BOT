@@ -28,6 +28,7 @@ const DEFAULT_SYMBOLS = [
 ];
 const VARIANTS = [
   { key: 'current', label: 'Current: confidence only', minimumAlignment: 0 },
+  { key: 'mean_reversion', label: 'Mean reversion: inverse direction', minimumAlignment: 0, invert: true },
   { key: 'align_055', label: 'Alignment >= 0.55', minimumAlignment: 0.55 },
   { key: 'align_060', label: 'Alignment >= 0.60', minimumAlignment: 0.60 },
   { key: 'align_067', label: 'Alignment >= 0.67', minimumAlignment: 0.67 },
@@ -171,35 +172,40 @@ function applyConfirmation(aggregate, state) {
 function directionForVariant(variant, aggregate, confirmedDirection) {
   if (!['BULLISH', 'BEARISH'].includes(confirmedDirection)) return 'RANGING';
   if (aggregate.confidence < MIN_CONFIDENCE) return 'RANGING';
+  let direction;
   if (variant.consensus) {
     const sameHigherTimeframe = aggregate.timeframes['4h']?.direction === confirmedDirection;
     const sameLowerTimeframe = ['15m', '1h']
       .some(timeframe => aggregate.timeframes[timeframe]?.direction === confirmedDirection);
-    return sameHigherTimeframe && sameLowerTimeframe ? confirmedDirection : 'RANGING';
+    direction = sameHigherTimeframe && sameLowerTimeframe ? confirmedDirection : 'RANGING';
+  } else {
+    direction = aggregate.alignment >= variant.minimumAlignment ? confirmedDirection : 'RANGING';
   }
-  return aggregate.alignment >= variant.minimumAlignment ? confirmedDirection : 'RANGING';
+  if (!variant.invert || direction === 'RANGING') return direction;
+  return direction === 'BULLISH' ? 'BEARISH' : 'BULLISH';
 }
 
 function createAccumulator() {
   return {
     samples: 0,
-    bullish: { returns4h: [], returns24h: [] },
-    bearish: { returns4h: [], returns24h: [] },
+    bullish: { returns1h: [], returns4h: [], returns24h: [] },
+    bearish: { returns1h: [], returns4h: [], returns24h: [] },
     ranging: 0,
     episodes: [],
     lastDirection: 'RANGING',
   };
 }
 
-function addObservation(accumulator, direction, return4h, return24h, timestamp) {
+function addObservation(accumulator, direction, return1h, return4h, return24h, timestamp) {
   accumulator.samples++;
   if (direction === 'RANGING') accumulator.ranging++;
   else {
+    accumulator[direction.toLowerCase()].returns1h.push(return1h);
     accumulator[direction.toLowerCase()].returns4h.push(return4h);
     accumulator[direction.toLowerCase()].returns24h.push(return24h);
   }
   if (direction !== 'RANGING' && direction !== accumulator.lastDirection) {
-    accumulator.episodes.push({ direction, timestamp, return4h, return24h });
+    accumulator.episodes.push({ direction, timestamp, return1h, return4h, return24h });
   }
   accumulator.lastDirection = direction;
 }
@@ -217,15 +223,20 @@ function summarizeReturns(values, expectedSign) {
 }
 
 function summarizeAccumulator(accumulator) {
+  const bullish1h = summarizeReturns(accumulator.bullish.returns1h, 1);
+  const bearish1h = summarizeReturns(accumulator.bearish.returns1h, -1);
   const bullish4h = summarizeReturns(accumulator.bullish.returns4h, 1);
   const bearish4h = summarizeReturns(accumulator.bearish.returns4h, -1);
   const bullish24h = summarizeReturns(accumulator.bullish.returns24h, 1);
   const bearish24h = summarizeReturns(accumulator.bearish.returns24h, -1);
-  const directionalCount = bullish4h.count + bearish4h.count;
+  const directionalCount = bullish1h.count + bearish1h.count;
+  const correct1h = bullish1h.count * (bullish1h.accuracyPct || 0) / 100 +
+    bearish1h.count * (bearish1h.accuracyPct || 0) / 100;
   const correct4h = bullish4h.count * (bullish4h.accuracyPct || 0) / 100 +
     bearish4h.count * (bearish4h.accuracyPct || 0) / 100;
   const correct24h = bullish24h.count * (bullish24h.accuracyPct || 0) / 100 +
     bearish24h.count * (bearish24h.accuracyPct || 0) / 100;
+  const episode1h = accumulator.episodes.map(item => item.direction === 'BULLISH' ? item.return1h : -item.return1h);
   const episode4h = accumulator.episodes.map(item => item.direction === 'BULLISH' ? item.return4h : -item.return4h);
   const episode24h = accumulator.episodes.map(item => item.direction === 'BULLISH' ? item.return24h : -item.return24h);
   return {
@@ -233,14 +244,17 @@ function summarizeAccumulator(accumulator) {
     directionalSamples: directionalCount,
     coveragePct: accumulator.samples ? round(directionalCount / accumulator.samples * 100, 2) : null,
     rangingSamples: accumulator.ranging,
+    combinedAccuracy1hPct: directionalCount ? round(correct1h / directionalCount * 100, 2) : null,
     combinedAccuracy4hPct: directionalCount ? round(correct4h / directionalCount * 100, 2) : null,
     combinedAccuracy24hPct: directionalCount ? round(correct24h / directionalCount * 100, 2) : null,
-    bullish: { horizon4h: bullish4h, horizon24h: bullish24h },
-    bearish: { horizon4h: bearish4h, horizon24h: bearish24h },
+    bullish: { horizon1h: bullish1h, horizon4h: bullish4h, horizon24h: bullish24h },
+    bearish: { horizon1h: bearish1h, horizon4h: bearish4h, horizon24h: bearish24h },
     episodes: {
       count: accumulator.episodes.length,
+      accuracy1hPct: episode1h.length ? round(episode1h.filter(value => value > 0).length / episode1h.length * 100, 2) : null,
       accuracy4hPct: episode4h.length ? round(episode4h.filter(value => value > 0).length / episode4h.length * 100, 2) : null,
       accuracy24hPct: episode24h.length ? round(episode24h.filter(value => value > 0).length / episode24h.length * 100, 2) : null,
+      meanDirectionalReturn1hPct: round(mean(episode1h) * 100, 4),
       meanDirectionalReturn4hPct: round(mean(episode4h) * 100, 4),
       meanDirectionalReturn24hPct: round(mean(episode24h) * 100, 4),
     },
@@ -253,8 +267,10 @@ function mergeSummaries(perSymbol, key) {
     const source = symbolData.raw[key];
     merged.samples += source.samples;
     merged.ranging += source.ranging;
+    merged.bullish.returns1h.push(...source.bullish.returns1h);
     merged.bullish.returns4h.push(...source.bullish.returns4h);
     merged.bullish.returns24h.push(...source.bullish.returns24h);
+    merged.bearish.returns1h.push(...source.bearish.returns1h);
     merged.bearish.returns4h.push(...source.bearish.returns4h);
     merged.bearish.returns24h.push(...source.bearish.returns24h);
     merged.episodes.push(...source.episodes);
@@ -288,12 +304,14 @@ function backtestSymbolWithRaw(symbol, rows, start, end) {
     const aggregate = aggregateTimeframes(timeframeResults);
     const confirmedDirection = applyConfirmation(aggregate, confirmation);
     const currentClose = candle[4];
+    const return1h = candles15m[index15m + 4][4] / currentClose - 1;
     const return4h = candles15m[index15m + 16][4] / currentClose - 1;
     const return24h = candles15m[index15m + 96][4] / currentClose - 1;
     for (const variant of VARIANTS) {
       addObservation(
         raw[variant.key],
         directionForVariant(variant, aggregate, confirmedDirection),
+        return1h,
         return4h,
         return24h,
         candle[0]
@@ -318,35 +336,37 @@ function renderMarkdown(report) {
     '',
     'This report evaluates direction classification only. It does not claim full grid PnL, liquidation, or intrabar execution accuracy.',
     '',
-    '| Variant | Coverage | Accuracy 4h | Accuracy 24h | Episodes | Episode accuracy 24h |',
-    '|---|---:|---:|---:|---:|---:|',
+    '| Variant | Coverage | Accuracy 1h | Accuracy 4h | Accuracy 24h | Episodes | Episode accuracy 24h |',
+    '|---|---:|---:|---:|---:|---:|---:|',
   ];
   for (const variant of VARIANTS) {
     const result = report.aggregate[variant.key];
     lines.push(
-      `| ${variant.label} | ${result.coveragePct ?? 'N/A'}% | ${result.combinedAccuracy4hPct ?? 'N/A'}% | ` +
+      `| ${variant.label} | ${result.coveragePct ?? 'N/A'}% | ${result.combinedAccuracy1hPct ?? 'N/A'}% | ` +
+      `${result.combinedAccuracy4hPct ?? 'N/A'}% | ` +
       `${result.combinedAccuracy24hPct ?? 'N/A'}% | ${result.episodes.count} | ${result.episodes.accuracy24hPct ?? 'N/A'}% |`
     );
   }
   lines.push('', '## Walk-forward split', '');
   lines.push(`Train: ${report.walkForward.train.period.start} to ${report.walkForward.train.period.end}`);
   lines.push(`Test: ${report.walkForward.test.period.start} to ${report.walkForward.test.period.end}`, '');
-  lines.push('| Variant | Train accuracy 24h | Test accuracy 24h | Train coverage | Test coverage |');
-  lines.push('|---|---:|---:|---:|---:|');
+  lines.push('| Variant | Train accuracy 1h | Test accuracy 1h | Train accuracy 24h | Test accuracy 24h | Train coverage | Test coverage |');
+  lines.push('|---|---:|---:|---:|---:|---:|---:|');
   for (const variant of VARIANTS) {
     const train = report.walkForward.train.aggregate[variant.key];
     const test = report.walkForward.test.aggregate[variant.key];
     lines.push(
-      `| ${variant.label} | ${train.combinedAccuracy24hPct ?? 'N/A'}% | ${test.combinedAccuracy24hPct ?? 'N/A'}% | ` +
+      `| ${variant.label} | ${train.combinedAccuracy1hPct ?? 'N/A'}% | ${test.combinedAccuracy1hPct ?? 'N/A'}% | ` +
+      `${train.combinedAccuracy24hPct ?? 'N/A'}% | ${test.combinedAccuracy24hPct ?? 'N/A'}% | ` +
       `${train.coveragePct ?? 'N/A'}% | ${test.coveragePct ?? 'N/A'}% |`
     );
   }
   lines.push('', '## Per symbol', '');
   for (const [symbol, data] of Object.entries(report.perSymbol)) {
-    lines.push(`### ${symbol}`, '', '| Variant | Coverage | Accuracy 4h | Accuracy 24h |', '|---|---:|---:|---:|');
+    lines.push(`### ${symbol}`, '', '| Variant | Coverage | Accuracy 1h | Accuracy 4h | Accuracy 24h |', '|---|---:|---:|---:|---:|');
     for (const variant of VARIANTS) {
       const result = data[variant.key];
-      lines.push(`| ${variant.label} | ${result.coveragePct ?? 'N/A'}% | ${result.combinedAccuracy4hPct ?? 'N/A'}% | ${result.combinedAccuracy24hPct ?? 'N/A'}% |`);
+      lines.push(`| ${variant.label} | ${result.coveragePct ?? 'N/A'}% | ${result.combinedAccuracy1hPct ?? 'N/A'}% | ${result.combinedAccuracy4hPct ?? 'N/A'}% | ${result.combinedAccuracy24hPct ?? 'N/A'}% |`);
     }
     lines.push('');
   }
@@ -386,7 +406,7 @@ async function main() {
       candleLimit: CANDLE_LIMIT,
       confirmations: CONFIRMATIONS,
       minimumConfidence: MIN_CONFIDENCE,
-      forwardHorizons: ['4h', '24h'],
+      forwardHorizons: ['1h', '4h', '24h'],
       noLookahead: true,
       scope: 'direction classification; not full grid execution PnL',
     },

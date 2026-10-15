@@ -65,3 +65,16 @@ test('explicit consensus requires 4h and one lower timeframe', () => {
   aggregate.timeframes['4h'].direction = 'RANGING';
   assert.equal(directionForVariant({ consensus: true }, aggregate, 'BULLISH'), 'RANGING');
 });
+
+test('mean-reversion variant reverses a qualified directional signal', () => {
+  const aggregate = { confidence: 0.8, alignment: 0.75, timeframes: {} };
+
+  assert.equal(
+    directionForVariant({ minimumAlignment: 0, invert: true }, aggregate, 'BULLISH'),
+    'BEARISH'
+  );
+  assert.equal(
+    directionForVariant({ minimumAlignment: 0, invert: true }, aggregate, 'BEARISH'),
+    'BULLISH'
+  );
+});
