@@ -231,7 +231,7 @@ Trailing range hanya berlaku untuk auto range. Manual range tidak digeser oleh t
 - `GRID_POST_ONLY`: gunakan maker/post-only order jika exchange mendukung.
 - `GRID_PRICE_PRECISION_MAX_DEVIATION_PCT`: toleransi perubahan harga setelah dibulatkan mengikuti precision exchange.
 - `FUTURES_SELL_ENTRY_FLOOR_ENABLED`: futures saja, default `true`. Target SELL baru harus berada di atas entry rata-rata LONG Binance. Order SELL aktif yang turun di bawah entry rata-rata setelah BUY tambahan akan dibatalkan dan dibuat ulang pada siklus rekonsiliasi berikutnya.
-- `FUTURES_MUTUAL_EXCLUSION_ENABLED`: futures saja, default `true`. Satu pair hanya boleh memiliki entry LONG atau SHORT. Exit kedua sisi tidak pernah diblokir.
+- `FUTURES_MUTUAL_EXCLUSION_ENABLED`: futures saja, default `false`. LONG dan SHORT boleh memiliki posisi bersamaan pada pair yang sama; entry SHORT tetap mengikuti `FUTURES_SHORT_ENTRY_DIRECTION`. Ubah ke `true` jika satu pair hanya boleh ditempati salah satu sisi. Exit kedua sisi tidak pernah diblokir.
 - `FUTURES_MUTUAL_ENTRY_LOCK_FILE`: prefix lock atomik lintas worker untuk mencegah race saat entry.
 - `FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS`: batas tunggu lock entry lintas worker. Jika timeout atau status sisi lawan gagal diverifikasi, entry diblokir.
 - `BINANCE_SPOT_MAKER_FEE_RATE`: asumsi fee maker Binance Spot per sisi untuk prompt AI. Default `0.001` atau 0.1%; gunakan `0.00075` jika fee dibayar pakai BNB dengan diskon 25%, atau sesuaikan dengan tier VIP/pair akun.

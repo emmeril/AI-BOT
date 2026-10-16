@@ -119,7 +119,7 @@ const ORDER_ID_PREFIX = POSITION_SIDE === 'SHORT' ? 'sgrid' : 'grid';
 const FUTURES_SHORT_ENTRY_DIRECTION = Config.get(
   'FUTURES_SHORT_ENTRY_DIRECTION', 'BEARISH'
 ).toUpperCase();
-const FUTURES_MUTUAL_EXCLUSION_ENABLED = Config.boolean('FUTURES_MUTUAL_EXCLUSION_ENABLED', true);
+const FUTURES_MUTUAL_EXCLUSION_ENABLED = Config.boolean('FUTURES_MUTUAL_EXCLUSION_ENABLED', false);
 const FUTURES_MUTUAL_ENTRY_LOCK_PATH = path.resolve(
   process.cwd(), Config.get('FUTURES_MUTUAL_ENTRY_LOCK_FILE', 'futures-mutual-entry')
 );
