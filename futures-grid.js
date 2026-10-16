@@ -3614,6 +3614,36 @@ class FuturesGridEngine {
     return false;
   }
 
+  consumeTrackedPositionForExit(symState, exitAmount) {
+    const entries = Object.entries(symState.lastBuyByLevel || {});
+    const trackedAmount = entries.reduce(
+      (sum, [, entry]) => sum + Math.max(0, Number(entry.sellableAmount ?? entry.amount) || 0),
+      0
+    );
+    const amount = Math.max(0, Number(exitAmount) || 0);
+    if (!(trackedAmount > 0) || !(amount > 0)) return 0;
+
+    const consumedRatio = Math.min(amount / trackedAmount, 1);
+    let allocatedEntryFee = 0;
+    for (const [levelIndex, entry] of entries) {
+      const entryFee = Math.max(0, Number(entry.totalFeeQuote) || 0);
+      allocatedEntryFee += entryFee * consumedRatio;
+      const remainingRatio = 1 - consumedRatio;
+      if (remainingRatio <= 1e-12) {
+        delete symState.lastBuyByLevel[levelIndex];
+        continue;
+      }
+      symState.lastBuyByLevel[levelIndex] = {
+        ...entry,
+        amount: (Number(entry.amount) || 0) * remainingRatio,
+        sellableAmount: (Number(entry.sellableAmount ?? entry.amount) || 0) * remainingRatio,
+        totalCostQuote: (Number(entry.totalCostQuote) || 0) * remainingRatio,
+        totalFeeQuote: entryFee * remainingRatio,
+      };
+    }
+    return allocatedEntryFee;
+  }
+
   async handleExitFill(symbol, symState, trade, openOrderIds) {
     const price = Number(trade.price);
     const base = this.getBaseAsset(symbol);
@@ -3626,7 +3656,8 @@ class FuturesGridEngine {
       quote
     );
     const realizedPnl = Number(trade.info?.realizedPnl ?? trade.info?.realizedProfit ?? 0);
-    const netExitProfit = realizedPnl - feeQuote;
+    const allocatedEntryFee = this.consumeTrackedPositionForExit(symState, trade.amount);
+    const netExitProfit = realizedPnl - feeQuote - allocatedEntryFee;
 
     symState.realizedExitProfit += netExitProfit;
     symState.tradingFees += feeQuote;
@@ -3805,6 +3836,7 @@ class FuturesGridEngine {
         this.state.markProcessedTradeLocal(symbol, id);
         continue;
       }
+      const side = String(trade.side).toLowerCase();
 
       // Attempt to get order metadata from state, falling back to clientOrderId
       // embedded in the trade so fills are never lost across restarts.
@@ -3838,6 +3870,14 @@ class FuturesGridEngine {
         const resolvedClientId = String(
           trade.info?.clientOrderId || trade.clientOrderId || clientId
         );
+        if (!resolvedClientId && side === EXIT_SIDE) {
+          console.warn(
+            `[MANUAL-EXIT] ${symbol} ${POSITION_SIDE} trade ${id} has no bot clientOrderId; ` +
+            'recording Binance realized PnL and consuming tracked position inventory'
+          );
+          await this.handleExitFill(symbol, symState, trade, openOrderIds);
+          continue;
+        }
         if (!resolvedClientId) throw new Error(`Missing clientOrderId for ${symbol} filled order ${tradeOrderId}`);
         const recoveredMeta = this.getBotOrderMeta({ clientOrderId: resolvedClientId });
         if (recoveredMeta) {
@@ -3851,6 +3891,13 @@ class FuturesGridEngine {
         } else if (resolvedClientId.startsWith(`${ORDER_ID_PREFIX}-`) &&
             resolvedClientId.includes(`-${EXIT_SIDE[0]}-exit-`)) {
           orderMeta = { side: EXIT_SIDE, isPositionExit: true };
+        } else if (side === EXIT_SIDE) {
+          console.warn(
+            `[MANUAL-EXIT] ${symbol} ${POSITION_SIDE} trade ${id} is not a bot order; ` +
+            'recording Binance realized PnL and consuming tracked position inventory'
+          );
+          await this.handleExitFill(symbol, symState, trade, openOrderIds);
+          continue;
         } else {
           // Cannot determine which grid level this fill belongs to; skip it
           // but mark as processed so we don't retry on every cycle.
@@ -3863,7 +3910,6 @@ class FuturesGridEngine {
         }
       }
 
-      const side = String(trade.side).toLowerCase();
       if (side === EXIT_SIDE && !orderMeta.isPositionExit) {
         orderMeta = this.remapDelayedSellOrderMeta(symbol, symState, trade, orderMeta);
         orderMetadataById.set(tradeOrderId, orderMeta);

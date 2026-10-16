@@ -171,6 +171,38 @@ test('futures fill recovery fetches the closed order when trade metadata lacks c
   assert.equal(symState.lastTradeTimestamp, 12345);
 });
 
+test('manual position exit without a bot client order id is included in strategy PnL', async () => {
+  const symState = { orders: {}, lastTradeTimestamp: 0 };
+  const engine = Object.create(FuturesGridEngine.prototype);
+  let handledTrade = null;
+  engine.exchange = {
+    fetchOpenOrders: async () => [],
+    fetchOrder: async () => ({ id: 'manual-order-1', clientOrderId: '' }),
+  };
+  engine.state = {
+    getSymbol: () => symState,
+    processedTrade: () => false,
+    save: async () => {},
+  };
+  engine.fetchNewTrades = async () => ({
+    trades: [{
+      id: 'manual-fill-1', order: 'manual-order-1', timestamp: 12345,
+      side: 'sell', amount: 0.25, info: { positionSide: 'LONG', realizedPnl: '-2' },
+    }],
+    holdWatermark: false,
+  });
+  engine.getQuoteAsset = () => 'USDT';
+  engine.getBaseAsset = () => 'BTC';
+  engine.cacheFeeTokenPrice = async () => {};
+  engine.handleExitFill = async (_symbol, _state, trade) => { handledTrade = trade; };
+  engine.syncManagedOrdersWithExchange = async () => {};
+
+  await engine.handleFilledTrades('BTC/USDT:USDT', [90, 100, 110], []);
+
+  assert.equal(handledTrade.id, 'manual-fill-1');
+  assert.equal(symState.lastTradeTimestamp, 12345);
+});
+
 test('paused futures reconciliation syncs fills and funding without fetching range context', async () => {
   const engine = Object.create(FuturesGridEngine.prototype);
   let handledFills = false;

@@ -118,6 +118,14 @@ test('SHORT market exit is counted as a BUY fill', async () => {
   const engine = shortEngine();
   const symState = {
     orders: {},
+    lastBuyByLevel: {
+      2: {
+        amount: 1,
+        sellableAmount: 1,
+        totalCostQuote: 110,
+        totalFeeQuote: 0.022,
+      },
+    },
     filledBuys: 0,
     filledSells: 0,
     realizedExitProfit: 0,
@@ -137,5 +145,6 @@ test('SHORT market exit is counted as a BUY fill', async () => {
 
   assert.equal(symState.filledBuys, 1);
   assert.equal(symState.filledSells, 0);
-  assert.ok(Math.abs(symState.realizedExitProfit - 9.98) < 1e-9);
+  assert.ok(Math.abs(symState.realizedExitProfit - 9.958) < 1e-9);
+  assert.deepEqual(symState.lastBuyByLevel, {});
 });
