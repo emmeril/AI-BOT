@@ -63,8 +63,8 @@ node index.js
 ### Versi Futures USD-M
 
 Implementasi futures terpisah tersedia di `futures-grid.js`. Bot memakai Binance
-USD-M perpetual dan Hedge Mode. Proses utama mengelola sisi `LONG`. Proses
-kedua yang terisolasi dapat mengelola sisi `SHORT`. Mulai dengan
+USD-M perpetual dan Hedge Mode. Satu supervisor menjalankan worker `LONG` dan
+`SHORT` yang masing-masing tetap memiliki state dan lock terisolasi. Mulai dengan
 credential Binance Futures Demo Trading dan simbol unified CCXT seperti
 `BTC/USDT:USDT`.
 
@@ -72,10 +72,20 @@ credential Binance Futures Demo Trading dan simbol unified CCXT seperti
 npm run start:futures
 ```
 
+Untuk menjalankan LONG dan SHORT dari satu aplikasi PM2:
+
+```bash
+npm run start:futures:dual
+```
+
 SHORT memakai state, lock, dan prefix client order terpisah. Entry memakai
 `SELL positionSide=SHORT`, sedangkan exit profit memakai `BUY positionSide=SHORT`.
-Default live SHORT dibatasi 60 USDT notional per pair, 10 grid, dan hanya membuka
-entry ketika strategi Fibonacci mean-reversion menghasilkan arah `BEARISH`.
+Default live SHORT dibatasi 60 USDT notional per pair dan 10 grid. Mutual
+exclusion memberikan kepemilikan pair kepada SHORT saat arah Fibonacci
+`BEARISH`, dan kepada LONG pada arah lainnya. Pending entry sisi lama dibatalkan,
+tetapi posisi yang sudah aktif tetap memakai exit normal sampai selesai. Lock
+lintas worker memastikan kedua sisi tidak dapat membuka pair yang sama secara
+bersamaan.
 
 ```bash
 npm run start:futures:short
@@ -221,6 +231,9 @@ Trailing range hanya berlaku untuk auto range. Manual range tidak digeser oleh t
 - `GRID_POST_ONLY`: gunakan maker/post-only order jika exchange mendukung.
 - `GRID_PRICE_PRECISION_MAX_DEVIATION_PCT`: toleransi perubahan harga setelah dibulatkan mengikuti precision exchange.
 - `FUTURES_SELL_ENTRY_FLOOR_ENABLED`: futures saja, default `true`. Target SELL baru harus berada di atas entry rata-rata LONG Binance. Order SELL aktif yang turun di bawah entry rata-rata setelah BUY tambahan akan dibatalkan dan dibuat ulang pada siklus rekonsiliasi berikutnya.
+- `FUTURES_MUTUAL_EXCLUSION_ENABLED`: futures saja, default `true`. Satu pair hanya boleh memiliki entry LONG atau SHORT. Exit kedua sisi tidak pernah diblokir.
+- `FUTURES_MUTUAL_ENTRY_LOCK_FILE`: prefix lock atomik lintas worker untuk mencegah race saat entry.
+- `FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS`: batas tunggu lock entry lintas worker. Jika timeout atau status sisi lawan gagal diverifikasi, entry diblokir.
 - `BINANCE_SPOT_MAKER_FEE_RATE`: asumsi fee maker Binance Spot per sisi untuk prompt AI. Default `0.001` atau 0.1%; gunakan `0.00075` jika fee dibayar pakai BNB dengan diskon 25%, atau sesuaikan dengan tier VIP/pair akun.
 - `GRID_MIN_NET_PROFIT_PCT`: target profit bersih minimum per jarak grid setelah fee buy+sell. Default `0.05` atau 0.05%.
 

@@ -69,6 +69,7 @@ test('SHORT exposure counts only SHORT positions and pending SELL entries', () =
 
 function riskEngine() {
   const engine = Object.create(FuturesGridEngine.prototype);
+  engine.mutualExclusionEnabled = false;
   engine.exposureLimits = { symbol: 100, total: 150 };
   engine.makeClientOrderId = () => 'test';
   const submitted = [];
@@ -77,6 +78,56 @@ function riskEngine() {
   engine.exchange = { createLimitOrder: async (...args) => { submitted.push(args); used += Number(args[2]) * Number(args[3]); return { id: 'ok' }; } };
   return { engine, submitted };
 }
+
+function mutualEngine(direction = 'RANGING') {
+  const engine = Object.create(FuturesGridEngine.prototype);
+  engine.mutualExclusionEnabled = true;
+  engine.mutualEntryMutex = { run: (_symbol, fn) => fn() };
+  engine.appliedFibonacciDirections = new Map([[symbol, direction]]);
+  engine.exposureLimits = null;
+  engine.makeClientOrderId = () => 'grid-test-b-0-r0-test';
+  engine.exchange = {
+    fetchPositions: async () => [],
+    fetchOpenOrders: async () => [],
+    createLimitOrder: async (...args) => ({ id: 'submitted', args }),
+  };
+  return engine;
+}
+
+test('mutual ownership blocks LONG entries on BEARISH but never blocks LONG exits', async () => {
+  const engine = mutualEngine('BEARISH');
+  assert.equal(await engine.createFuturesLimitOrder(symbol, 'buy', 1, 100, 0), null);
+  assert.ok(await engine.createFuturesLimitOrder(symbol, 'sell', 1, 110, 1));
+});
+
+test('mutual lock blocks LONG entry while the opposite SHORT side has exposure', async () => {
+  const engine = mutualEngine();
+  engine.exchange.fetchPositions = async () => [
+    { symbol, side: 'short', contracts: 1, entryPrice: 110 },
+  ];
+  assert.equal(await engine.createFuturesLimitOrder(symbol, 'buy', 1, 100, 0), null);
+
+  engine.exchange.fetchPositions = async () => [];
+  engine.exchange.fetchOpenOrders = async () => [
+    { id: 'short-entry', symbol, side: 'sell', remaining: 1, info: { positionSide: 'SHORT' } },
+  ];
+  assert.equal(await engine.createFuturesLimitOrder(symbol, 'buy', 1, 100, 0), null);
+
+  engine.exchange.fetchOpenOrders = async () => [];
+  assert.ok(await engine.createFuturesLimitOrder(symbol, 'buy', 1, 100, 0));
+});
+
+test('mutual handoff cancels entries and preserves exits', async () => {
+  const engine = mutualEngine('BEARISH');
+  const cancelled = [];
+  engine.cancelOrder = async (_symbol, order) => cancelled.push(order.id);
+  const changed = await engine.cancelManagedEntryOrders(symbol, [
+    { id: 'entry', side: 'buy' },
+    { id: 'exit', side: 'sell' },
+  ], 'handoff');
+  assert.equal(changed, true);
+  assert.deepEqual(cancelled, ['entry']);
+});
 
 test('concurrent BUYs serialize exposure checks; SELL bypasses caps and failed risk reads', async () => {
   const { engine, submitted } = riskEngine();

@@ -8,6 +8,8 @@ const symbol = 'TEST/USDT:USDT';
 
 function shortEngine() {
   const engine = Object.create(FuturesGridEngine.prototype);
+  engine.mutualExclusionEnabled = false;
+  engine.appliedFibonacciDirections = new Map([[symbol, 'BEARISH']]);
   engine.exchange = {
     markets: { [symbol]: { precision: { price: 0.01 }, limits: { cost: { min: 5 } } } },
     priceToPrecision: (_symbol, value) => Number(value).toFixed(2),
@@ -17,6 +19,32 @@ function shortEngine() {
   engine.sellTargetWarnings = new Set();
   return engine;
 }
+
+test('mutual ownership blocks SHORT unless direction is BEARISH and LONG exposure is clear', async () => {
+  const engine = shortEngine();
+  engine.mutualExclusionEnabled = true;
+  engine.mutualEntryMutex = { run: (_symbol, fn) => fn() };
+  engine.exposureLimits = null;
+  engine.makeClientOrderId = () => 'sgrid-test-s-0-r0-test';
+  let submitted = 0;
+  engine.exchange.createLimitOrder = async () => {
+    submitted += 1;
+    return { id: 'submitted' };
+  };
+  engine.exchange.fetchOpenOrders = async () => [];
+  engine.exchange.fetchPositions = async () => [
+    { symbol, side: 'long', contracts: 1, entryPrice: 100 },
+  ];
+
+  assert.equal(await engine.createFuturesLimitOrder(symbol, 'sell', 1, 110, 0), null);
+  engine.exchange.fetchPositions = async () => [];
+  assert.ok(await engine.createFuturesLimitOrder(symbol, 'sell', 1, 110, 0));
+
+  engine.appliedFibonacciDirections.set(symbol, 'RANGING');
+  assert.equal(await engine.createFuturesLimitOrder(symbol, 'sell', 1, 110, 0), null);
+  assert.ok(await engine.createFuturesLimitOrder(symbol, 'buy', 1, 100, 1));
+  assert.equal(submitted, 2);
+});
 
 test('SHORT orders use an isolated client prefix and explicit position side', async () => {
   const engine = shortEngine();

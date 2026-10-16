@@ -8,6 +8,7 @@
     "start:futures": "node futures-grid.js",
     "start:futures:live": "DOTENV_CONFIG_PATH=.env.futures node -r dotenv/config futures-grid.js",
     "start:futures:short": "node scripts/start-futures-short.js",
+    "start:futures:dual": "node scripts/start-futures-dual.js",
     "backtest:fibonacci-direction": "node scripts/backtest-fibonacci-direction.js",
     "backtest:adaptive-supervisor": "node scripts/backtest-adaptive-grid-supervisor.js",
     "backtest:adaptive-deterministic": "BACKTEST_DETERMINISTIC_ONLY=true node scripts/backtest-adaptive-variants.js",

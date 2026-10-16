@@ -29,6 +29,7 @@ const {
 const { syncIncome, incomeMetrics } = require('./src/futures-income');
 const { exposureBySymbol } = require('./src/futures-exposure');
 const { displayNumber, signedUsdt, sellOverview, sellFillMessage } = require('./src/futures-display');
+const { CrossProcessMutex } = require('./src/cross-process-mutex');
 const futuresTelegramCommandPath = path.resolve(process.cwd(), 'futures-telegram-command.json');
 
 // Tracks, per async call chain, which symbols' locks are currently held by
@@ -118,6 +119,13 @@ const ORDER_ID_PREFIX = POSITION_SIDE === 'SHORT' ? 'sgrid' : 'grid';
 const FUTURES_SHORT_ENTRY_DIRECTION = Config.get(
   'FUTURES_SHORT_ENTRY_DIRECTION', 'BEARISH'
 ).toUpperCase();
+const FUTURES_MUTUAL_EXCLUSION_ENABLED = Config.boolean('FUTURES_MUTUAL_EXCLUSION_ENABLED', true);
+const FUTURES_MUTUAL_ENTRY_LOCK_PATH = path.resolve(
+  process.cwd(), Config.get('FUTURES_MUTUAL_ENTRY_LOCK_FILE', 'futures-mutual-entry')
+);
+const FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS = Math.max(
+  Config.number('FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS', 30000), 1
+);
 const INTERVAL_MINUTES = Config.number('INTERVAL_MINUTES', 1);
 const INTERVAL_MS = INTERVAL_MINUTES * MINUTE_MS;
 const FUTURES_USER_STREAM_ENABLED = Config.boolean('FUTURES_USER_STREAM_ENABLED', true);
@@ -1130,6 +1138,10 @@ class FuturesGridEngine {
     this.adaptiveGridDecisions = new Map();
     this.lastFibonacciDirectionLog = new Map();
     this.appliedFibonacciDirections = new Map();
+    this.mutualExclusionEnabled = FUTURES_MUTUAL_EXCLUSION_ENABLED;
+    this.mutualEntryMutex = new CrossProcessMutex(FUTURES_MUTUAL_ENTRY_LOCK_PATH, {
+      timeoutMs: FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS,
+    });
     this.adaptiveSupervisorOutcomeJournal = new AdaptiveSupervisorOutcomeJournal({
       enabled: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED,
       mode: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_MODE,
@@ -2509,6 +2521,58 @@ class FuturesGridEngine {
     return String(order.clientOrderId || order.info?.clientOrderId || order.info?.origClientOrderId || '');
   }
 
+  getOrderPositionSide(order) {
+    const explicitSide = String(
+      order.positionSide || order.info?.positionSide || order.info?.ps || ''
+    ).toUpperCase();
+    if (explicitSide === 'LONG' || explicitSide === 'SHORT') return explicitSide;
+    const clientOrderId = this.getOrderClientId(order);
+    if (clientOrderId.startsWith('sgrid-')) return 'SHORT';
+    if (clientOrderId.startsWith('grid-')) return 'LONG';
+    return '';
+  }
+
+  getAppliedFibonacciDirection(symbol) {
+    const current = this.appliedFibonacciDirections?.get(symbol);
+    if (current) return current;
+    const persisted = this.state?.getSymbol?.(symbol)?.config?.rangeAdvisor?.directionApplied;
+    return persisted || 'RANGING';
+  }
+
+  isEntrySidePreferred(symbol) {
+    const direction = this.getAppliedFibonacciDirection(symbol);
+    const shortPreferred = FUTURES_SHORT_ENTRY_DIRECTION === 'ALWAYS' ||
+      direction === FUTURES_SHORT_ENTRY_DIRECTION;
+    if (!this.mutualExclusionEnabled) {
+      return POSITION_SIDE === 'LONG' || shortPreferred;
+    }
+    return POSITION_SIDE === 'SHORT' ? shortPreferred : !shortPreferred;
+  }
+
+  async findOppositeSideConflict(symbol) {
+    const oppositePositionSide = POSITION_SIDE === 'SHORT' ? 'LONG' : 'SHORT';
+    const oppositeEntrySide = oppositePositionSide === 'SHORT' ? 'sell' : 'buy';
+    const [positions, openOrders] = await Promise.all([
+      retry(() => this.exchange.fetchPositions([symbol])),
+      retry(() => this.exchange.fetchOpenOrders(symbol)),
+    ]);
+    const position = positions.find(item => {
+      const itemSymbol = item.symbol || item.info?.symbol;
+      const itemSide = String(item.side || item.positionSide || item.info?.positionSide || '').toUpperCase();
+      const contracts = Math.abs(Number(item.contracts ?? item.info?.positionAmt) || 0);
+      return itemSymbol === symbol && itemSide === oppositePositionSide && contracts > 0;
+    });
+    if (position) return `${oppositePositionSide} position is still open`;
+
+    const entryOrder = openOrders.find(order => {
+      const side = String(order.side).toLowerCase();
+      return this.getOrderPositionSide(order) === oppositePositionSide &&
+        side === oppositeEntrySide && this.getOpenOrderRemainingAmount(order) > 0;
+    });
+    if (entryOrder) return `${oppositePositionSide} entry order ${entryOrder.id} is still open`;
+    return null;
+  }
+
   getBotOrderLevel(order) {
     return this.getBotOrderMeta(order)?.levelIndex ?? null;
   }
@@ -2578,6 +2642,23 @@ class FuturesGridEngine {
     return result;
   }
 
+  async cancelManagedEntryOrders(symbol, managedOrders, reason) {
+    let changed = false;
+    for (const order of managedOrders) {
+      if (String(order.side).toLowerCase() !== ENTRY_SIDE) continue;
+      try {
+        await this.cancelOrder(symbol, order, `${reason}; ${EXIT_SIDE.toUpperCase()} exits preserved`);
+        changed = true;
+      } catch (err) {
+        console.warn(
+          `[MUTUAL] ${symbol} could not cancel ${ENTRY_SIDE.toUpperCase()} entry ${order.id}: ` +
+          `${err.message}; ${EXIT_SIDE.toUpperCase()} exit reconciliation continues`
+        );
+      }
+    }
+    return changed;
+  }
+
   async cancelOrder(symbol, order, reason) {
     if (!this.exchange?.cancelOrder) return;
     await retry(() => this.exchange.cancelOrder(order.id, symbol));
@@ -2607,8 +2688,34 @@ class FuturesGridEngine {
       price,
       orderParams
     );
-    if (side !== ENTRY_SIDE || !this.exposureLimits) return submit();
-    return this.withExposureLock(async () => {
+    if (side !== ENTRY_SIDE) return submit();
+    if (!this.isEntrySidePreferred(symbol)) {
+      console.warn(
+        `[MUTUAL] ${symbol} ${ENTRY_SIDE.toUpperCase()} entry blocked: ` +
+        `${POSITION_SIDE} does not own direction ${this.getAppliedFibonacciDirection(symbol)}`
+      );
+      return null;
+    }
+
+    const verifyAndSubmit = () => this.withExposureLock(async () => {
+      if (this.mutualExclusionEnabled) {
+        let conflict;
+        try {
+          conflict = await this.findOppositeSideConflict(symbol);
+        } catch (err) {
+          console.warn(
+            `[MUTUAL] ${symbol} ${ENTRY_SIDE.toUpperCase()} entry blocked: ` +
+            `cannot verify opposite side (${err.message})`
+          );
+          return null;
+        }
+        if (conflict) {
+          console.warn(`[MUTUAL] ${symbol} ${ENTRY_SIDE.toUpperCase()} entry blocked: ${conflict}`);
+          return null;
+        }
+      }
+
+      if (!this.exposureLimits) return submit();
       let exposure;
       try { exposure = await this.fetchExposure(); } catch (err) {
         console.warn(`[EXPOSURE] ${symbol} ${ENTRY_SIDE.toUpperCase()} blocked: cannot verify exposure (${err.message})`);
@@ -2622,6 +2729,17 @@ class FuturesGridEngine {
       }
       return submit();
     });
+
+    if (!this.mutualExclusionEnabled) return verifyAndSubmit();
+    try {
+      return await this.mutualEntryMutex.run(symbol, verifyAndSubmit);
+    } catch (err) {
+      console.warn(
+        `[MUTUAL] ${symbol} ${ENTRY_SIDE.toUpperCase()} entry blocked: ` +
+        `cannot acquire cross-worker lock (${err.message})`
+      );
+      return null;
+    }
   }
 
   async withExposureLock(fn) {
@@ -3965,6 +4083,18 @@ class FuturesGridEngine {
       managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
     }
 
+    const entrySidePreferred = this.isEntrySidePreferred(symbol);
+    if (!entrySidePreferred) {
+      const direction = this.getAppliedFibonacciDirection(symbol);
+      if (await this.cancelManagedEntryOrders(
+        symbol, managedOrders, `mutual ownership moved to SHORT (${direction})`
+      )) {
+        freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+        managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+      }
+      console.log(`[MUTUAL] ${symbol} LONG entries paused; direction=${direction}`);
+    }
+
     if (GRID_CANCEL_OUT_OF_RANGE) {
       for (const order of managedOrders) {
         if (order.side === 'sell') continue;
@@ -3997,9 +4127,9 @@ class FuturesGridEngine {
     );
     if (stagedExitGroups > 0) await this.state.save();
 
-    const below = this.getBuyPlacementLevels(
-      symbol, levels, currentPrice, GRID_MAX_ACTIVE_BUY_ORDERS
-    );
+    const below = entrySidePreferred
+      ? this.getBuyPlacementLevels(symbol, levels, currentPrice, GRID_MAX_ACTIVE_BUY_ORDERS)
+      : [];
 
     let quoteFree = this.getQuoteFree(balance, symbol);
     const positionAmount = this.getBaseFree(positions, symbol);
@@ -4170,6 +4300,18 @@ class FuturesGridEngine {
       managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
     }
 
+    const entrySidePreferred = this.isEntrySidePreferred(symbol);
+    if (!entrySidePreferred) {
+      const direction = this.getAppliedFibonacciDirection(symbol);
+      if (await this.cancelManagedEntryOrders(
+        symbol, managedOrders, `mutual ownership moved to LONG (${direction})`
+      )) {
+        freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+        managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+      }
+      console.log(`[MUTUAL] ${symbol} SHORT entries paused; direction=${direction}`);
+    }
+
     if (GRID_CANCEL_OUT_OF_RANGE) {
       for (const order of managedOrders) {
         if (String(order.side).toLowerCase() !== ENTRY_SIDE) continue;
@@ -4198,18 +4340,9 @@ class FuturesGridEngine {
       }
     }
 
-    const appliedDirection = this.appliedFibonacciDirections.get(symbol) || 'RANGING';
-    const shortEntryAllowed = FUTURES_SHORT_ENTRY_DIRECTION === 'ALWAYS' ||
-      appliedDirection === FUTURES_SHORT_ENTRY_DIRECTION;
-    const entries = shortEntryAllowed
+    const entries = entrySidePreferred
       ? this.getNearestLevels(levels, currentPrice, ENTRY_SIDE, GRID_MAX_ACTIVE_BUY_ORDERS)
       : [];
-    if (!shortEntryAllowed) {
-      console.log(
-        `[SHORT-GATE] ${symbol} no new SELL entries: applied direction=${appliedDirection}, ` +
-        `required=${FUTURES_SHORT_ENTRY_DIRECTION}`
-      );
-    }
     let quoteFree = this.getQuoteFree(balance, symbol);
     let remainingInvestment = this.getRemainingInvestmentUsdt(symbol);
     for (const level of entries) {
@@ -4846,6 +4979,9 @@ Symbols: ${SYMBOLS.join(', ')}
 Leverage: ${LEVERAGE}x
 Margin Mode: ${MARGIN_MODE}
 Position Mode: HEDGE (trading ${POSITION_SIDE} side only)
+Mutual Side Exclusion: ${FUTURES_MUTUAL_EXCLUSION_ENABLED
+      ? `ON (Fibonacci ownership; cross-worker lock timeout=${FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS}ms)`
+      : 'OFF'}
 Grid Mode: ${GRID_MODE}
 Grid Count: ${GRID_COUNT}
 Order Size: ${this.getOrderSizeUsdt()} USDT/grid
