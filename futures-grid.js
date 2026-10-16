@@ -2734,6 +2734,7 @@ class FuturesGridEngine {
     try {
       return await this.mutualEntryMutex.run(symbol, verifyAndSubmit);
     } catch (err) {
+      if (!err.crossProcessMutexAcquire) throw err;
       console.warn(
         `[MUTUAL] ${symbol} ${ENTRY_SIDE.toUpperCase()} entry blocked: ` +
         `cannot acquire cross-worker lock (${err.message})`

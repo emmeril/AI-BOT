@@ -97,11 +97,21 @@ class CrossProcessMutex {
   }
 
   async run(key, fn) {
-    const lock = await this.acquire(key);
+    let lock;
+    try {
+      lock = await this.acquire(key);
+    } catch (error) {
+      error.crossProcessMutexAcquire = true;
+      throw error;
+    }
     try {
       return await fn();
     } finally {
-      await this.release(lock);
+      try {
+        await this.release(lock);
+      } catch (error) {
+        console.warn(`[MUTEX] Could not release ${lock.lockPath}: ${error.message}`);
+      }
     }
   }
 }
