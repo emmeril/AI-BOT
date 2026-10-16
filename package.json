@@ -17,6 +17,7 @@
     "backtest:full-grid-pnl": "node scripts/backtest-adaptive-variants.js",
     "backtest:adaptive-variants": "node scripts/backtest-adaptive-variants.js",
     "backtest:risk-state-machine": "node scripts/backtest-full-grid-pnl.js",
+    "backtest:mutual-handoff": "node scripts/backtest-mutual-handoff.js",
     "reconcile:inventory": "node scripts/reconcile-spot-inventory.js",
     "test": "node --test"
   },
