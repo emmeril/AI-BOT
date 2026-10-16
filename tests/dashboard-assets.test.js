@@ -38,6 +38,11 @@ test('futures dashboard combines LONG and SHORT with accessible side filters', (
   assert.match(html, /role="tablist" aria-label="Filter sisi posisi"/);
   assert.match(html, /data-position-side="LONG"/);
   assert.match(html, /data-position-side="SHORT"/);
+  assert.match(html, /<span>LONG<\/span><small>BUY → SELL<\/small>/);
+  assert.match(html, /<span>SHORT<\/span><small>SELL → BUY<\/small>/);
+  assert.match(html, /<header class="topbar">[\s\S]*<nav class="position-tabs"[\s\S]*<div class="top-actions">/);
+  assert.match(css, /\.position-tabs\{[^}]*justify-self:center;[^}]*width:min\(100%,220px\);height:44px;margin:0/);
+  assert.match(css, /\.position-tab\{[^}]*flex-direction:column;align-items:center;justify-content:center/);
   assert.match(html, /id="combined-exposure"/);
   assert.match(html, /id="long-pnl"/);
   assert.match(html, /id="short-pnl"/);
