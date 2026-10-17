@@ -136,8 +136,9 @@ function volumeDeltaFromState(symState, positionSide) {
   const side = String(positionSide || 'LONG').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
   const prefix = side === 'SHORT' ? 'SHORT_' : '';
   const persisted = symState?.config?.volumeDeltaEntryGuard || null;
+  const configuredEnabled = process.env[`${prefix}VOLUME_DELTA_ENTRY_FILTER_ENABLED`];
   const enabled = booleanValue(
-    persisted?.enabled ?? process.env[`${prefix}VOLUME_DELTA_ENTRY_FILTER_ENABLED`],
+    configuredEnabled === undefined ? persisted?.enabled : configuredEnabled,
     false
   );
   const lookbackCandles = numberOrZero(
@@ -209,6 +210,9 @@ function decisionSnapshot(engine, symbol, symState, orders, position, options = 
   const minConfidence = numberOrZero(process.env.FIBONACCI_DIRECTION_MIN_CONFIDENCE || 0.65);
   const applyMode = String(process.env.FIBONACCI_DIRECTION_APPLY_MODE || 'REPORT_ONLY').toUpperCase();
   const directionStrategy = String(process.env.FIBONACCI_DIRECTION_STRATEGY || 'TREND').toUpperCase();
+  const requiredEntryDirection = positionSide === 'SHORT'
+    ? String(process.env.SHORT_FUTURES_SHORT_ENTRY_DIRECTION || 'BEARISH').toUpperCase()
+    : String(process.env.FUTURES_LONG_ENTRY_DIRECTION || 'BULLISH').toUpperCase();
   const appliedDirection = persistedFibonacci?.appliedDirection || (applyMode === 'LEVEL_BIAS'
     ? resolveAppliedDirection(fibonacci, {
       strategy: directionStrategy,
@@ -231,6 +235,8 @@ function decisionSnapshot(engine, symbol, symState, orders, position, options = 
       direction: fibonacci?.direction || 'UNKNOWN',
       confirmedDirection: fibonacci?.confirmedDirection || 'RANGING',
       appliedDirection,
+      requiredEntryDirection,
+      entryDirectionAllowed: requiredEntryDirection === 'ALWAYS' || appliedDirection === requiredEntryDirection,
       strategy: fibonacci?.strategy || directionStrategy,
       score: fibonacci?.score ?? null,
       confidence: fibonacci?.confidence ?? null,

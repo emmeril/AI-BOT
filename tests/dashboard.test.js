@@ -224,6 +224,8 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
   assert.equal(snapshot.intelligence.execution.entrySide, 'sell');
   assert.equal(snapshot.intelligence.execution.exitSide, 'buy');
   assert.equal(snapshot.intelligence.fibonacci.appliedDirection, 'BEARISH');
+  assert.equal(snapshot.intelligence.fibonacci.requiredEntryDirection, 'BEARISH');
+  assert.equal(snapshot.intelligence.fibonacci.entryDirectionAllowed, true);
   assert.equal(snapshot.intelligence.volumeDelta.enabled, true);
   assert.equal(snapshot.intelligence.volumeDelta.allow, false);
   assert.equal(snapshot.intelligence.volumeDelta.deltaRatio, 0.33683);
@@ -263,6 +265,8 @@ test('futures decision snapshot exposes deterministic flow and SELL coverage wit
       { side: 'sell', price: 2, remaining: 8 },
     ], { contracts: 10 });
     assert.equal(result.fibonacci.appliedDirection, 'BEARISH');
+    assert.equal(result.fibonacci.requiredEntryDirection, 'BULLISH');
+    assert.equal(result.fibonacci.entryDirectionAllowed, false);
     assert.equal(result.adaptive.profile, 'RISK_OFF');
     assert.equal(result.adaptive.exposurePct, 92);
     assert.equal(result.adaptive.learning, null);

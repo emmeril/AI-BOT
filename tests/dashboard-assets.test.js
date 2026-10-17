@@ -24,8 +24,8 @@ test('dashboard pipeline shows only the active deterministic execution flow', ()
   assert.match(css, /\.flow-signal path\[data-state=safety\]\{stroke:var\(--warning\)/);
   assert.match(css, /\.flow-signal path\[data-state=error\]\{stroke:var\(--negative\)/);
   assert.match(css, /\.flow-signal path\[data-state=active\]\{stroke:var\(--accent\);opacity:\.9\}/);
-  assert.match(script, /setFlowEdge\('fibonacci', 'supervisor', fibonacciAvailable && decisionAvailable/);
-  assert.match(script, /setFlowEdge\('supervisor', 'buy', !isShort\(\) && safetyOverride/);
+  assert.match(script, /setFlowEdge\('fibonacci', 'supervisor', gate\.available/);
+  assert.match(script, /setFlowEdge\('supervisor', 'buy', gate\.allowed/);
   assert.match(script, /setFlowEdge\('position', 'sell', exitNeedsAttention/);
   assert.match(css, /\.flow-grid\{[^}]*grid-template-columns:repeat\(6/);
 });
@@ -54,8 +54,10 @@ test('futures dashboard combines LONG and SHORT with accessible side filters', (
   assert.match(html, /id="volume-delta-status"/);
   assert.match(html, /id="volume-delta-reason"/);
   assert.match(script, /function volumeDeltaView\(volumeDelta\)/);
-  assert.match(script, /Tekanan taker BUY terlalu kuat/);
-  assert.match(script, /Filter hanya melindungi entry SHORT/);
+  assert.match(script, /Tekanan taker \$\{opposingTaker\} terlalu kuat/);
+  assert.match(script, /Tidak diaktifkan setelah gagal OOS/);
+  assert.match(script, /FUTURES_LONG_ENTRY_DIRECTION|requiredEntryDirection|Wajib \$\{gate\.requiredDirection\}/);
+  assert.match(script, /RESTART DIPERLUKAN/);
 });
 
 test('dashboard motion preference can override or follow reduced motion', () => {
@@ -100,7 +102,9 @@ test('dashboard omits inactive Gemini and learning surfaces from the operator vi
 
   assert.doesNotMatch(html, /Gemini|Adaptive learning|learning-panel/);
   assert.doesNotMatch(login, /Gemini/);
-  assert.match(login, /analisis Fibonacci, keputusan Adaptive Supervisor/);
+  assert.match(login, /gate arah Fibonacci, filter Volume Delta/);
+  assert.doesNotMatch(html, /Adaptive supervisor|Profil BUY|profil adaptive/i);
+  assert.doesNotMatch(login, /Adaptive Supervisor|Adaptive decision/i);
   assert.doesNotMatch(script, /renderLearning|trustPolicyView|setNode\('gemini'|setNode\('trust'/);
   assert.doesNotMatch(css, /\.node-gemini|\.node-trust|\.learning-panel|\.learning-body/);
 });
