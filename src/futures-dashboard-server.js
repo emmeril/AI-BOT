@@ -124,6 +124,57 @@ function fibonacciFromState(symState) {
   };
 }
 
+function booleanValue(value, fallback = false) {
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (TRUE_VALUES.has(normalized)) return true;
+  if (FALSE_VALUES.has(normalized)) return false;
+  return fallback;
+}
+
+function volumeDeltaFromState(symState, positionSide) {
+  const side = String(positionSide || 'LONG').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+  const prefix = side === 'SHORT' ? 'SHORT_' : '';
+  const persisted = symState?.config?.volumeDeltaEntryGuard || null;
+  const enabled = booleanValue(
+    persisted?.enabled ?? process.env[`${prefix}VOLUME_DELTA_ENTRY_FILTER_ENABLED`],
+    false
+  );
+  const lookbackCandles = numberOrZero(
+    persisted?.lookbackCandles ?? process.env[`${prefix}VOLUME_DELTA_LOOKBACK_CANDLES`]
+  );
+  const failClosed = booleanValue(
+    persisted?.failClosed ?? process.env[`${prefix}VOLUME_DELTA_FAIL_CLOSED`],
+    false
+  );
+  const available = enabled && Boolean(persisted?.available);
+  return {
+    enabled,
+    mode: String(
+      persisted?.mode ?? process.env[`${prefix}VOLUME_DELTA_ENTRY_FILTER_MODE`] ?? 'OFF'
+    ).toUpperCase(),
+    positionSide: side,
+    timeframe: persisted?.timeframe || '15m',
+    lookbackCandles,
+    windowMinutes: numberOrZero(persisted?.windowMinutes) || lookbackCandles * 15,
+    oppositionThresholdPct: numberOrZero(
+      persisted?.oppositionThresholdPct ??
+      process.env[`${prefix}VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT`]
+    ),
+    failClosed,
+    available,
+    allow: !enabled || (persisted?.allow ?? !failClosed),
+    reason: !enabled ? 'disabled' : persisted?.reason || 'volume_delta_unavailable',
+    deltaRatio: available && Number.isFinite(Number(persisted?.deltaRatio))
+      ? Number(persisted.deltaRatio)
+      : null,
+    candleTimestamp: numberOrZero(persisted?.candleTimestamp) || null,
+    candleCloseTime: numberOrZero(persisted?.candleCloseTime) || null,
+    evaluatedAt: persisted?.evaluatedAt || null,
+    error: persisted?.error || null,
+  };
+}
+
 function decisionSnapshot(engine, symbol, symState, orders, position, options = {}) {
   const positionSide = String(options.positionSide || 'LONG').toUpperCase();
   const entrySide = positionSide === 'SHORT' ? 'sell' : 'buy';
@@ -172,6 +223,7 @@ function decisionSnapshot(engine, symbol, symState, orders, position, options = 
     .filter(order => order.side === exitSide)
     .reduce((sum, order) => sum + numberOrZero(order.remaining), 0);
   const uncovered = Math.max(0, contracts - reservedExit);
+  const volumeDelta = volumeDeltaFromState(symState, positionSide);
 
   return {
     fibonacci: {
@@ -219,6 +271,7 @@ function decisionSnapshot(engine, symbol, symState, orders, position, options = 
       reasons: Array.isArray(adaptive?.reasons) ? adaptive.reasons : [],
       generatedAt: adaptive?.generatedAt || null,
     },
+    volumeDelta,
     execution: {
       gridCount: numberOrZero(symState?.config?.count || process.env.GRID_COUNT),
       buyCount: orders.filter(order => order.side === 'buy').length,

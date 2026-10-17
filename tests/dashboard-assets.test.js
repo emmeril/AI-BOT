@@ -51,6 +51,11 @@ test('futures dashboard combines LONG and SHORT with accessible side filters', (
   assert.match(script, /new URLSearchParams\(\{ positionSide \}\)/);
   assert.match(script, /\['ArrowLeft', 'ArrowRight', 'Home', 'End'\]/);
   assert.match(script, /function renderComparison\(\)/);
+  assert.match(html, /id="volume-delta-status"/);
+  assert.match(html, /id="volume-delta-reason"/);
+  assert.match(script, /function volumeDeltaView\(volumeDelta\)/);
+  assert.match(script, /Tekanan taker BUY terlalu kuat/);
+  assert.match(script, /Filter hanya melindungi entry SHORT/);
 });
 
 test('dashboard motion preference can override or follow reduced motion', () => {

@@ -170,6 +170,12 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
           direction: 'BEARISH', directionApplied: 'BEARISH', directionScore: -0.8,
           directionConfidence: 0.9, directionConfirmationCount: 3,
           directionConfirmationsRequired: 2, directionTimeframes: { '1h': { direction: 'BEARISH', score: -3 } },
+        }, volumeDeltaEntryGuard: {
+          enabled: true, mode: 'LIVE', positionSide: 'SHORT', timeframe: '15m',
+          lookbackCandles: 4, windowMinutes: 60, oppositionThresholdPct: 5,
+          failClosed: false, available: true, allow: false, reason: 'opposing_delta',
+          deltaRatio: 0.33683, candleTimestamp: 10, candleCloseTime: 20,
+          evaluatedAt: '2026-10-17T08:00:00.000Z', error: null,
         } },
         orders: { shortEntry: { levelIndex: 2 } },
         lastBuyByLevel: { 2: { totalCostQuote: 8, totalFeeQuote: 0.05 } },
@@ -218,6 +224,10 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
   assert.equal(snapshot.intelligence.execution.entrySide, 'sell');
   assert.equal(snapshot.intelligence.execution.exitSide, 'buy');
   assert.equal(snapshot.intelligence.fibonacci.appliedDirection, 'BEARISH');
+  assert.equal(snapshot.intelligence.volumeDelta.enabled, true);
+  assert.equal(snapshot.intelligence.volumeDelta.allow, false);
+  assert.equal(snapshot.intelligence.volumeDelta.deltaRatio, 0.33683);
+  assert.equal(snapshot.intelligence.volumeDelta.windowMinutes, 60);
 });
 
 test('futures decision snapshot exposes deterministic flow and SELL coverage without mutating execution', () => {

@@ -234,6 +234,11 @@ Trailing range hanya berlaku untuk auto range. Manual range tidak digeser oleh t
 - `FUTURES_MUTUAL_EXCLUSION_ENABLED`: futures saja, default `false`. LONG dan SHORT boleh memiliki posisi bersamaan pada pair yang sama; entry SHORT tetap mengikuti `FUTURES_SHORT_ENTRY_DIRECTION`. Ubah ke `true` jika satu pair hanya boleh ditempati salah satu sisi. Exit kedua sisi tidak pernah diblokir.
 - `FUTURES_MUTUAL_ENTRY_LOCK_FILE`: prefix lock atomik lintas worker untuk mencegah race saat entry.
 - `FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS`: batas tunggu lock entry lintas worker. Jika timeout atau status sisi lawan gagal diverifikasi, entry diblokir.
+- `SHORT_VOLUME_DELTA_ENTRY_FILTER_ENABLED`: aktifkan risk overlay volume delta hanya pada worker SHORT.
+- `SHORT_VOLUME_DELTA_ENTRY_FILTER_MODE`: `SHADOW` hanya mencatat keputusan, `LIVE` dapat menghentikan dan membatalkan order entry SHORT. Order BUY exit tidak pernah diblokir.
+- `SHORT_VOLUME_DELTA_LOOKBACK_CANDLES`: jendela candle 15 menit. Nilai tervalidasi `4`, setara satu jam.
+- `SHORT_VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT`: blok entry SHORT jika delta taker buy positif melampaui batas ini. Nilai tervalidasi `5`.
+- `SHORT_VOLUME_DELTA_FAIL_CLOSED`: default `false`; gangguan endpoint delta tidak menghentikan strategi utama.
 - `BINANCE_SPOT_MAKER_FEE_RATE`: asumsi fee maker Binance Spot per sisi untuk prompt AI. Default `0.001` atau 0.1%; gunakan `0.00075` jika fee dibayar pakai BNB dengan diskon 25%, atau sesuaikan dengan tier VIP/pair akun.
 - `GRID_MIN_NET_PROFIT_PCT`: target profit bersih minimum per jarak grid setelah fee buy+sell. Default `0.05` atau 0.05%.
 
@@ -327,6 +332,14 @@ npm run backtest:fibonacci-direction
 ```
 
 Runner membandingkan konfigurasi saat ini, mean-reversion umum, mean-reversion selektif berbasis slope EMA20 15m, beberapa minimum alignment, dan konsensus `4h + satu timeframe lebih rendah`. Periode dapat diubah dengan `BACKTEST_HISTORY_DAYS`, atau tanggal eksplisit melalui `BACKTEST_START` dan `BACKTEST_END`. Data publik Binance disimpan di `backtest-data/`, sedangkan laporan JSON dan Markdown disimpan di `backtest-results/`. Pengujian ini mengukur ketepatan arah 1 jam, 4 jam, dan 24 jam tanpa mengklaim simulasi PnL grid, funding, likuidasi, atau urutan fill intrabar. Gunakan `REPORT_ONLY` dan `SHADOW` jika hasil walk-forward belum menunjukkan keunggulan arah yang konsisten.
+
+Backtest volume delta tiga bulan:
+
+```bash
+npm run backtest:volume-delta
+```
+
+Runner mengambil raw kline Binance USD-M agar dapat memakai `taker buy base asset volume`. Delta dihitung sebagai taker buy dikurangi taker sell. Kandidat dipilih pada 45 hari pertama dan divalidasi tanpa perubahan pada 45 hari terakhir. Filter hanya memengaruhi entry SHORT; strategi LONG dan seluruh exit tetap berjalan seperti biasa.
 
 Full-grid PnL backtest membandingkan empat varian: baseline, Adaptive Supervisor deterministik, Adaptive + Gemini, dan Adaptive + learned policy. Keputusan historis Gemini dibuat satu kali sebagai cache agar replay berikutnya reproducible dan tidak memanggil API lagi:
 
@@ -446,6 +459,8 @@ Aktifkan dengan:
 
 ```env
 TELEGRAM_ENABLED=true
+SHORT_TELEGRAM_ENABLED=true
+SHORT_FUTURES_TELEGRAM_COMMAND_PROCESSING_ENABLED=false
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
 ```
@@ -458,6 +473,8 @@ TELEGRAM_CHAT_ID=your_chat_id
 - `TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS`: interval polling command.
 - `TELEGRAM_COMMANDS_SKIP_OLD_UPDATES`: abaikan command lama saat bot baru start.
 - `FUTURES_TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS`: interval bot futures membaca antrean command; default 2 detik.
+- `SHORT_TELEGRAM_ENABLED`: aktifkan alert entry/exit dari worker SHORT menggunakan bot dan chat yang sama.
+- `SHORT_FUTURES_TELEGRAM_COMMAND_PROCESSING_ENABLED`: pertahankan `false` agar command `/futures_*` hanya diproses worker LONG dan tidak terkirim ganda.
 
 Command yang tersedia:
 

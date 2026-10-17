@@ -30,6 +30,10 @@ const { syncIncome, incomeMetrics } = require('./src/futures-income');
 const { exposureBySymbol } = require('./src/futures-exposure');
 const { displayNumber, signedUsdt, sellOverview, sellFillMessage } = require('./src/futures-display');
 const { CrossProcessMutex } = require('./src/cross-process-mutex');
+const {
+  VolumeDeltaAnalyzer,
+  evaluateVolumeDeltaEntry,
+} = require('./src/volume-delta-analyzer');
 const futuresTelegramCommandPath = path.resolve(process.cwd(), 'futures-telegram-command.json');
 
 // Tracks, per async call chain, which symbols' locks are currently held by
@@ -126,6 +130,15 @@ const FUTURES_MUTUAL_ENTRY_LOCK_PATH = path.resolve(
 const FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS = Math.max(
   Config.number('FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS', 30000), 1
 );
+const VOLUME_DELTA_ENTRY_FILTER_ENABLED = Config.boolean('VOLUME_DELTA_ENTRY_FILTER_ENABLED', false);
+const VOLUME_DELTA_ENTRY_FILTER_MODE = Config.get('VOLUME_DELTA_ENTRY_FILTER_MODE', 'SHADOW').toUpperCase();
+const VOLUME_DELTA_LOOKBACK_CANDLES = Math.max(
+  1, Math.floor(Config.number('VOLUME_DELTA_LOOKBACK_CANDLES', 4))
+);
+const VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT = Math.max(
+  0, Config.number('VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT', 5)
+);
+const VOLUME_DELTA_FAIL_CLOSED = Config.boolean('VOLUME_DELTA_FAIL_CLOSED', false);
 const INTERVAL_MINUTES = Config.number('INTERVAL_MINUTES', 1);
 const INTERVAL_MS = INTERVAL_MINUTES * MINUTE_MS;
 const FUTURES_USER_STREAM_ENABLED = Config.boolean('FUTURES_USER_STREAM_ENABLED', true);
@@ -307,6 +320,9 @@ const TELEGRAM_BOT_TOKEN = Config.get('TELEGRAM_BOT_TOKEN', '');
 const TELEGRAM_CHAT_ID = Config.get('TELEGRAM_CHAT_ID', '');
 const TELEGRAM_API_URL = Config.get('TELEGRAM_API_URL', 'https://api.telegram.org');
 const TELEGRAM_TIMEOUT_MS = Config.number('TELEGRAM_TIMEOUT_MS', 10_000);
+const FUTURES_TELEGRAM_COMMAND_PROCESSING_ENABLED = Config.boolean(
+  'FUTURES_TELEGRAM_COMMAND_PROCESSING_ENABLED', POSITION_SIDE === 'LONG'
+);
 
 const MAX_PROCESSED_TRADE_IDS = 2000;
 const TRADE_FETCH_LIMIT = 100;
@@ -590,6 +606,11 @@ function validateRuntimeConfiguration() {
   if (!['ALWAYS', 'BEARISH'].includes(FUTURES_SHORT_ENTRY_DIRECTION)) {
     errors.push('FUTURES_SHORT_ENTRY_DIRECTION must be ALWAYS or BEARISH');
   }
+  if (!['SHADOW', 'LIVE'].includes(VOLUME_DELTA_ENTRY_FILTER_MODE)) {
+    errors.push('VOLUME_DELTA_ENTRY_FILTER_MODE must be SHADOW or LIVE');
+  }
+  requireInteger('VOLUME_DELTA_LOOKBACK_CANDLES', VOLUME_DELTA_LOOKBACK_CANDLES, 1);
+  requireNonNegative('VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT', VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT);
 
   const hasLower = GRID_LOWER_PRICE > 0;
   const hasUpper = GRID_UPPER_PRICE > 0;
@@ -1138,9 +1159,15 @@ class FuturesGridEngine {
     this.adaptiveGridDecisions = new Map();
     this.lastFibonacciDirectionLog = new Map();
     this.appliedFibonacciDirections = new Map();
+    this.lastVolumeDeltaLog = new Map();
     this.mutualExclusionEnabled = FUTURES_MUTUAL_EXCLUSION_ENABLED;
     this.mutualEntryMutex = new CrossProcessMutex(FUTURES_MUTUAL_ENTRY_LOCK_PATH, {
       timeoutMs: FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS,
+    });
+    this.volumeDeltaAnalyzer = new VolumeDeltaAnalyzer(this.exchange, {
+      enabled: VOLUME_DELTA_ENTRY_FILTER_ENABLED,
+      lookbackCandles: VOLUME_DELTA_LOOKBACK_CANDLES,
+      candleCloseBufferMs: FIBONACCI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS,
     });
     this.adaptiveSupervisorOutcomeJournal = new AdaptiveSupervisorOutcomeJournal({
       enabled: ADAPTIVE_SUPERVISOR_OUTCOME_JOURNAL_ENABLED,
@@ -1669,6 +1696,7 @@ class FuturesGridEngine {
       autoRange: !manualRange,
       orderSizeUsdt: this.getOrderSizeUsdt(),
       rangeAdvisor: advisorState,
+      volumeDeltaEntryGuard: symState.config.volumeDeltaEntryGuard,
     };
     if (resetAutoRange) {
       if (!this.rangeResetSymbols) this.rangeResetSymbols = new Set();
@@ -2547,6 +2575,70 @@ class FuturesGridEngine {
       return POSITION_SIDE === 'LONG' || shortPreferred;
     }
     return POSITION_SIDE === 'SHORT' ? shortPreferred : !shortPreferred;
+  }
+
+  async getVolumeDeltaEntryDecision(symbol) {
+    if (!VOLUME_DELTA_ENTRY_FILTER_ENABLED) return { allow: true, available: false, disabled: true };
+    let analysis = null;
+    let failure = null;
+    try {
+      analysis = await this.volumeDeltaAnalyzer.analyze(symbol);
+    } catch (error) {
+      failure = error;
+    }
+    const decision = evaluateVolumeDeltaEntry(analysis, POSITION_SIDE, {
+      oppositionThresholdPct: VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT,
+      failClosed: VOLUME_DELTA_FAIL_CLOSED,
+    });
+    const effectiveAllow = VOLUME_DELTA_ENTRY_FILTER_MODE !== 'LIVE' || decision.allow;
+    const symState = this.state.getSymbol(symbol);
+    const previousSnapshot = symState.config.volumeDeltaEntryGuard;
+    const nextSnapshot = {
+      enabled: true,
+      mode: VOLUME_DELTA_ENTRY_FILTER_MODE,
+      positionSide: POSITION_SIDE,
+      timeframe: this.volumeDeltaAnalyzer.options.timeframe,
+      lookbackCandles: VOLUME_DELTA_LOOKBACK_CANDLES,
+      windowMinutes: Math.round(
+        (this.volumeDeltaAnalyzer.options.timeframeMs * VOLUME_DELTA_LOOKBACK_CANDLES) / 60_000
+      ),
+      oppositionThresholdPct: VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT,
+      failClosed: VOLUME_DELTA_FAIL_CLOSED,
+      available: decision.available,
+      allow: effectiveAllow,
+      reason: decision.reason,
+      deltaRatio: Number.isFinite(decision.deltaRatio) ? decision.deltaRatio : null,
+      candleTimestamp: analysis?.timestamp || null,
+      candleCloseTime: analysis?.closeTime || null,
+      error: failure?.message || null,
+    };
+    const snapshotChanged = !previousSnapshot || Object.entries(nextSnapshot)
+      .some(([key, value]) => previousSnapshot[key] !== value);
+    if (snapshotChanged) {
+      nextSnapshot.evaluatedAt = new Date().toISOString();
+      symState.config.volumeDeltaEntryGuard = nextSnapshot;
+      try {
+        await this.state.save();
+      } catch (error) {
+        if (previousSnapshot === undefined) delete symState.config.volumeDeltaEntryGuard;
+        else symState.config.volumeDeltaEntryGuard = previousSnapshot;
+        console.warn(`[VOLUME-DELTA] ${symbol} could not persist dashboard snapshot: ${error.message}`);
+      }
+    }
+    const logKey = [analysis?.timestamp || 'unavailable', decision.allow, failure?.message || ''].join('|');
+    if (this.lastVolumeDeltaLog.get(symbol) !== logKey) {
+      const deltaPct = Number.isFinite(decision.deltaRatio)
+        ? `${roundNumber(decision.deltaRatio * 100, 3)}%`
+        : 'unavailable';
+      const action = effectiveAllow ? 'allow' : 'block';
+      console.log(
+        `[VOLUME-DELTA] ${symbol} ${POSITION_SIDE} mode=${VOLUME_DELTA_ENTRY_FILTER_MODE} ` +
+        `delta=${deltaPct} threshold=${VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT}% action=${action}` +
+        (failure ? ` error=${failure.message}` : '')
+      );
+      this.lastVolumeDeltaLog.set(symbol, logKey);
+    }
+    return { ...decision, allow: effectiveAllow, analysis, failure };
   }
 
   async findOppositeSideConflict(symbol) {
@@ -4130,8 +4222,10 @@ class FuturesGridEngine {
       managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
     }
 
-    const entrySidePreferred = this.isEntrySidePreferred(symbol);
-    if (!entrySidePreferred) {
+    const directionEntryPreferred = this.isEntrySidePreferred(symbol);
+    const volumeDeltaDecision = await this.getVolumeDeltaEntryDecision(symbol);
+    const entrySidePreferred = directionEntryPreferred && volumeDeltaDecision.allow;
+    if (!directionEntryPreferred) {
       const direction = this.getAppliedFibonacciDirection(symbol);
       if (await this.cancelManagedEntryOrders(
         symbol, managedOrders, `mutual ownership moved to SHORT (${direction})`
@@ -4140,6 +4234,14 @@ class FuturesGridEngine {
         managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
       }
       console.log(`[MUTUAL] ${symbol} LONG entries paused; direction=${direction}`);
+    } else if (!volumeDeltaDecision.allow) {
+      if (await this.cancelManagedEntryOrders(
+        symbol, managedOrders,
+        `opposing volume delta ${roundNumber(volumeDeltaDecision.deltaRatio * 100, 3)}%`
+      )) {
+        freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+        managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+      }
     }
 
     if (GRID_CANCEL_OUT_OF_RANGE) {
@@ -4347,8 +4449,10 @@ class FuturesGridEngine {
       managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
     }
 
-    const entrySidePreferred = this.isEntrySidePreferred(symbol);
-    if (!entrySidePreferred) {
+    const directionEntryPreferred = this.isEntrySidePreferred(symbol);
+    const volumeDeltaDecision = await this.getVolumeDeltaEntryDecision(symbol);
+    const entrySidePreferred = directionEntryPreferred && volumeDeltaDecision.allow;
+    if (!directionEntryPreferred) {
       const direction = this.getAppliedFibonacciDirection(symbol);
       if (await this.cancelManagedEntryOrders(
         symbol, managedOrders, `mutual ownership moved to LONG (${direction})`
@@ -4357,6 +4461,14 @@ class FuturesGridEngine {
         managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
       }
       console.log(`[MUTUAL] ${symbol} SHORT entries paused; direction=${direction}`);
+    } else if (!volumeDeltaDecision.allow) {
+      if (await this.cancelManagedEntryOrders(
+        symbol, managedOrders,
+        `opposing volume delta ${roundNumber(volumeDeltaDecision.deltaRatio * 100, 3)}%`
+      )) {
+        freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+        managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+      }
     }
 
     if (GRID_CANCEL_OUT_OF_RANGE) {
@@ -5007,7 +5119,13 @@ class FuturesGridEngine {
   }
 
   startTelegramCommandProcessing() {
-    if (this.telegramCommandTimer || !TELEGRAM_ENABLED || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+    if (
+      this.telegramCommandTimer ||
+      !FUTURES_TELEGRAM_COMMAND_PROCESSING_ENABLED ||
+      !TELEGRAM_ENABLED ||
+      !TELEGRAM_BOT_TOKEN ||
+      !TELEGRAM_CHAT_ID
+    ) return;
     const poll = () => this.processFuturesTelegramCommand().catch(err => {
       console.warn('[TELEGRAM] Futures command processing failed:', err.message);
     });
@@ -5028,6 +5146,11 @@ Margin Mode: ${MARGIN_MODE}
 Position Mode: HEDGE (trading ${POSITION_SIDE} side only)
 Mutual Side Exclusion: ${FUTURES_MUTUAL_EXCLUSION_ENABLED
       ? `ON (Fibonacci ownership; cross-worker lock timeout=${FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS}ms)`
+      : 'OFF'}
+Telegram Alerts: ${TELEGRAM_ENABLED ? 'ON' : 'OFF'}
+Telegram Command Processing: ${FUTURES_TELEGRAM_COMMAND_PROCESSING_ENABLED ? 'ON' : 'OFF'}
+Volume Delta Entry Guard: ${VOLUME_DELTA_ENTRY_FILTER_ENABLED
+      ? `ON (${VOLUME_DELTA_ENTRY_FILTER_MODE}; ${VOLUME_DELTA_LOOKBACK_CANDLES}x15m; opposition>${VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT}%; fail-${VOLUME_DELTA_FAIL_CLOSED ? 'closed' : 'open'})`
       : 'OFF'}
 Grid Mode: ${GRID_MODE}
 Grid Count: ${GRID_COUNT}

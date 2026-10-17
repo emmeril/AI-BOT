@@ -184,6 +184,7 @@ class FullGridBacktester {
     riskStateMachine = false,
     monitorDecisionProvider = null,
     learningPolicyProvider = null,
+    entryDecisionProvider = null,
     variant = null,
   }) {
     const options = this.options;
@@ -209,6 +210,7 @@ class FullGridBacktester {
     const directionConfirmation = { candidate: 'RANGING', count: 0 };
     const indices = Object.fromEntries(RANGE_TIMEFRAMES.map(timeframe => [timeframe, -1]));
     const metrics = createMetrics();
+    metrics.entryFilterBlockedSamples = 0;
     const lots = [];
     const pendingBuys = new Map();
     const slotFillCounts = new Map();
@@ -352,8 +354,13 @@ class FullGridBacktester {
       metrics.rangeResets++;
     };
 
-    const placeBuyOrders = (currentPrice, now, appliedDirection) => {
+    const placeBuyOrders = (currentPrice, now, appliedDirection, entryDecision = null) => {
       if (!activeSuggestion?.levels?.length) return;
+      if (entryDecision?.allow === false) {
+        if (entryDecision.cancelPending !== false) pendingBuys.clear();
+        metrics.entryFilterBlockedSamples++;
+        return;
+      }
       if (mutualExclusion && handoffTargetSide) {
         metrics.blockedEntrySamples++;
         return;
@@ -531,6 +538,16 @@ class FullGridBacktester {
         minimumConfidence: options.directionMinimumConfidence,
         emaSlopeAtrThreshold: options.directionEmaSlopeAtrThreshold,
       });
+      const entryDecision = typeof entryDecisionProvider === 'function'
+        ? entryDecisionProvider({
+          symbol,
+          timestamp: evaluationTime,
+          rowIndex,
+          rows,
+          positionSide: activePositionSide,
+          direction,
+        })
+        : null;
       updateMutualOwnership(direction, evaluationTime);
       const outsideActiveRange = activeSuggestion &&
         (close <= activeSuggestion.lower || close >= activeSuggestion.upper);
@@ -562,7 +579,7 @@ class FullGridBacktester {
 
       for (const lot of lots) lot.lastUpdatedAt = evaluationTime;
       updateSellTargets(close);
-      placeBuyOrders(close, evaluationTime, direction);
+      placeBuyOrders(close, evaluationTime, direction, entryDecision);
       const marketNotional = inventoryMarketNotional(close);
       const pending = pendingNotional();
       metrics.maxInventoryNotional = Math.max(metrics.maxInventoryNotional, marketNotional);
@@ -628,6 +645,7 @@ class FullGridBacktester {
       handoffCancelled: metrics.handoffCancelled,
       handoffExitFills: metrics.handoffExitFills,
       blockedEntrySamples: metrics.blockedEntrySamples,
+      entryFilterBlockedSamples: metrics.entryFilterBlockedSamples,
       gridCycles: metrics.gridCycles,
       rangeResets: metrics.rangeResets,
       skippedBelowMinimum: metrics.skippedBelowMinimum,
