@@ -33,7 +33,8 @@ test('SHORT enables the validated volume-delta risk overlay', () => {
   const environment = buildShortEnvironment({});
   assert.equal(environment.VOLUME_DELTA_ENTRY_FILTER_ENABLED, 'true');
   assert.equal(environment.VOLUME_DELTA_ENTRY_FILTER_MODE, 'LIVE');
-  assert.equal(environment.VOLUME_DELTA_LOOKBACK_CANDLES, '4');
-  assert.equal(environment.VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT, '5');
+  assert.equal(environment.VOLUME_DELTA_TIMEFRAME, '5m');
+  assert.equal(environment.VOLUME_DELTA_LOOKBACK_CANDLES, '12');
+  assert.equal(environment.VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT, '2.5');
   assert.equal(environment.VOLUME_DELTA_FAIL_CLOSED, 'false');
 });

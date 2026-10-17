@@ -88,8 +88,11 @@ function normalizeRow(row) {
   return normalized;
 }
 
-function resampleCandles(rows, timeframeMs) {
-  const expected = Math.round(timeframeMs / BASE_TIMEFRAME_MS);
+function resampleCandles(rows, timeframeMs, sourceTimeframeMs = BASE_TIMEFRAME_MS) {
+  if (!(sourceTimeframeMs > 0) || timeframeMs < sourceTimeframeMs || timeframeMs % sourceTimeframeMs !== 0) {
+    throw new Error(`Cannot resample ${sourceTimeframeMs}ms candles into ${timeframeMs}ms candles`);
+  }
+  const expected = Math.round(timeframeMs / sourceTimeframeMs);
   const buckets = new Map();
   for (const raw of rows) {
     const row = normalizeRow(raw);

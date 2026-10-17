@@ -7,8 +7,8 @@ const {
   normalizeRawKline,
 } = require('../src/volume-delta-analyzer');
 
-function kline(timestamp, volume, takerBuyVolume) {
-  return [timestamp, '100', '102', '99', '101', String(volume), timestamp + 899_999, '0', 10, String(takerBuyVolume), '0', '0'];
+function kline(timestamp, volume, takerBuyVolume, durationMs = 900_000) {
+  return [timestamp, '100', '102', '99', '101', String(volume), timestamp + durationMs - 1, '0', 10, String(takerBuyVolume), '0', '0'];
 }
 
 test('normalizes Binance raw kline taker volume fields', () => {
@@ -53,4 +53,28 @@ test('live analyzer ignores the still-open candle and caches a closed result', a
   assert.equal(first.deltaRatio, 0);
   assert.deepEqual(second, first);
   assert.equal(calls, 1);
+});
+
+test('live analyzer requests the configured scalping timeframe', async () => {
+  let request;
+  const fiveMinutes = 5 * 60_000;
+  const rows = [
+    kline(0, 100, 60, fiveMinutes),
+    kline(fiveMinutes, 100, 40, fiveMinutes),
+    kline(2 * fiveMinutes, 100, 50, fiveMinutes),
+  ];
+  const exchange = {
+    market: () => ({ id: 'TESTUSDT' }),
+    fapiPublicGetKlines: async params => { request = params; return rows; },
+  };
+  const analyzer = new VolumeDeltaAnalyzer(exchange, {
+    enabled: true,
+    timeframe: '5m',
+    timeframeMs: fiveMinutes,
+    lookbackCandles: 3,
+    candleCloseBufferMs: 0,
+  });
+  const analysis = await analyzer.analyze('TEST/USDT:USDT', 3 * fiveMinutes);
+  assert.equal(request.interval, '5m');
+  assert.equal(analysis.lookbackCandles, 3);
 });

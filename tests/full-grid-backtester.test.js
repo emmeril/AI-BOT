@@ -129,3 +129,58 @@ test('entry direction gate mirrors BULLISH LONG and BEARISH SHORT', () => {
   assert.equal(entryDirectionAllows('SHORT', 'BEARISH', options), true);
   assert.equal(entryDirectionAllows('SHORT', 'BULLISH', options), false);
 });
+
+test('configurable base timeframe evaluates entry decisions after each closed candle', () => {
+  const fiveMinutes = 5 * 60_000;
+  const timestamps = [];
+  const simulator = new FixedRangeBacktester(exchange, {
+    baseTimeframe: '5m',
+    rangeTimeframes: ['5m'],
+    directionTimeframes: ['5m'],
+    gridCount: 2,
+    totalInvestment: 10,
+    maxActiveBuyOrders: 2,
+    candleLimit: 100,
+    rangeRebuildCooldownMs: Infinity,
+  });
+  const rows = [
+    [0, 100, 101, 99, 100, 1],
+    [fiveMinutes, 100, 101, 99, 100, 1],
+  ];
+  simulator.simulate({
+    symbol: 'TEST/USDT:USDT',
+    rows,
+    start: 0,
+    end: 2 * fiveMinutes,
+    adaptive: false,
+    entryDecisionProvider: ({ timestamp }) => {
+      timestamps.push(timestamp);
+      return { allow: false };
+    },
+  });
+  assert.deepEqual(timestamps, [fiveMinutes, 2 * fiveMinutes]);
+});
+
+test('configurable base timeframe rejects incompatible higher-timeframe series', () => {
+  const simulator = new FullGridBacktester(exchange, {
+    baseTimeframe: '15m',
+    rangeTimeframes: ['5m'],
+    directionTimeframes: ['15m'],
+  });
+  assert.throws(
+    () => simulator.prepareSeries([], '15m', ['5m']),
+    /5m cannot be built from 15m candles/
+  );
+});
+
+test('configurable base timeframe builds complete higher-timeframe candles', () => {
+  const fiveMinutes = 5 * 60_000;
+  const simulator = new FullGridBacktester(exchange);
+  const rows = Array.from({ length: 12 }, (_, index) => [
+    index * fiveMinutes, 100, 101, 99, 100, 1,
+  ]);
+  const series = simulator.prepareSeries(rows, '5m', ['5m', '15m', '1h']);
+  assert.equal(series['5m'].length, 12);
+  assert.equal(series['15m'].length, 4);
+  assert.equal(series['1h'].length, 1);
+});

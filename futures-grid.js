@@ -5,7 +5,7 @@ const path = require('path');
 const https = require('https');
 const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
-const { FibonacciRangeAdvisor } = require('./src/fibonacci-range-advisor');
+const { FibonacciRangeAdvisor, timeframeToMs } = require('./src/fibonacci-range-advisor');
 const {
   FibonacciDirectionAnalyzer,
   resolveAppliedDirection,
@@ -135,6 +135,8 @@ const FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS = Math.max(
 );
 const VOLUME_DELTA_ENTRY_FILTER_ENABLED = Config.boolean('VOLUME_DELTA_ENTRY_FILTER_ENABLED', false);
 const VOLUME_DELTA_ENTRY_FILTER_MODE = Config.get('VOLUME_DELTA_ENTRY_FILTER_MODE', 'SHADOW').toUpperCase();
+const VOLUME_DELTA_TIMEFRAME = Config.get('VOLUME_DELTA_TIMEFRAME', '15m');
+const VOLUME_DELTA_TIMEFRAME_MS = timeframeToMs(VOLUME_DELTA_TIMEFRAME);
 const VOLUME_DELTA_LOOKBACK_CANDLES = Math.max(
   1, Math.floor(Config.number('VOLUME_DELTA_LOOKBACK_CANDLES', 4))
 );
@@ -614,6 +616,9 @@ function validateRuntimeConfiguration() {
   }
   if (!['SHADOW', 'LIVE'].includes(VOLUME_DELTA_ENTRY_FILTER_MODE)) {
     errors.push('VOLUME_DELTA_ENTRY_FILTER_MODE must be SHADOW or LIVE');
+  }
+  if (!(VOLUME_DELTA_TIMEFRAME_MS > 0)) {
+    errors.push('VOLUME_DELTA_TIMEFRAME must be a valid Binance candle timeframe');
   }
   requireInteger('VOLUME_DELTA_LOOKBACK_CANDLES', VOLUME_DELTA_LOOKBACK_CANDLES, 1);
   requireNonNegative('VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT', VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT);
@@ -1172,6 +1177,8 @@ class FuturesGridEngine {
     });
     this.volumeDeltaAnalyzer = new VolumeDeltaAnalyzer(this.exchange, {
       enabled: VOLUME_DELTA_ENTRY_FILTER_ENABLED,
+      timeframe: VOLUME_DELTA_TIMEFRAME,
+      timeframeMs: VOLUME_DELTA_TIMEFRAME_MS,
       lookbackCandles: VOLUME_DELTA_LOOKBACK_CANDLES,
       candleCloseBufferMs: FIBONACCI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS,
     });
@@ -5154,7 +5161,7 @@ Mutual Side Exclusion: ${FUTURES_MUTUAL_EXCLUSION_ENABLED
 Telegram Alerts: ${TELEGRAM_ENABLED ? 'ON' : 'OFF'}
 Telegram Command Processing: ${FUTURES_TELEGRAM_COMMAND_PROCESSING_ENABLED ? 'ON' : 'OFF'}
 Volume Delta Entry Guard: ${VOLUME_DELTA_ENTRY_FILTER_ENABLED
-      ? `ON (${VOLUME_DELTA_ENTRY_FILTER_MODE}; ${VOLUME_DELTA_LOOKBACK_CANDLES}x15m; opposition>${VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT}%; fail-${VOLUME_DELTA_FAIL_CLOSED ? 'closed' : 'open'})`
+      ? `ON (${VOLUME_DELTA_ENTRY_FILTER_MODE}; ${VOLUME_DELTA_LOOKBACK_CANDLES}x${VOLUME_DELTA_TIMEFRAME}; opposition>${VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT}%; fail-${VOLUME_DELTA_FAIL_CLOSED ? 'closed' : 'open'})`
       : 'OFF'}
 Grid Mode: ${GRID_MODE}
 Grid Count: ${GRID_COUNT}

@@ -6,6 +6,7 @@ const { createDashboardAuth } = require('./dashboard-auth');
 const { incomeMetrics } = require('./futures-income');
 const { sellEntryLabel } = require('./futures-display');
 const { resolveAppliedDirection } = require('./fibonacci-direction-analyzer');
+const { timeframeToMs } = require('./fibonacci-range-advisor');
 const {
   marketPrice,
   marketPriceText,
@@ -141,26 +142,32 @@ function volumeDeltaFromState(symState, positionSide) {
     configuredEnabled === undefined ? persisted?.enabled : configuredEnabled,
     false
   );
+  const configuredTimeframe = process.env[`${prefix}VOLUME_DELTA_TIMEFRAME`];
+  const timeframe = String(configuredTimeframe || persisted?.timeframe || '15m');
+  const configuredLookback = process.env[`${prefix}VOLUME_DELTA_LOOKBACK_CANDLES`];
   const lookbackCandles = numberOrZero(
-    persisted?.lookbackCandles ?? process.env[`${prefix}VOLUME_DELTA_LOOKBACK_CANDLES`]
+    configuredLookback === undefined ? persisted?.lookbackCandles : configuredLookback
   );
+  const configuredFailClosed = process.env[`${prefix}VOLUME_DELTA_FAIL_CLOSED`];
   const failClosed = booleanValue(
-    persisted?.failClosed ?? process.env[`${prefix}VOLUME_DELTA_FAIL_CLOSED`],
+    configuredFailClosed === undefined ? persisted?.failClosed : configuredFailClosed,
     false
   );
   const available = enabled && Boolean(persisted?.available);
   return {
     enabled,
     mode: String(
-      persisted?.mode ?? process.env[`${prefix}VOLUME_DELTA_ENTRY_FILTER_MODE`] ?? 'OFF'
+      process.env[`${prefix}VOLUME_DELTA_ENTRY_FILTER_MODE`] ?? persisted?.mode ?? 'OFF'
     ).toUpperCase(),
     positionSide: side,
-    timeframe: persisted?.timeframe || '15m',
+    timeframe,
     lookbackCandles,
-    windowMinutes: numberOrZero(persisted?.windowMinutes) || lookbackCandles * 15,
+    windowMinutes: configuredTimeframe !== undefined || configuredLookback !== undefined
+      ? Math.round(timeframeToMs(timeframe) * lookbackCandles / 60_000)
+      : numberOrZero(persisted?.windowMinutes) || lookbackCandles * 15,
     oppositionThresholdPct: numberOrZero(
-      persisted?.oppositionThresholdPct ??
-      process.env[`${prefix}VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT`]
+      process.env[`${prefix}VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT`] ??
+      persisted?.oppositionThresholdPct
     ),
     failClosed,
     available,

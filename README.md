@@ -236,11 +236,15 @@ Trailing range hanya berlaku untuk auto range. Manual range tidak digeser oleh t
 - `FUTURES_SHORT_ENTRY_DIRECTION`: gate entry SHORT berdasarkan arah Fibonacci terapan. Konfigurasi live memakai `BEARISH`; exit BUY tidak ikut diblokir.
 - `FUTURES_MUTUAL_ENTRY_LOCK_FILE`: prefix lock atomik lintas worker untuk mencegah race saat entry.
 - `FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS`: batas tunggu lock entry lintas worker. Jika timeout atau status sisi lawan gagal diverifikasi, entry diblokir.
-- `VOLUME_DELTA_ENTRY_FILTER_ENABLED`: risk overlay Volume Delta untuk worker LONG. Tetap `false` karena kandidat simetris gagal validasi out-of-sample 3 bulan.
+- `VOLUME_DELTA_ENTRY_FILTER_ENABLED`: aktifkan risk overlay Volume Delta untuk worker LONG. Profil scalping tervalidasi memakai `true`.
+- `VOLUME_DELTA_TIMEFRAME`: timeframe candle mentah Volume Delta. Profil scalping memakai `5m`.
+- `VOLUME_DELTA_LOOKBACK_CANDLES`: jendela LONG. Profil scalping memakai `3`, setara 15 menit.
+- `VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT`: batas tekanan berlawanan LONG. Profil scalping tervalidasi memakai `10`.
 - `SHORT_VOLUME_DELTA_ENTRY_FILTER_ENABLED`: aktifkan risk overlay volume delta pada worker SHORT.
 - `SHORT_VOLUME_DELTA_ENTRY_FILTER_MODE`: `SHADOW` hanya mencatat keputusan, `LIVE` dapat menghentikan dan membatalkan order entry SHORT. Order BUY exit tidak pernah diblokir.
-- `SHORT_VOLUME_DELTA_LOOKBACK_CANDLES`: jendela candle 15 menit. Nilai tervalidasi `4`, setara satu jam.
-- `SHORT_VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT`: blok entry SHORT jika delta taker buy positif melampaui batas ini. Nilai tervalidasi `5`.
+- `SHORT_VOLUME_DELTA_TIMEFRAME`: timeframe candle mentah SHORT. Profil scalping memakai `5m`.
+- `SHORT_VOLUME_DELTA_LOOKBACK_CANDLES`: jendela SHORT. Profil scalping memakai `12`, setara satu jam.
+- `SHORT_VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT`: blok entry SHORT jika delta taker buy positif melampaui batas ini. Nilai tervalidasi `2.5`.
 - `SHORT_VOLUME_DELTA_FAIL_CLOSED`: default `false`; gangguan endpoint delta tidak menghentikan strategi utama.
 - `BINANCE_SPOT_MAKER_FEE_RATE`: asumsi fee maker Binance Spot per sisi untuk prompt AI. Default `0.001` atau 0.1%; gunakan `0.00075` jika fee dibayar pakai BNB dengan diskon 25%, atau sesuaikan dengan tier VIP/pair akun.
 - `GRID_MIN_NET_PROFIT_PCT`: target profit bersih minimum per jarak grid setelah fee buy+sell. Default `0.05` atau 0.05%.
@@ -340,9 +344,10 @@ Backtest volume delta tiga bulan:
 
 ```bash
 npm run backtest:volume-delta
+npm run backtest:scalping-volume-delta
 ```
 
-Runner mengambil raw kline Binance USD-M agar dapat memakai `taker buy base asset volume`. Delta dihitung sebagai taker buy dikurangi taker sell. Kandidat dipilih pada 45 hari pertama dan divalidasi tanpa perubahan pada 45 hari terakhir. Filter hanya memengaruhi entry SHORT; strategi LONG dan seluruh exit tetap berjalan seperti biasa.
+Runner mengambil raw kline Binance USD-M agar dapat memakai `taker buy base asset volume`. Delta dihitung sebagai taker buy dikurangi taker sell. Kandidat dipilih pada 45 hari pertama dan divalidasi tanpa perubahan pada 45 hari terakhir. Runner scalping memakai candle 5 menit dan memilih parameter LONG serta SHORT secara terpisah. Semua kandidat yang dapat dipilih memakai Volume Delta pada kedua sisi; baseline tanpa Delta hanya menjadi pembanding. Filter hanya memengaruhi entry dan seluruh exit tetap berjalan seperti biasa.
 
 Full-grid PnL backtest membandingkan empat varian: baseline, Adaptive Supervisor deterministik, Adaptive + Gemini, dan Adaptive + learned policy. Keputusan historis Gemini dibuat satu kali sebagai cache agar replay berikutnya reproducible dan tidak memanggil API lagi:
 

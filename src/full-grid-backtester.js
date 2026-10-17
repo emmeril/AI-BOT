@@ -16,11 +16,13 @@ const {
 } = require('../scripts/backtest-fibonacci-direction');
 
 const MINUTE_MS = 60_000;
-const BASE_TIMEFRAME_MS = 15 * MINUTE_MS;
 const RANGE_TIMEFRAMES = ['15m', '30m', '1h', '4h', '1d', '1w'];
 const DIRECTION_TIMEFRAMES = ['15m', '1h', '4h'];
 
 const DEFAULT_OPTIONS = Object.freeze({
+  baseTimeframe: '15m',
+  rangeTimeframes: RANGE_TIMEFRAMES,
+  directionTimeframes: DIRECTION_TIMEFRAMES,
   gridCount: 27,
   totalInvestment: 150,
   leverage: 5,
@@ -38,6 +40,8 @@ const DEFAULT_OPTIONS = Object.freeze({
   handoffEntryCooldownMs: 0,
   candleLimit: 100,
   rangeWidthPct: 20,
+  rangeMinimumWidthPct: 6,
+  rangeMaximumDistancePct: 25,
   rangeRebuildThresholdPct: 2,
   rangeRebuildCooldownMs: 120 * MINUTE_MS,
   directionMinimumConfidence: 0.65,
@@ -86,9 +90,9 @@ function entryDirectionAllows(positionSide, appliedDirection, options = {}) {
   return required === 'ALWAYS' || appliedDirection === required;
 }
 
-function latestClosedCandles(series, indices) {
+function latestClosedCandles(series, indices, timeframes = RANGE_TIMEFRAMES) {
   const result = [];
-  for (const timeframe of RANGE_TIMEFRAMES) {
+  for (const timeframe of timeframes) {
     const index = indices[timeframe];
     const row = series[timeframe]?.[index];
     if (!row) continue;
@@ -148,32 +152,45 @@ class FullGridBacktester {
     this.exchange = exchange;
     this.options = { ...DEFAULT_OPTIONS, ...options };
     this.rangeSuggestionCache = new Map();
+    this.preparedSeriesCache = new WeakMap();
+    this.directionAggregateCache = new Map();
   }
 
-  prepareSeries(rows) {
-    return {
-      '15m': rows,
-      '30m': resampleCandles(rows, 30 * MINUTE_MS),
-      '1h': resampleCandles(rows, 60 * MINUTE_MS),
-      '4h': resampleCandles(rows, 4 * 60 * MINUTE_MS),
-      '1d': resampleCandles(rows, 24 * 60 * MINUTE_MS),
-      '1w': resampleCandles(rows, 7 * 24 * 60 * MINUTE_MS),
-    };
+  prepareSeries(rows, baseTimeframe, timeframes) {
+    const baseTimeframeMs = timeframeToMs(baseTimeframe);
+    if (!(baseTimeframeMs > 0)) throw new Error(`Unsupported base timeframe: ${baseTimeframe}`);
+    const cacheKey = `${baseTimeframe}|${timeframes.join(',')}`;
+    const cached = this.preparedSeriesCache.get(rows)?.get(cacheKey);
+    if (cached) return cached;
+    const series = {};
+    for (const timeframe of timeframes) {
+      const timeframeMs = timeframeToMs(timeframe);
+      if (!(timeframeMs >= baseTimeframeMs) || timeframeMs % baseTimeframeMs !== 0) {
+        throw new Error(`${timeframe} cannot be built from ${baseTimeframe} candles`);
+      }
+      series[timeframe] = timeframe === baseTimeframe
+        ? rows
+        : resampleCandles(rows, timeframeMs, baseTimeframeMs);
+    }
+    const rowCache = this.preparedSeriesCache.get(rows) || new Map();
+    rowCache.set(cacheKey, series);
+    this.preparedSeriesCache.set(rows, rowCache);
+    return series;
   }
 
-  createRangeAdvisor() {
+  createRangeAdvisor(timeframes = RANGE_TIMEFRAMES) {
     const options = this.options;
     const minimumStepRatio = (1 + options.minimumNetProfitPct / 100 + options.makerFeeRate) /
       (1 - options.makerFeeRate);
     return new FibonacciRangeAdvisor(this.exchange, {
       enabled: true,
-      timeframes: RANGE_TIMEFRAMES,
+      timeframes,
       ratios: [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1, 1.272, 1.618, 2, 2.618],
       candleCloseBufferMs: 5000,
       clusterTolerancePct: 0.15,
       minClusterScore: 1,
-      minRangeWidthPct: 6,
-      maxDistancePct: 25,
+      minRangeWidthPct: options.rangeMinimumWidthPct,
+      maxDistancePct: options.rangeMaximumDistancePct,
       rebuildThresholdPct: options.rangeRebuildThresholdPct,
       rebuildCooldownMs: options.rangeRebuildCooldownMs,
       levelCount: options.gridCount + 1,
@@ -200,8 +217,14 @@ class FullGridBacktester {
     const configuredPositionSide = String(options.positionSide).toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
     const mutualExclusion = Boolean(options.mutualExclusion);
     const adaptiveEnabled = adaptive || riskStateMachine;
-    const series = this.prepareSeries(rows);
-    const rangeAdvisor = this.createRangeAdvisor();
+    const baseTimeframe = String(options.baseTimeframe || '15m');
+    const baseTimeframeMs = timeframeToMs(baseTimeframe);
+    if (!(baseTimeframeMs > 0)) throw new Error(`Unsupported base timeframe: ${baseTimeframe}`);
+    const rangeTimeframes = [...new Set(options.rangeTimeframes || RANGE_TIMEFRAMES)];
+    const directionTimeframes = [...new Set(options.directionTimeframes || DIRECTION_TIMEFRAMES)];
+    const requiredTimeframes = [...new Set([...rangeTimeframes, ...directionTimeframes])];
+    const series = this.prepareSeries(rows, baseTimeframe, requiredTimeframes);
+    const rangeAdvisor = this.createRangeAdvisor(rangeTimeframes);
     const supervisor = new AdaptiveGridSupervisor({
       minimumConfidence: options.directionMinimumConfidence,
       profileConfirmations: 3,
@@ -217,7 +240,7 @@ class FullGridBacktester {
       recoveryConfirmations: options.riskRecoveryConfirmations,
     });
     const directionConfirmation = { candidate: 'RANGING', count: 0 };
-    const indices = Object.fromEntries(RANGE_TIMEFRAMES.map(timeframe => [timeframe, -1]));
+    const indices = Object.fromEntries(requiredTimeframes.map(timeframe => [timeframe, -1]));
     const metrics = createMetrics();
     metrics.entryFilterBlockedSamples = 0;
     metrics.directionBlockedSamples = 0;
@@ -437,13 +460,13 @@ class FullGridBacktester {
     for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
       const candle = rows[rowIndex];
       const [timestamp, open, high, low, close] = candle;
-      const evaluationTime = timestamp + BASE_TIMEFRAME_MS;
+      const evaluationTime = timestamp + baseTimeframeMs;
       if (evaluationTime < start) continue;
       if (timestamp >= end) break;
       lastClose = close;
 
       while (fundingIndex < funding.length && funding[fundingIndex].timestamp < timestamp) fundingIndex++;
-      while (fundingIndex < funding.length && funding[fundingIndex].timestamp < timestamp + BASE_TIMEFRAME_MS) {
+      while (fundingIndex < funding.length && funding[fundingIndex].timestamp < timestamp + baseTimeframeMs) {
         const event = funding[fundingIndex];
         if (event.timestamp >= timestamp) {
           const pnl = lots.reduce((sum, lot) => {
@@ -503,18 +526,23 @@ class FullGridBacktester {
         pendingBuys.delete(levelIndex);
       }
 
-      for (const timeframe of RANGE_TIMEFRAMES) {
+      for (const timeframe of requiredTimeframes) {
         indices[timeframe] = completedIndex(
           series[timeframe], timeframeToMs(timeframe), evaluationTime, indices[timeframe]
         );
       }
-      if (DIRECTION_TIMEFRAMES.every(timeframe => indices[timeframe] + 1 >= options.candleLimit)) {
-        const timeframeResults = DIRECTION_TIMEFRAMES.map(timeframe => analyzeTimeframe(
-          series[timeframe].slice(indices[timeframe] + 1 - options.candleLimit, indices[timeframe] + 1),
-          timeframe
-        ));
-        if (timeframeResults.every(Boolean)) {
-          const aggregate = aggregateTimeframes(timeframeResults);
+      if (directionTimeframes.every(timeframe => indices[timeframe] + 1 >= options.candleLimit)) {
+        const directionCacheKey = `${symbol}|${directionTimeframes.join(',')}|${options.candleLimit}|${evaluationTime}`;
+        let aggregate = this.directionAggregateCache.get(directionCacheKey);
+        if (!this.directionAggregateCache.has(directionCacheKey)) {
+          const timeframeResults = directionTimeframes.map(timeframe => analyzeTimeframe(
+            series[timeframe].slice(indices[timeframe] + 1 - options.candleLimit, indices[timeframe] + 1),
+            timeframe
+          ));
+          aggregate = timeframeResults.every(Boolean) ? aggregateTimeframes(timeframeResults) : null;
+          this.directionAggregateCache.set(directionCacheKey, aggregate);
+        }
+        if (aggregate) {
           const confirmedDirection = applyConfirmation(aggregate, directionConfirmation);
           lastAnalysis = { ...aggregate, confirmedDirection };
         }
@@ -570,7 +598,7 @@ class FullGridBacktester {
         const cacheKey = `${symbol}|${timestamp}|${direction}`;
         let suggestion = this.rangeSuggestionCache.get(cacheKey);
         if (!suggestion) {
-          const closedCandles = latestClosedCandles(series, indices);
+          const closedCandles = latestClosedCandles(series, indices, rangeTimeframes);
           suggestion = rangeAdvisor.buildSuggestion(symbol, close, closedCandles, { direction });
           if (!suggestion) {
             const levels = geometricLevels(
@@ -617,7 +645,7 @@ class FullGridBacktester {
     }, 0);
     const netLiquidationPnl = metrics.cashPnl + liquidationComponent - finalExitFee;
     const fees = metrics.buyFees + metrics.sellFees + finalExitFee;
-    const durationDays = firstEvaluationAt ? Math.max(0, (Math.min(end, rows.at(-1)[0] + BASE_TIMEFRAME_MS) - firstEvaluationAt) / 86_400_000) : 0;
+    const durationDays = firstEvaluationAt ? Math.max(0, (Math.min(end, rows.at(-1)[0] + baseTimeframeMs) - firstEvaluationAt) / 86_400_000) : 0;
     return {
       symbol,
       variant: variant || (riskStateMachine ? 'risk-state-machine' : adaptive ? 'adaptive' : 'baseline'),
