@@ -30,6 +30,7 @@ const DEFAULT_OPTIONS = Object.freeze({
   minimumNetProfitPct: 0.05,
   minimumNotional: 5,
   positionSide: 'LONG',
+  longEntryDirection: 'ALWAYS',
   shortEntryDirection: 'ALWAYS',
   mutualExclusion: false,
   controlledHandoff: false,
@@ -75,6 +76,14 @@ function maximumProfitableShortBuyPrice(lot, options) {
 
 function chooseSpacedLevels(candidates, multiplier) {
   return selectSpacedBuyLevels(candidates, multiplier);
+}
+
+function entryDirectionAllows(positionSide, appliedDirection, options = {}) {
+  const short = String(positionSide || '').toUpperCase() === 'SHORT';
+  const required = String(
+    short ? options.shortEntryDirection : options.longEntryDirection
+  ).toUpperCase() || 'ALWAYS';
+  return required === 'ALWAYS' || appliedDirection === required;
 }
 
 function latestClosedCandles(series, indices) {
@@ -211,6 +220,7 @@ class FullGridBacktester {
     const indices = Object.fromEntries(RANGE_TIMEFRAMES.map(timeframe => [timeframe, -1]));
     const metrics = createMetrics();
     metrics.entryFilterBlockedSamples = 0;
+    metrics.directionBlockedSamples = 0;
     const lots = [];
     const pendingBuys = new Map();
     const slotFillCounts = new Map();
@@ -369,9 +379,12 @@ class FullGridBacktester {
         metrics.blockedEntrySamples++;
         return;
       }
-      const requiredShortDirection = String(options.shortEntryDirection || 'ALWAYS').toUpperCase();
       const short = sideIsShort(activePositionSide);
-      if (short && requiredShortDirection !== 'ALWAYS' && appliedDirection !== requiredShortDirection) return;
+      if (!entryDirectionAllows(activePositionSide, appliedDirection, options)) {
+        pendingBuys.clear();
+        metrics.directionBlockedSamples++;
+        return;
+      }
       const recommendation = adaptiveEnabled && lastDecision
         ? lastDecision.recommendation
         : { buyWeight: { upper: 1, middle: 1, lower: 1 }, spacingMultiplier: 1 };
@@ -666,6 +679,7 @@ module.exports = {
   DEFAULT_OPTIONS,
   FullGridBacktester,
   chooseSpacedLevels,
+  entryDirectionAllows,
   geometricLevels,
   minimumProfitableSellPrice,
   maximumProfitableShortBuyPrice,

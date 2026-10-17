@@ -22,14 +22,16 @@ const DEFAULT_SYMBOLS = [
   'JUP/USDT:USDT',
 ];
 const VARIANTS = Object.freeze([
-  { key: 'baseline', label: 'No volume-delta filter' },
-  { key: 'guard_1h_05', label: 'SHORT 1h opposition guard 5%', lookbackCandles: 4, thresholdPct: 5 },
-  { key: 'guard_4h_025', label: 'SHORT 4h opposition guard 2.5%', lookbackCandles: 16, thresholdPct: 2.5 },
-  { key: 'guard_4h_05', label: 'SHORT 4h opposition guard 5%', lookbackCandles: 16, thresholdPct: 5 },
-  { key: 'guard_4h_10', label: 'SHORT 4h opposition guard 10%', lookbackCandles: 16, thresholdPct: 10 },
-  { key: 'guard_8h_05', label: 'SHORT 8h opposition guard 5%', lookbackCandles: 32, thresholdPct: 5 },
-  { key: 'confirm_1h', label: 'SHORT 1h same-side confirmation', lookbackCandles: 4, thresholdPct: 0 },
-  { key: 'confirm_4h', label: 'SHORT 4h same-side confirmation', lookbackCandles: 16, thresholdPct: 0 },
+  { key: 'baseline', label: 'Symmetric Fibonacci gate, no volume delta' },
+  { key: 'guard_1h_025', label: 'Both sides 1h opposition guard 2.5%', lookbackCandles: 4, thresholdPct: 2.5 },
+  { key: 'guard_1h_05', label: 'Both sides 1h opposition guard 5%', lookbackCandles: 4, thresholdPct: 5 },
+  { key: 'guard_1h_10', label: 'Both sides 1h opposition guard 10%', lookbackCandles: 4, thresholdPct: 10 },
+  { key: 'guard_4h_025', label: 'Both sides 4h opposition guard 2.5%', lookbackCandles: 16, thresholdPct: 2.5 },
+  { key: 'guard_4h_05', label: 'Both sides 4h opposition guard 5%', lookbackCandles: 16, thresholdPct: 5 },
+  { key: 'guard_4h_10', label: 'Both sides 4h opposition guard 10%', lookbackCandles: 16, thresholdPct: 10 },
+  { key: 'guard_8h_05', label: 'Both sides 8h opposition guard 5%', lookbackCandles: 32, thresholdPct: 5 },
+  { key: 'confirm_1h', label: 'Both sides 1h same-side confirmation', lookbackCandles: 4, thresholdPct: 0 },
+  { key: 'confirm_4h', label: 'Both sides 4h same-side confirmation', lookbackCandles: 16, thresholdPct: 0 },
 ]);
 
 function safeName(symbol) {
@@ -113,20 +115,14 @@ function simulateSide({ exchange, symbol, rows, fundingRates, start, end, option
   const simulator = new FullGridBacktester(exchange, options);
   const results = {};
   for (const variant of VARIANTS) {
-    if (side === 'LONG' && variant.key !== 'baseline') {
-      results[variant.key] = results.baseline;
-      continue;
-    }
     results[variant.key] = simulator.simulate({
       symbol,
       rows,
       fundingRates,
       start,
       end,
-      adaptive: side === 'LONG',
-      entryDecisionProvider: side === 'SHORT'
-        ? entryDecisionProvider(maps[variant.lookbackCandles], variant)
-        : null,
+      adaptive: false,
+      entryDecisionProvider: entryDecisionProvider(maps[variant.lookbackCandles], variant),
       variant: `${side.toLowerCase()}-${variant.key}`,
     });
   }
@@ -174,9 +170,9 @@ function aggregateResults(scope, symbols, longOptions, shortOptions) {
 }
 
 function selectOnTraining(train) {
-  const baseline = train.aggregate.baseline.SHORT;
+  const baseline = train.aggregate.baseline.combined;
   const candidates = VARIANTS.slice(1).map(variant => {
-    const result = train.aggregate[variant.key].SHORT;
+    const result = train.aggregate[variant.key].combined;
     const pnlDelta = result.netLiquidationPnl - baseline.netLiquidationPnl;
     const drawdownDelta = result.sumOfPerSymbolMaximumDrawdowns - baseline.sumOfPerSymbolMaximumDrawdowns;
     return { key: variant.key, pnlDelta, drawdownDelta };
@@ -210,10 +206,10 @@ function renderMarkdown(report) {
   lines.push(`- Selected using training data only: ${report.selection.selected || 'none'}.`);
   lines.push(`- Out-of-sample validation: ${report.selection.validation}.`);
   if (report.selection.selected) {
-    const comparisonResult = report.outOfSample.comparison[report.selection.selected].SHORT;
+    const comparisonResult = report.outOfSample.comparison[report.selection.selected].combined;
     lines.push(
-      `- SHORT out-of-sample PnL delta: ${comparisonResult.netPnlDelta} USDT.`,
-      `- SHORT out-of-sample drawdown delta: ${comparisonResult.drawdownDelta} USDT (negative is better).`
+      `- Combined out-of-sample PnL delta: ${comparisonResult.netPnlDelta} USDT.`,
+      `- Combined out-of-sample drawdown delta: ${comparisonResult.drawdownDelta} USDT (negative is better).`
     );
   }
   lines.push('', '## Assumptions', '');
@@ -245,6 +241,7 @@ async function main() {
     makerFeeRate: envNumber('BINANCE_FUTURES_MAKER_FEE_RATE', 0.0002),
     minimumNetProfitPct: envNumber('GRID_MIN_NET_PROFIT_PCT', 0.05),
     positionSide: 'LONG',
+    longEntryDirection: 'BULLISH',
     directionStrategy: String(process.env.FIBONACCI_DIRECTION_STRATEGY || 'EMA_SLOPE_MEAN_REVERSION').toUpperCase(),
     directionEmaSlopeAtrThreshold: envNumber('FIBONACCI_DIRECTION_EMA_SLOPE_ATR_THRESHOLD', 1),
   };
@@ -286,9 +283,9 @@ async function main() {
   }
   for (const scope of Object.values(scopes)) aggregateResults(scope, symbols, longOptions, shortOptions);
   const selected = selectOnTraining(scopes.train);
-  const selectedOos = selected ? scopes.outOfSample.comparison[selected].SHORT : null;
-  const baselineShortOos = scopes.outOfSample.aggregate.baseline.SHORT.netLiquidationPnl;
-  const toleratedPnlReduction = Math.max(0.25, Math.abs(baselineShortOos) * 0.05);
+  const selectedOos = selected ? scopes.outOfSample.comparison[selected].combined : null;
+  const baselineOos = scopes.outOfSample.aggregate.baseline.combined.netLiquidationPnl;
+  const toleratedPnlReduction = Math.max(0.25, Math.abs(baselineOos) * 0.05);
   const validation = selectedOos &&
       selectedOos.netPnlDelta >= -toleratedPnlReduction && selectedOos.drawdownDelta < 0
     ? 'PASS'
@@ -308,8 +305,10 @@ async function main() {
     selection: { selected, validation },
     assumptions: [
       'Volume delta is taker buy base volume minus taker sell base volume from Binance USD-M 15m klines.',
-      'Volume delta is applied only to SHORT; the LONG strategy remains unchanged.',
-      'A guard cancels pending SHORT entry orders when opposing delta exceeds the threshold; exit orders are never filtered.',
+      'LONG entries require applied Fibonacci BULLISH; SHORT entries require applied Fibonacci BEARISH.',
+      'Adaptive Supervisor is disabled for both sides.',
+      'The same mirrored volume-delta guard is applied to both sides and cancels only opposing pending entries.',
+      'Exit orders are never filtered by Fibonacci direction or volume delta.',
       'The candidate is selected on the first 45 days and validated unchanged on the final 45 days.',
       '15m candles cannot model queue position, slippage, latency, exact intrabar ordering, or rejected post-only orders.',
       'Liquidation and maintenance-margin tiers are not simulated.',

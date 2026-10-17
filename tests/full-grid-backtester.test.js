@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const {
   FullGridBacktester,
   chooseSpacedLevels,
+  entryDirectionAllows,
   maximumProfitableShortBuyPrice,
   minimumProfitableSellPrice,
   zoneForRank,
@@ -119,4 +120,12 @@ test('rank zones progress from upper to middle to lower', () => {
   assert.equal(zoneForRank(1, 9), 'upper');
   assert.equal(zoneForRank(5, 9), 'middle');
   assert.equal(zoneForRank(9, 9), 'lower');
+});
+
+test('entry direction gate mirrors BULLISH LONG and BEARISH SHORT', () => {
+  const options = { longEntryDirection: 'BULLISH', shortEntryDirection: 'BEARISH' };
+  assert.equal(entryDirectionAllows('LONG', 'BULLISH', options), true);
+  assert.equal(entryDirectionAllows('LONG', 'BEARISH', options), false);
+  assert.equal(entryDirectionAllows('SHORT', 'BEARISH', options), true);
+  assert.equal(entryDirectionAllows('SHORT', 'BULLISH', options), false);
 });

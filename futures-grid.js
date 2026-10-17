@@ -120,6 +120,9 @@ const POSITION_SIDE = Config.get('FUTURES_POSITION_SIDE', 'LONG').toUpperCase();
 const ENTRY_SIDE = POSITION_SIDE === 'SHORT' ? 'sell' : 'buy';
 const EXIT_SIDE = POSITION_SIDE === 'SHORT' ? 'buy' : 'sell';
 const ORDER_ID_PREFIX = POSITION_SIDE === 'SHORT' ? 'sgrid' : 'grid';
+const FUTURES_LONG_ENTRY_DIRECTION = Config.get(
+  'FUTURES_LONG_ENTRY_DIRECTION', 'BULLISH'
+).toUpperCase();
 const FUTURES_SHORT_ENTRY_DIRECTION = Config.get(
   'FUTURES_SHORT_ENTRY_DIRECTION', 'BEARISH'
 ).toUpperCase();
@@ -602,6 +605,9 @@ function validateRuntimeConfiguration() {
   }
   if (!['LONG', 'SHORT'].includes(POSITION_SIDE)) {
     errors.push('FUTURES_POSITION_SIDE must be LONG or SHORT');
+  }
+  if (!['ALWAYS', 'BULLISH'].includes(FUTURES_LONG_ENTRY_DIRECTION)) {
+    errors.push('FUTURES_LONG_ENTRY_DIRECTION must be ALWAYS or BULLISH');
   }
   if (!['ALWAYS', 'BEARISH'].includes(FUTURES_SHORT_ENTRY_DIRECTION)) {
     errors.push('FUTURES_SHORT_ENTRY_DIRECTION must be ALWAYS or BEARISH');
@@ -2569,12 +2575,10 @@ class FuturesGridEngine {
 
   isEntrySidePreferred(symbol) {
     const direction = this.getAppliedFibonacciDirection(symbol);
-    const shortPreferred = FUTURES_SHORT_ENTRY_DIRECTION === 'ALWAYS' ||
-      direction === FUTURES_SHORT_ENTRY_DIRECTION;
-    if (!this.mutualExclusionEnabled) {
-      return POSITION_SIDE === 'LONG' || shortPreferred;
-    }
-    return POSITION_SIDE === 'SHORT' ? shortPreferred : !shortPreferred;
+    const requiredDirection = POSITION_SIDE === 'SHORT'
+      ? FUTURES_SHORT_ENTRY_DIRECTION
+      : FUTURES_LONG_ENTRY_DIRECTION;
+    return requiredDirection === 'ALWAYS' || direction === requiredDirection;
   }
 
   async getVolumeDeltaEntryDecision(symbol) {
@@ -2783,7 +2787,7 @@ class FuturesGridEngine {
     if (side !== ENTRY_SIDE) return submit();
     if (!this.isEntrySidePreferred(symbol)) {
       console.warn(
-        `[MUTUAL] ${symbol} ${ENTRY_SIDE.toUpperCase()} entry blocked: ` +
+        `[DIRECTION] ${symbol} ${ENTRY_SIDE.toUpperCase()} entry blocked: ` +
         `${POSITION_SIDE} does not own direction ${this.getAppliedFibonacciDirection(symbol)}`
       );
       return null;
@@ -4228,12 +4232,12 @@ class FuturesGridEngine {
     if (!directionEntryPreferred) {
       const direction = this.getAppliedFibonacciDirection(symbol);
       if (await this.cancelManagedEntryOrders(
-        symbol, managedOrders, `mutual ownership moved to SHORT (${direction})`
+        symbol, managedOrders, `LONG direction gate rejected ${direction}`
       )) {
         freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
         managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
       }
-      console.log(`[MUTUAL] ${symbol} LONG entries paused; direction=${direction}`);
+      console.log(`[DIRECTION] ${symbol} LONG entries paused; direction=${direction}`);
     } else if (!volumeDeltaDecision.allow) {
       if (await this.cancelManagedEntryOrders(
         symbol, managedOrders,
@@ -4455,12 +4459,12 @@ class FuturesGridEngine {
     if (!directionEntryPreferred) {
       const direction = this.getAppliedFibonacciDirection(symbol);
       if (await this.cancelManagedEntryOrders(
-        symbol, managedOrders, `mutual ownership moved to LONG (${direction})`
+        symbol, managedOrders, `SHORT direction gate rejected ${direction}`
       )) {
         freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
         managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
       }
-      console.log(`[MUTUAL] ${symbol} SHORT entries paused; direction=${direction}`);
+      console.log(`[DIRECTION] ${symbol} SHORT entries paused; direction=${direction}`);
     } else if (!volumeDeltaDecision.allow) {
       if (await this.cancelManagedEntryOrders(
         symbol, managedOrders,

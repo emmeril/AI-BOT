@@ -18,12 +18,16 @@ FUTURES_USER_STREAM_ENABLED=true
 FUTURES_USER_STREAM_RECONCILE_DEBOUNCE_MS=750
 FUTURES_USER_STREAM_KEEPALIVE_MINUTES=45
 FUTURES_USER_STREAM_RECONNECT_MAX_SECONDS=30
-# Allow LONG and SHORT to operate independently on the same pair. SHORT entries
-# remain limited to BEARISH direction unless FUTURES_SHORT_ENTRY_DIRECTION is changed.
+# Allow LONG and SHORT to operate independently on the same pair. Their entry
+# gates mirror each other: LONG=BULLISH and SHORT=BEARISH.
 FUTURES_MUTUAL_EXCLUSION_ENABLED=false
+FUTURES_LONG_ENTRY_DIRECTION=BULLISH
+FUTURES_SHORT_ENTRY_DIRECTION=BEARISH
 FUTURES_MUTUAL_ENTRY_LOCK_FILE=futures-mutual-entry
 FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS=30000
-# Validated as a SHORT-only risk overlay. Four 15m candles equal one hour.
+# The symmetric LONG volume-delta guard failed OOS validation, so keep it off.
+VOLUME_DELTA_ENTRY_FILTER_ENABLED=false
+# Validated SHORT-only risk overlay. Four 15m candles equal one hour.
 SHORT_VOLUME_DELTA_ENTRY_FILTER_ENABLED=true
 SHORT_VOLUME_DELTA_ENTRY_FILTER_MODE=LIVE
 SHORT_VOLUME_DELTA_LOOKBACK_CANDLES=4

@@ -231,10 +231,13 @@ Trailing range hanya berlaku untuk auto range. Manual range tidak digeser oleh t
 - `GRID_POST_ONLY`: gunakan maker/post-only order jika exchange mendukung.
 - `GRID_PRICE_PRECISION_MAX_DEVIATION_PCT`: toleransi perubahan harga setelah dibulatkan mengikuti precision exchange.
 - `FUTURES_SELL_ENTRY_FLOOR_ENABLED`: futures saja, default `true`. Target SELL baru harus berada di atas entry rata-rata LONG Binance. Order SELL aktif yang turun di bawah entry rata-rata setelah BUY tambahan akan dibatalkan dan dibuat ulang pada siklus rekonsiliasi berikutnya.
-- `FUTURES_MUTUAL_EXCLUSION_ENABLED`: futures saja, default `false`. LONG dan SHORT boleh memiliki posisi bersamaan pada pair yang sama; entry SHORT tetap mengikuti `FUTURES_SHORT_ENTRY_DIRECTION`. Ubah ke `true` jika satu pair hanya boleh ditempati salah satu sisi. Exit kedua sisi tidak pernah diblokir.
+- `FUTURES_MUTUAL_EXCLUSION_ENABLED`: futures saja, default `false`. LONG dan SHORT boleh memiliki posisi bersamaan pada pair yang sama. Ubah ke `true` jika satu pair hanya boleh ditempati salah satu sisi. Exit kedua sisi tidak pernah diblokir.
+- `FUTURES_LONG_ENTRY_DIRECTION`: gate entry LONG berdasarkan arah Fibonacci terapan. Konfigurasi live memakai `BULLISH`; exit SELL tidak ikut diblokir.
+- `FUTURES_SHORT_ENTRY_DIRECTION`: gate entry SHORT berdasarkan arah Fibonacci terapan. Konfigurasi live memakai `BEARISH`; exit BUY tidak ikut diblokir.
 - `FUTURES_MUTUAL_ENTRY_LOCK_FILE`: prefix lock atomik lintas worker untuk mencegah race saat entry.
 - `FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS`: batas tunggu lock entry lintas worker. Jika timeout atau status sisi lawan gagal diverifikasi, entry diblokir.
-- `SHORT_VOLUME_DELTA_ENTRY_FILTER_ENABLED`: aktifkan risk overlay volume delta hanya pada worker SHORT.
+- `VOLUME_DELTA_ENTRY_FILTER_ENABLED`: risk overlay Volume Delta untuk worker LONG. Tetap `false` karena kandidat simetris gagal validasi out-of-sample 3 bulan.
+- `SHORT_VOLUME_DELTA_ENTRY_FILTER_ENABLED`: aktifkan risk overlay volume delta pada worker SHORT.
 - `SHORT_VOLUME_DELTA_ENTRY_FILTER_MODE`: `SHADOW` hanya mencatat keputusan, `LIVE` dapat menghentikan dan membatalkan order entry SHORT. Order BUY exit tidak pernah diblokir.
 - `SHORT_VOLUME_DELTA_LOOKBACK_CANDLES`: jendela candle 15 menit. Nilai tervalidasi `4`, setara satu jam.
 - `SHORT_VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT`: blok entry SHORT jika delta taker buy positif melampaui batas ini. Nilai tervalidasi `5`.

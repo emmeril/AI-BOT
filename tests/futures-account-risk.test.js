@@ -70,6 +70,7 @@ test('SHORT exposure counts only SHORT positions and pending SELL entries', () =
 function riskEngine() {
   const engine = Object.create(FuturesGridEngine.prototype);
   engine.mutualExclusionEnabled = false;
+  engine.appliedFibonacciDirections = new Map([[symbol, 'BULLISH']]);
   engine.exposureLimits = { symbol: 100, total: 150 };
   engine.makeClientOrderId = () => 'test';
   const submitted = [];
@@ -79,7 +80,7 @@ function riskEngine() {
   return { engine, submitted };
 }
 
-function mutualEngine(direction = 'RANGING') {
+function mutualEngine(direction = 'BULLISH') {
   const engine = Object.create(FuturesGridEngine.prototype);
   engine.mutualExclusionEnabled = true;
   engine.mutualEntryMutex = { run: (_symbol, fn) => fn() };
