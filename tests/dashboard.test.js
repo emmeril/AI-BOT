@@ -144,7 +144,10 @@ test('futures dashboard reports fill counts for the selected symbol', async () =
     },
   };
   states['1000PEPE/USDT:USDT'].lastBuyByLevel = { 1: { totalFeeQuote: 0.1 } };
-  engine.exchange.fetchPositions = async () => [{ symbol: '1000PEPE/USDT:USDT', side: 'long', contracts: 1, unrealizedPnl: -3 }];
+  engine.exchange.fetchPositions = async () => [{
+    symbol: '1000PEPE/USDT:USDT', side: 'long', contracts: 1,
+    entryPrice: 1, markPrice: 1, notional: 1, unrealizedPnl: -3,
+  }];
   const accounted = await buildFuturesDashboardSnapshot(engine, '1000PEPE/USDT:USDT');
   assert.equal(accounted.profit.realized, 999);
   assert.equal(accounted.profit.net, 995.9);
@@ -190,8 +193,8 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
   engine.exchange = {
     fetchTicker: async () => ({ last: 10, high: 11, low: 9 }),
     fetchOpenOrders: async () => [
-      { id: 'longEntry', side: 'buy', price: 10, amount: 1, remaining: 1 },
-      { id: 'shortEntry', side: 'sell', price: 12, amount: 2, remaining: 2 },
+      { id: 'longEntry', symbol: 'TEST/USDT:USDT', side: 'buy', price: 10, amount: 1, remaining: 1, info: { positionSide: 'LONG' } },
+      { id: 'shortEntry', symbol: 'TEST/USDT:USDT', side: 'sell', price: 12, amount: 2, remaining: 2, info: { positionSide: 'SHORT' } },
     ],
     fetchOHLCV: async () => [],
     fetchBalance: async () => ({ free: { USDT: 50 }, total: { USDT: 100 }, info: {} }),
@@ -213,9 +216,11 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
 
   assert.equal(snapshot.selectedPositionSide, 'SHORT');
   assert.deepEqual(snapshot.symbols, ['TEST/USDT:USDT']);
-  assert.equal(snapshot.comparison.LONG.exposure, 30);
-  assert.equal(snapshot.comparison.SHORT.exposure, 57);
-  assert.equal(snapshot.comparison.combined.exposure, 87);
+  assert.equal(snapshot.comparison.LONG.exposure, 32);
+  assert.equal(snapshot.comparison.SHORT.exposure, 60);
+  assert.equal(snapshot.comparison.combined.exposure, 92);
+  assert.equal(snapshot.intelligence.adaptive.allocatedInvestment, 60);
+  assert.equal(snapshot.intelligence.adaptive.exposureSource, 'exchange-conservative');
   assert.equal(snapshot.comparison.LONG.strategyPnl, 4.9);
   assert.equal(snapshot.comparison.SHORT.strategyPnl, 4.95);
   assert.equal(snapshot.comparison.combined.strategyPnl, 9.850000000000001);
@@ -239,8 +244,16 @@ test('futures decision snapshot exposes deterministic flow and SELL coverage wit
     risk: process.env.ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT,
     mode: process.env.ADAPTIVE_GRID_SUPERVISOR_MODE,
     apply: process.env.FIBONACCI_DIRECTION_APPLY_MODE,
+    symbolCap: process.env.FUTURES_MAX_SYMBOL_EXPOSURE_USDT,
+    sideCap: process.env.FUTURES_MAX_TOTAL_EXPOSURE_USDT,
+    shortSymbolCap: process.env.SHORT_FUTURES_MAX_SYMBOL_EXPOSURE_USDT,
+    shortSideCap: process.env.SHORT_FUTURES_MAX_TOTAL_EXPOSURE_USDT,
   };
   process.env.GRID_TOTAL_INVESTMENT_USDT = '150';
+  process.env.FUTURES_MAX_SYMBOL_EXPOSURE_USDT = '30';
+  process.env.FUTURES_MAX_TOTAL_EXPOSURE_USDT = '46.11';
+  process.env.SHORT_FUTURES_MAX_SYMBOL_EXPOSURE_USDT = '30';
+  process.env.SHORT_FUTURES_MAX_TOTAL_EXPOSURE_USDT = '46.11';
   process.env.GRID_COUNT = '27';
   process.env.ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT = '90';
   process.env.ADAPTIVE_GRID_SUPERVISOR_MODE = 'LIVE';
@@ -258,7 +271,7 @@ test('futures decision snapshot exposes deterministic flow and SELL coverage wit
         learning: null,
         exposurePct: 92, recommendation: { buyWeight: { upper: 0.25, middle: 0.5, lower: 1.25 }, spacingMultiplier: 1.4 },
       }]]),
-      getAllocatedInvestmentUsdt: () => 138,
+      getAllocatedInvestmentUsdt: () => 27,
     };
     const result = decisionSnapshot(engine, symbol, { lastBuyByLevel: {}, lastTradeTimestamp: 10 }, [
       { side: 'buy', price: 1, remaining: 2 },
@@ -268,17 +281,43 @@ test('futures decision snapshot exposes deterministic flow and SELL coverage wit
     assert.equal(result.fibonacci.requiredEntryDirection, 'BULLISH');
     assert.equal(result.fibonacci.entryDirectionAllowed, false);
     assert.equal(result.adaptive.profile, 'RISK_OFF');
-    assert.equal(result.adaptive.exposurePct, 92);
+    assert.equal(result.adaptive.exposurePct, 90);
+    assert.equal(result.adaptive.allocatedInvestment, 27);
+    assert.equal(result.adaptive.investmentCap, 30);
+    assert.equal(result.adaptive.symbolExposureCap, 30);
+    assert.equal(result.adaptive.sideExposureCap, 46.11);
+    assert.equal(result.adaptive.gridInvestmentCap, 150);
+    assert.equal(result.adaptive.exposureScope, 'selected-pair');
+    assert.equal(result.adaptive.exposureSource, 'state-fallback');
+    assert.equal(result.adaptive.exposureWarningPct, 90);
     assert.equal(result.adaptive.learning, null);
     assert.equal(result.execution.gridCount, 27);
     assert.equal(result.execution.uncovered, 2);
     assert.equal(result.execution.sellCoveragePct, 80);
+
+    const shortResult = decisionSnapshot(engine, symbol, {
+      config: { orderSizeUsdt: 6, count: 10 },
+      lastBuyByLevel: { 1: { totalCostQuote: 12 } },
+      lastTradeTimestamp: 10,
+    }, [
+      { side: 'sell', price: 1, remaining: 3 },
+      { side: 'buy', price: 0.9, remaining: 10 },
+    ], { contracts: 10 }, { positionSide: 'SHORT' });
+    assert.equal(shortResult.adaptive.exposurePct, 50);
+    assert.equal(shortResult.adaptive.allocatedInvestment, 15);
+    assert.equal(shortResult.adaptive.symbolExposureCap, 30);
+    assert.equal(shortResult.adaptive.sideExposureCap, 46.11);
+    assert.equal(shortResult.adaptive.gridInvestmentCap, 60);
   } finally {
     if (previous.cap === undefined) delete process.env.GRID_TOTAL_INVESTMENT_USDT; else process.env.GRID_TOTAL_INVESTMENT_USDT = previous.cap;
     if (previous.count === undefined) delete process.env.GRID_COUNT; else process.env.GRID_COUNT = previous.count;
     if (previous.risk === undefined) delete process.env.ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT; else process.env.ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT = previous.risk;
     if (previous.mode === undefined) delete process.env.ADAPTIVE_GRID_SUPERVISOR_MODE; else process.env.ADAPTIVE_GRID_SUPERVISOR_MODE = previous.mode;
     if (previous.apply === undefined) delete process.env.FIBONACCI_DIRECTION_APPLY_MODE; else process.env.FIBONACCI_DIRECTION_APPLY_MODE = previous.apply;
+    if (previous.symbolCap === undefined) delete process.env.FUTURES_MAX_SYMBOL_EXPOSURE_USDT; else process.env.FUTURES_MAX_SYMBOL_EXPOSURE_USDT = previous.symbolCap;
+    if (previous.sideCap === undefined) delete process.env.FUTURES_MAX_TOTAL_EXPOSURE_USDT; else process.env.FUTURES_MAX_TOTAL_EXPOSURE_USDT = previous.sideCap;
+    if (previous.shortSymbolCap === undefined) delete process.env.SHORT_FUTURES_MAX_SYMBOL_EXPOSURE_USDT; else process.env.SHORT_FUTURES_MAX_SYMBOL_EXPOSURE_USDT = previous.shortSymbolCap;
+    if (previous.shortSideCap === undefined) delete process.env.SHORT_FUTURES_MAX_TOTAL_EXPOSURE_USDT; else process.env.SHORT_FUTURES_MAX_TOTAL_EXPOSURE_USDT = previous.shortSideCap;
   }
 });
 

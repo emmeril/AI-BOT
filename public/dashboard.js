@@ -124,7 +124,7 @@
         label: 'Volume Delta Guard',
         status: 'OFF',
         tone: '',
-        value: side === 'LONG' ? 'Tidak diaktifkan setelah gagal OOS' : 'Filter tidak aktif',
+        value: 'Filter tidak aktif',
         reason: `Entry ${side} hanya memakai gate Fibonacci.`,
       };
     }
@@ -175,11 +175,16 @@
     const directionAllowed = fib.entryDirectionAllowed ?? fib.appliedDirection === requiredDirection;
     const deltaAllowed = !volumeDelta.enabled || volumeDelta.allow !== false;
     const available = Boolean(state.data?.running && fib.available);
-    const allowed = Boolean(available && directionAllowed && deltaAllowed);
+    const tradingEnabled = Boolean(state.data?.tradingEnabled);
+    const allowed = Boolean(available && tradingEnabled && directionAllowed && deltaAllowed);
     let status = 'MENUNGGU';
     let tone = toneFor(fib.appliedDirection);
     let summary = `Entry ${entrySide} menunggu arah Fibonacci ${requiredDirection} yang terkonfirmasi.`;
-    if (available && directionAllowed && !deltaAllowed) {
+    if (available && directionAllowed && deltaAllowed && !tradingEnabled) {
+      status = 'ORDER DIJEDA';
+      tone = 'warning';
+      summary = `Sinyal entry ${entrySide} memenuhi gate, tetapi penempatan order baru sedang dijeda.`;
+    } else if (available && directionAllowed && !deltaAllowed) {
       status = 'ENTRY BLOCKED';
       tone = 'negative';
       summary = `Fibonacci sudah ${requiredDirection}, tetapi Volume Delta masih menahan entry ${entrySide}.`;
@@ -238,8 +243,12 @@
     text('volume-delta-value', deltaView.value);
     text('volume-delta-reason', deltaView.reason);
     byId('volume-delta-status').className = `metric-value ${deltaView.tone}`.trim();
+    text('exposure-label', `Exposure ${data.selectedSymbol || 'pair'}`);
     text('exposure-value', percent(adaptive.exposurePct));
-    text('exposure-note', adaptive.investmentCap > 0 ? `${money(adaptive.allocatedInvestment, 2)} dari ${money(adaptive.investmentCap, 0)} USDT` : 'Batas investasi belum tersedia');
+    text('exposure-note', adaptive.investmentCap > 0
+      ? `${money(adaptive.allocatedInvestment, 2)} dari cap pair ${money(adaptive.investmentCap, 2)} USDT · cap total ${state.positionSide} ${money(adaptive.sideExposureCap, 2)} USDT`
+      : 'Batas exposure belum tersedia');
+    text('pnl-label', `PnL ${data.selectedSymbol || 'pair'} ${state.positionSide}`);
     text('net-pnl', `${signed(data.profit?.net, 4)} ${quote()}`);
     pnlTone(byId('net-pnl'), data.profit?.net);
     byId('active-profile').className = `metric-value ${gate.tone}`;
@@ -311,9 +320,9 @@
       market: { title: 'Market feed', status: String(data.mode || 'LIVE').toUpperCase(), summary: 'Ticker dan candle Binance menjadi input harga untuk range, sinyal, dan penempatan level grid.', tags: data.market?.timeframe ? [`Chart ${data.market.timeframe}`] : [], details: [['Harga terakhir', `${data.market?.priceText || price(data.market?.price)} ${quote()}`], ['Perubahan 24 jam', `${signed(data.market?.changePercent, 2)}%`], ['High 24 jam', `${data.market?.highText || price(data.market?.high)} ${quote()}`], ['Low 24 jam', `${data.market?.lowText || price(data.market?.low)} ${quote()}`]] },
       fibonacci: { title: 'Fibonacci direction', status: fib.direction || 'MENUNGGU', summary: fib.available ? `Arah mentah ${fib.direction}. Arah yang diterapkan ke bias level saat ini ${fib.appliedDirection}.` : 'Analisis Fibonacci belum tersedia untuk pair ini.', tags: tfTags, details: [['Score', fib.score ?? 'N/A'], ['Confidence', fib.confidence == null ? 'N/A' : percent(num(fib.confidence) * 100, 1)], ['Alignment', fib.alignment == null ? 'N/A' : percent(num(fib.alignment) * 100, 1)], ['Konfirmasi', `${num(fib.confirmationCount)}/${num(fib.confirmationsRequired)}`], ['Confirmed', fib.confirmedDirection || 'RANGING'], ['Diperbarui', time(fib.generatedAt)]] },
       supervisor: { title: `${state.positionSide} entry gates`, status: gate.status, summary: gate.summary, tags: [...tfTags, `Delta ${deltaView.status}`], details: [['Arah mentah', fib.direction || 'UNKNOWN'], ['Arah terapan', fib.appliedDirection || 'RANGING'], ['Arah wajib', gate.requiredDirection], ['Volume Delta', volumeDelta.available ? `${signed(num(volumeDelta.deltaRatio) * 100, 2)}%` : deltaView.status], ['Ambang oposisi', volumeDelta.enabled ? percent(volumeDelta.oppositionThresholdPct, 1) : 'Tidak digunakan'], ['Keputusan delta', deltaView.status], ['Candle delta', volumeDelta.enabled ? time(volumeDelta.candleCloseTime) : 'Tidak digunakan'], ['Mode', `${fib.strategy || 'N/A'} · Delta ${volumeDelta.mode || 'OFF'}`]] },
-      buy: { title: `${entrySide} grid`, status: `${entryCount} ORDER AKTIF`, summary: `Order ${entrySide} baru hanya dipasang saat arah Fibonacci memenuhi gate ${gate.requiredDirection}${volumeDelta.enabled ? ' dan Volume Delta mengizinkan entry' : ''}.`, tags: [`Fibonacci ${fib.appliedDirection || 'RANGING'}`, `Wajib ${gate.requiredDirection}`, `Delta ${deltaView.status}`], details: [['Order aktif', entryCount], ['Nilai pending', `${money(entryValue, 4)} ${quote()}`], ['Grid count', num(execution.gridCount) || 'N/A'], ['Investment cap', adaptive.investmentCap > 0 ? `${money(adaptive.investmentCap, 0)} ${quote()}` : 'N/A'], ['Allocated', `${money(adaptive.allocatedInvestment, 4)} ${quote()}`], ['Sisi entry', entrySide]] },
+      buy: { title: `${entrySide} grid`, status: `${entryCount} ORDER AKTIF`, summary: `Order ${entrySide} baru hanya dipasang saat arah Fibonacci memenuhi gate ${gate.requiredDirection}${volumeDelta.enabled ? ' dan Volume Delta mengizinkan entry' : ''}.`, tags: [`Fibonacci ${fib.appliedDirection || 'RANGING'}`, `Wajib ${gate.requiredDirection}`, `Delta ${deltaView.status}`], details: [['Order aktif', entryCount], ['Nilai pending', `${money(entryValue, 4)} ${quote()}`], ['Grid count', num(execution.gridCount) || 'N/A'], ['Exposure pair konservatif', `${money(adaptive.allocatedInvestment, 4)} ${quote()}`], ['Cap exposure pair', adaptive.symbolExposureCap > 0 ? `${money(adaptive.symbolExposureCap, 2)} ${quote()}` : 'N/A'], [`Cap total ${state.positionSide}`, adaptive.sideExposureCap > 0 ? `${money(adaptive.sideExposureCap, 2)} ${quote()}` : 'N/A'], ['Budget sizing grid internal', adaptive.gridInvestmentCap > 0 ? `${money(adaptive.gridInvestmentCap, 2)} ${quote()}` : 'N/A'], ['Sisi entry', entrySide]] },
       position: { title: `${state.positionSide} position`, status: position ? 'AKTIF' : 'KOSONG', summary: position ? `Posisi ${state.positionSide} berasal dari ${entrySide} grid yang sudah terisi. PnL berjalan mengikuti mark price Binance.` : `Tidak ada kontrak ${state.positionSide} terbuka pada pair ini.`, tags: position ? [`${data.futures?.leverage || 0}x`, data.futures?.marginMode || 'N/A', data.futures?.positionSide || state.positionSide] : [], details: [['Kontrak', position ? compact(position.contracts) : '0'], ['Entry', position ? price(position.entryPrice) : 'N/A'], ['Mark', position ? price(position.markPrice) : 'N/A'], ['Likuidasi', position?.liquidationPrice > 0 ? price(position.liquidationPrice) : 'N/A'], ['Margin posisi', `${money(data.futures?.positionMargin, 4)} ${quote()}`], ['ROI posisi', position ? percent(position.roiPct, 2) : 'N/A'], ['PnL berjalan', `${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`]] },
-      sell: { title: `${exitSide} ladder`, status: execution.uncovered > 0 ? 'PERLU REKONSILIASI' : 'TERLINDUNGI', summary: execution.uncovered > 0 ? `Sebagian posisi belum memiliki jumlah ${exitSide} yang setara pada snapshot ini. Bot akan merekonsiliasi pada siklus berikutnya.` : `Jumlah kontrak ${state.positionSide} sudah dicadangkan oleh ${exitSide} aktif, atau tidak ada posisi terbuka.`, tags: data.futures?.exits?.nearestLabel ? [data.futures.exits.nearestLabel] : [], details: [[`Order ${exitSide}`, exitCount], [`Reserved ${exitSide}`, compact(execution.reservedExit)], [`Kontrak ${state.positionSide}`, compact(execution.positionContracts)], ['Belum tertutup', compact(execution.uncovered)], ['Coverage', coverage == null ? 'N/A' : percent(coverage, 0)], [`${exitSide} terdekat`, data.futures?.exits?.nearestPrice ? `${price(data.futures.exits.nearestPrice)} ${quote()}` : 'N/A']] },
+      sell: { title: `${exitSide} ladder`, status: !position ? 'TIDAK DIPERLUKAN' : execution.uncovered > 0 ? 'PERLU REKONSILIASI' : 'TERLINDUNGI', summary: !position ? `Tidak ada posisi ${state.positionSide} terbuka, jadi order exit belum diperlukan.` : execution.uncovered > 0 ? `Sebagian posisi belum memiliki jumlah ${exitSide} yang setara pada snapshot ini. Bot akan merekonsiliasi pada siklus berikutnya.` : `Jumlah kontrak ${state.positionSide} sudah dicadangkan oleh ${exitSide} aktif.`, tags: data.futures?.exits?.nearestLabel ? [data.futures.exits.nearestLabel] : [], details: [[`Order ${exitSide}`, exitCount], [`Reserved ${exitSide}`, compact(execution.reservedExit)], [`Kontrak ${state.positionSide}`, compact(execution.positionContracts)], ['Belum tertutup', compact(execution.uncovered)], ['Coverage', coverage == null ? 'N/A' : percent(coverage, 0)], [`${exitSide} terdekat`, data.futures?.exits?.nearestPrice ? `${price(data.futures.exits.nearestPrice)} ${quote()}` : 'N/A']] },
     })[state.activeNode];
   }
 
@@ -336,19 +345,21 @@
   }
   function renderLedger() {
     const profit = state.data.profit || {};
-    text('ledger-title', `PnL strategi ${state.positionSide}`);
+    text('ledger-title', `${state.data.selectedSymbol || 'Pair'} · ${state.positionSide}`);
+    text('grid-profit-label', `Profit grid ${state.positionSide}`);
     for (const [id, value] of [['realized-pnl', profit.realized], ['funding-pnl', profit.accounting?.ready ? profit.funding : null], ['unrealized-pnl', profit.unrealizedPnl], ['grid-profit', profit.gridPairProfit], ['ledger-net', profit.net]]) { text(id, `${signed(value, 4)} ${quote()}`); pnlTone(byId(id), value); }
     text('fees-value', `${money(profit.fees, 4)} ${quote()}`);
   }
   function renderRisk() {
     const data = state.data; const adaptive = intel().adaptive || {}; const position = data.futures?.position;
-    const exposure = num(adaptive.exposurePct); const threshold = num(adaptive.riskExposurePct) || 90;
+    const exposure = num(adaptive.exposurePct); const threshold = num(adaptive.exposureWarningPct ?? adaptive.riskExposurePct) || 90;
+    text('risk-title', `Exposure ${data.selectedSymbol || 'pair'}`);
     text('risk-exposure', percent(adaptive.exposurePct));
-    text('risk-caption', adaptive.investmentCap > 0 ? `${money(adaptive.allocatedInvestment, 4)} dari batas ${money(adaptive.investmentCap, 0)} ${quote()}` : 'Batas investasi belum tersedia.');
+    text('risk-caption', adaptive.investmentCap > 0 ? `${money(adaptive.allocatedInvestment, 4)} dari cap pair ${money(adaptive.investmentCap, 2)} ${quote()}` : 'Batas exposure belum tersedia.');
     byId('exposure-fill').style.width = `${clamp(exposure, 0, 100)}%`; byId('exposure-fill').style.background = exposure >= threshold ? 'var(--warning)' : 'var(--accent)';
     byId('exposure-limit').style.left = `${clamp(threshold, 0, 100)}%`; byId('exposure-meter').setAttribute('aria-valuenow', String(clamp(exposure, 0, 100)));
     const mark = num(position?.markPrice); const liquidation = num(position?.liquidationPrice); const distance = mark > 0 && liquidation > 0 ? Math.abs(mark - liquidation) / mark * 100 : null;
-    renderDefinitionList(byId('risk-facts'), [['Risk-off threshold', percent(threshold, 0)], ['Margin posisi', `${money(data.futures?.positionMargin, 4)} ${quote()}`], ['Margin order', `${money(data.futures?.openOrderMargin, 4)} ${quote()}`], ['Saldo tersedia', `${money(data.futures?.availableBalance, 4)} ${quote()}`], ['Jarak likuidasi', distance == null ? 'N/A' : percent(distance, 2)], ['Leverage', `${num(data.futures?.leverage)}x`]]);
+    renderDefinitionList(byId('risk-facts'), [['Ambang peringatan', percent(threshold, 0)], [`Cap total ${state.positionSide}`, adaptive.sideExposureCap > 0 ? `${money(adaptive.sideExposureCap, 2)} ${quote()}` : 'N/A'], ['Margin posisi pair', `${money(data.futures?.positionMargin, 4)} ${quote()}`], ['Margin order akun', `${money(data.futures?.openOrderMargin, 4)} ${quote()}`], ['Saldo tersedia akun', `${money(data.futures?.availableBalance, 4)} ${quote()}`], ['Jarak likuidasi posisi', distance == null ? 'N/A' : percent(distance, 2)], ['Leverage posisi', `${num(data.futures?.leverage)}x`]]);
   }
 
   function renderOrders() {

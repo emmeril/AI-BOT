@@ -3,6 +3,7 @@ const http = require('http');
 const path = require('path');
 const { retry, numberOrZero } = require('./utils');
 const { createDashboardAuth } = require('./dashboard-auth');
+const { exposureBySymbol } = require('./futures-exposure');
 const { incomeMetrics } = require('./futures-income');
 const { sellEntryLabel } = require('./futures-display');
 const { resolveAppliedDirection } = require('./fibonacci-direction-analyzer');
@@ -102,6 +103,18 @@ function positionMetrics(position, leverage, openPositionFees = 0) {
   };
 }
 
+function conservativePositionExposure(position, metrics) {
+  if (!position) return 0;
+  const contracts = Math.abs(numberOrZero(position.contracts));
+  const contractSize = numberOrZero(position.contractSize ?? 1);
+  const entryPrice = numberOrZero(position.entryPrice);
+  const markPrice = numberOrZero(position.markPrice ?? position.info?.markPrice);
+  if (contracts > 0 && contractSize > 0 && entryPrice > 0 && markPrice > 0) {
+    return contracts * contractSize * Math.max(entryPrice, markPrice);
+  }
+  return numberOrZero(metrics?.notional);
+}
+
 function fibonacciFromState(symState) {
   const advisor = symState?.config?.rangeAdvisor;
   if (!advisor) return null;
@@ -193,9 +206,16 @@ function decisionSnapshot(engine, symbol, symState, orders, position, options = 
   const persistedFibonacci = fibonacciFromState(symState);
   const fibonacci = cachedFibonacci || persistedFibonacci;
   const adaptive = positionSide === 'LONG' ? engine.adaptiveGridDecisions?.get?.(symbol) || null : null;
+  const exposurePrefix = positionSide === 'SHORT' ? 'SHORT_' : '';
   const configuredCap = numberOrZero(process.env.GRID_TOTAL_INVESTMENT_USDT);
   const stateCap = numberOrZero(symState?.config?.orderSizeUsdt) * numberOrZero(symState?.config?.count);
-  const investmentCap = positionSide === 'LONG' ? configuredCap : stateCap;
+  const gridInvestmentCap = positionSide === 'LONG' ? configuredCap : stateCap;
+  const symbolExposureCap = numberOrZero(
+    process.env[`${exposurePrefix}FUTURES_MAX_SYMBOL_EXPOSURE_USDT`]
+  ) || gridInvestmentCap;
+  const sideExposureCap = numberOrZero(
+    process.env[`${exposurePrefix}FUTURES_MAX_TOTAL_EXPOSURE_USDT`]
+  );
   let allocatedInvestment = 0;
   if (positionSide === 'LONG' && typeof engine.getAllocatedInvestmentUsdt === 'function') {
     try {
@@ -211,8 +231,11 @@ function decisionSnapshot(engine, symbol, symState, orders, position, options = 
       .filter(order => order.side === entrySide)
       .reduce((sum, order) => sum + numberOrZero(order.price) * numberOrZero(order.remaining), 0);
   }
-  const exposurePct = investmentCap > 0
-    ? (allocatedInvestment / investmentCap) * 100
+  if (Number.isFinite(Number(options.pairExposure))) {
+    allocatedInvestment = Math.max(0, Number(options.pairExposure));
+  }
+  const exposurePct = symbolExposureCap > 0
+    ? (allocatedInvestment / symbolExposureCap) * 100
     : numberOrZero(adaptive?.exposurePct);
   const minConfidence = numberOrZero(process.env.FIBONACCI_DIRECTION_MIN_CONFIDENCE || 0.65);
   const applyMode = String(process.env.FIBONACCI_DIRECTION_APPLY_MODE || 'REPORT_ONLY').toUpperCase();
@@ -271,7 +294,13 @@ function decisionSnapshot(engine, symbol, symState, orders, position, options = 
       cooldownElapsed: adaptive?.cooldownElapsed ?? null,
       exposurePct,
       allocatedInvestment,
-      investmentCap,
+      investmentCap: symbolExposureCap,
+      symbolExposureCap,
+      sideExposureCap,
+      gridInvestmentCap,
+      exposureScope: 'selected-pair',
+      exposureSource: Number.isFinite(Number(options.pairExposure)) ? 'exchange-conservative' : 'state-fallback',
+      exposureWarningPct: numberOrZero(process.env.ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT || 90),
       riskExposurePct: numberOrZero(process.env.ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT || 90),
       riskStateMachineMode: adaptive?.riskStateMachineMode ||
         String(process.env.ADAPTIVE_RISK_STATE_MACHINE_MODE || 'OFF').toUpperCase(),
@@ -349,20 +378,24 @@ function openPositionFees(symState) {
     .reduce((sum, entry) => sum + numberOrZero(entry?.totalFeeQuote), 0);
 }
 
-function sideComparison(positionSide, available, running, symState, orders, rawPosition, leverage) {
+function sideComparison(positionSide, available, running, symState, orders, rawPosition, leverage, exchangeExposure = null) {
   const entrySide = positionSide === 'SHORT' ? 'sell' : 'buy';
   const position = positionMetrics(rawPosition, leverage, openPositionFees(symState));
-  const positionExposure = numberOrZero(position?.notional);
-  const pendingEntryExposure = orders
+  const positionExposure = conservativePositionExposure(rawPosition, position);
+  const managedPendingEntryExposure = orders
     .filter(order => order.side === entrySide)
     .reduce((sum, order) => sum + numberOrZero(order.price) * numberOrZero(order.remaining), 0);
+  const exposure = Number.isFinite(Number(exchangeExposure))
+    ? Math.max(0, Number(exchangeExposure))
+    : positionExposure + managedPendingEntryExposure;
+  const pendingEntryExposure = Math.max(0, exposure - positionExposure);
   const realizedPnl = numberOrZero(symState.realizedGridProfit) + numberOrZero(symState.realizedExitProfit);
   const unrealizedPnl = numberOrZero(position?.unrealizedPnl);
   const entryFees = numberOrZero(position?.openPositionFees);
   return {
     available,
     running,
-    exposure: positionExposure + pendingEntryExposure,
+    exposure,
     positionExposure,
     pendingEntryExposure,
     strategyPnl: realizedPnl + unrealizedPnl - entryFees,
@@ -442,11 +475,15 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedS
   const usedMargin = numberOrZero(walletInfo.totalInitialMargin ?? balance?.used?.USDT);
   const shortRunning = options.shortRunning ?? lockIsActive(shortLockFile);
   const selectedRunning = selectedPositionSide === 'SHORT' ? shortRunning : engine.circuitAllows();
+  const longExchangeExposure = exposureBySymbol([symbol], positions, exchangeOrders, 'LONG').values[symbol];
+  const shortExchangeExposure = exposureBySymbol([symbol], positions, exchangeOrders, 'SHORT').values[symbol];
+  const longComparison = sideComparison('LONG', longAvailable, engine.circuitAllows(), longState, longOrders, long, leverage, longExchangeExposure);
+  const shortComparison = sideComparison('SHORT', shortAvailable, shortRunning, selectedShortState, shortOrders, short, leverage, shortExchangeExposure);
+  const selectedComparison = selectedPositionSide === 'SHORT' ? shortComparison : longComparison;
   const intelligence = decisionSnapshot(engine, symbol, symState, orders, position, {
     positionSide: selectedPositionSide,
+    pairExposure: selectedComparison.exposure,
   });
-  const longComparison = sideComparison('LONG', longAvailable, engine.circuitAllows(), longState, longOrders, long, leverage);
-  const shortComparison = sideComparison('SHORT', shortAvailable, shortRunning, selectedShortState, shortOrders, short, leverage);
   const combinedStrategyPnl = longComparison.strategyPnl + shortComparison.strategyPnl;
   const combinedExposure = longComparison.exposure + shortComparison.exposure;
   return {

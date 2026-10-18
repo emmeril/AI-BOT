@@ -55,9 +55,18 @@ test('futures dashboard combines LONG and SHORT with accessible side filters', (
   assert.match(html, /id="volume-delta-reason"/);
   assert.match(script, /function volumeDeltaView\(volumeDelta\)/);
   assert.match(script, /Tekanan taker \$\{opposingTaker\} terlalu kuat/);
-  assert.match(script, /Tidak diaktifkan setelah gagal OOS/);
+  assert.match(script, /value: 'Filter tidak aktif'/);
   assert.match(script, /FUTURES_LONG_ENTRY_DIRECTION|requiredEntryDirection|Wajib \$\{gate\.requiredDirection\}/);
   assert.match(script, /RESTART DIPERLUKAN/);
+  assert.match(html, /Funding Binance pair \(semua trade\)/);
+  assert.match(html, /Ambang peringatan exposure/);
+  assert.match(script, /Margin order akun/);
+  assert.match(script, /Saldo tersedia akun/);
+  assert.doesNotMatch(html, /Funding akun Binance|PnL berjalan sisi|PnL strategi sisi|Batas risk-off/);
+  assert.doesNotMatch(script, /Risk-off threshold|Cap sisi /);
+  assert.doesNotMatch(script, /Tidak diaktifkan setelah gagal OOS/);
+  assert.match(script, /status: !position \? 'TIDAK DIPERLUKAN'/);
+  assert.match(script, /status = 'ORDER DIJEDA'/);
 });
 
 test('dashboard motion preference can override or follow reduced motion', () => {
