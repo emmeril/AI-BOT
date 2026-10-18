@@ -25,7 +25,7 @@ test('dashboard pipeline shows only the active deterministic execution flow', ()
   assert.match(css, /\.flow-signal path\[data-state=error\]\{stroke:var\(--negative\)/);
   assert.match(css, /\.flow-signal path\[data-state=active\]\{stroke:var\(--accent\);opacity:\.9\}/);
   assert.match(script, /setFlowEdge\('fibonacci', 'supervisor', gate\.available/);
-  assert.match(script, /setFlowEdge\('supervisor', 'buy', gate\.allowed/);
+  assert.match(script, /setFlowEdge\('supervisor', 'buy', entryCount > 0/);
   assert.match(script, /setFlowEdge\('position', 'sell', exitNeedsAttention/);
   assert.match(css, /\.flow-grid\{[^}]*grid-template-columns:repeat\(6/);
 });
@@ -67,6 +67,11 @@ test('futures dashboard combines LONG and SHORT with accessible side filters', (
   assert.doesNotMatch(script, /Tidak diaktifkan setelah gagal OOS/);
   assert.match(script, /status: !position \? 'TIDAK DIPERLUKAN'/);
   assert.match(script, /status = 'ORDER DIJEDA'/);
+  assert.match(script, /status = 'GATE LULUS'/);
+  assert.match(script, /status: 'TIDAK ADA ORDER'/);
+  assert.match(script, /cap exposure, minimum notional, level harga, atau kebijakan order/);
+  assert.match(script, /setFlowNodeState\('buy', entryCount > 0/);
+  assert.doesNotMatch(script, /status = 'ENTRY AKTIF'/);
 });
 
 test('dashboard motion preference can override or follow reduced motion', () => {
