@@ -8,8 +8,8 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/fontawesome/css/fontawesome.min.css?v=7.3.1">
   <link rel="stylesheet" href="/fontawesome/css/solid.min.css?v=7.3.1">
-  <link rel="stylesheet" href="/dashboard.css?v=20261017.1">
-  <script defer src="/dashboard.js?v=20261017.2"></script>
+  <link rel="stylesheet" href="/dashboard.css?v=20261019.1">
+  <script defer src="/dashboard.js?v=20261019.1"></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Lewati ke dashboard</a>
@@ -40,6 +40,26 @@
         <div class="comparison-total"><span>PnL gabungan</span><strong id="combined-pnl">N/A</strong><small>Realisasi + berjalan − fee entry terbuka</small></div>
         <article class="side-summary long-summary"><div><span>LONG</span><small id="long-runtime">Menunggu</small></div><strong id="long-exposure">N/A</strong><span>Exposure</span><strong id="long-pnl">N/A</strong><span>PnL strategi</span></article>
         <article class="side-summary short-summary"><div><span>SHORT</span><small id="short-runtime">Menunggu</small></div><strong id="short-exposure">N/A</strong><span>Exposure</span><strong id="short-pnl">N/A</strong><span>PnL strategi</span></article>
+      </section>
+
+      <section class="panel allocation-panel" aria-labelledby="allocation-title">
+        <div class="panel-head allocation-head"><div><p class="eyebrow">Alokasi modal</p><h2 class="panel-title" id="allocation-title">Alokasi exposure otomatis</h2><p class="panel-copy">Cap dihitung dari wallet balance terealisasi. Penurunan membatasi entry baru tanpa menutup posisi; kenaikan menunggu sisi kosong.</p></div><span class="status-code" id="allocation-mode">Menunggu data</span></div>
+        <div class="allocation-body">
+          <div class="allocation-plan">
+            <div class="allocation-ratios" aria-hidden="true"><span id="allocation-long-pct">LONG N/A</span><span id="allocation-short-pct">SHORT N/A</span><span id="allocation-buffer-pct">BUFFER N/A</span></div>
+            <div class="allocation-track" id="allocation-track" role="img" aria-label="Komposisi alokasi exposure belum tersedia"><span class="allocation-long"></span><span class="allocation-short"></span><span class="allocation-buffer"></span></div>
+          </div>
+          <div class="allocation-sides">
+            <article class="allocation-side"><div><strong class="positive">LONG</strong><span class="allocation-state" id="long-allocation-status">Menunggu</span></div><p id="long-allocation-cap">Cap aktif N/A</p><small id="long-allocation-meta">Target dan evaluasi belum tersedia</small></article>
+            <article class="allocation-side"><div><strong class="warning">SHORT</strong><span class="allocation-state" id="short-allocation-status">Menunggu</span></div><p id="short-allocation-cap">Cap aktif N/A</p><small id="short-allocation-meta">Target dan evaluasi belum tersedia</small></article>
+          </div>
+          <dl class="allocation-meta">
+            <div><dt>Wallet dasar</dt><dd id="allocation-wallet">N/A</dd></div>
+            <div><dt>Ambang rebalance</dt><dd id="allocation-threshold">N/A</dd></div>
+            <div><dt>Interval evaluasi</dt><dd id="allocation-refresh">N/A</dd></div>
+            <div><dt>Cap per koin</dt><dd id="allocation-symbol-cap">N/A</dd></div>
+          </dl>
+        </div>
       </section>
 
       <div id="position-detail" role="tabpanel" aria-labelledby="long-tab">

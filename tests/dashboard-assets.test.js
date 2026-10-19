@@ -44,6 +44,9 @@ test('futures dashboard combines LONG and SHORT with accessible side filters', (
   assert.match(css, /\.position-tabs\{[^}]*justify-self:center;[^}]*width:min\(100%,220px\);height:44px;margin:0/);
   assert.match(css, /\.position-tab\{[^}]*flex-direction:column;align-items:center;justify-content:center/);
   assert.match(html, /id="combined-exposure"/);
+  assert.match(html, /id="allocation-track"/);
+  assert.match(html, /id="long-allocation-status"/);
+  assert.match(html, /id="short-allocation-status"/);
   assert.match(html, /id="long-pnl"/);
   assert.match(html, /id="short-pnl"/);
   assert.match(css, /\.comparison-board\{/);
@@ -51,6 +54,10 @@ test('futures dashboard combines LONG and SHORT with accessible side filters', (
   assert.match(script, /new URLSearchParams\(\{ positionSide \}\)/);
   assert.match(script, /\['ArrowLeft', 'ArrowRight', 'Home', 'End'\]/);
   assert.match(script, /function renderComparison\(\)/);
+  assert.match(script, /function renderAllocation\(\)/);
+  assert.match(script, /Kenaikan ditunda, exposure aktif/);
+  assert.match(script, /Saldo belum berubah/);
+  assert.match(css, /@media\(max-width:900px\).*\.allocation-body\{grid-template-columns:1fr\}/s);
   assert.match(html, /id="volume-delta-status"/);
   assert.match(html, /id="volume-delta-reason"/);
   assert.match(script, /function volumeDeltaView\(volumeDelta\)/);

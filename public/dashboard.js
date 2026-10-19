@@ -248,6 +248,64 @@
     }
   }
 
+  function allocationStatusView(budget, thresholdPct) {
+    if (!budget?.available) return { label: 'Data belum tersedia', tone: '' };
+    if (budget.status === 'DEFERRED') {
+      return { label: 'Kenaikan ditunda, exposure aktif', tone: 'warning' };
+    }
+    if (budget.status === 'UNCHANGED') {
+      return { label: `Saldo belum berubah ${money(thresholdPct, 0)}%`, tone: '' };
+    }
+    if (budget.status === 'APPLIED') return { label: 'Cap aktif', tone: 'positive' };
+    return { label: 'Menunggu evaluasi', tone: '' };
+  }
+
+  function renderAllocation() {
+    const allocation = state.data.exposureAllocation || {};
+    const sidePct = clamp(num(allocation.sidePct), 0, 50);
+    const combinedPct = clamp(num(allocation.combinedPct) || sidePct * 2, 0, 100);
+    const bufferPct = clamp(num(allocation.bufferPct) || 100 - combinedPct, 0, 100);
+    const longPct = sidePct;
+    const shortPct = Math.min(sidePct, Math.max(0, 100 - longPct));
+    const track = byId('allocation-track');
+    const segments = track.querySelectorAll('span');
+    segments[0].style.width = `${longPct}%`;
+    segments[1].style.width = `${shortPct}%`;
+    segments[2].style.width = `${bufferPct}%`;
+    track.setAttribute(
+      'aria-label',
+      `Alokasi exposure LONG ${money(longPct, 0)} persen, SHORT ${money(shortPct, 0)} persen, buffer ${money(bufferPct, 0)} persen`
+    );
+    text('allocation-mode', allocation.enabled ? 'OTOMATIS AKTIF' : 'OTOMATIS NONAKTIF');
+    text('allocation-long-pct', `LONG ${percent(longPct, 0)}`);
+    text('allocation-short-pct', `SHORT ${percent(shortPct, 0)}`);
+    text('allocation-buffer-pct', `BUFFER ${percent(bufferPct, 0)}`);
+    text('allocation-wallet', `${money(allocation.walletBalance, 2)} ${quote()}`);
+    text('allocation-threshold', percent(allocation.rebalanceThresholdPct, 0));
+    text('allocation-refresh', allocation.refreshMinutes > 0
+      ? `Setiap ${money(allocation.refreshMinutes / 60, 0)} jam`
+      : 'N/A');
+
+    const budgets = [allocation.LONG || {}, allocation.SHORT || {}];
+    const symbolCaps = budgets.map(budget => nullable(budget.symbolCap)).filter(value => value !== null);
+    const commonSymbolCap = symbolCaps.length ? Math.min(...symbolCaps) : null;
+    text('allocation-symbol-cap', commonSymbolCap === null ? 'N/A' : `${money(commonSymbolCap, 2)} ${quote()}`);
+    for (const side of ['LONG', 'SHORT']) {
+      const budget = allocation[side] || {};
+      const prefix = side.toLowerCase();
+      const view = allocationStatusView(budget, allocation.rebalanceThresholdPct);
+      const status = byId(`${prefix}-allocation-status`);
+      status.className = `allocation-state ${view.tone}`.trim();
+      text(`${prefix}-allocation-status`, view.label);
+      text(`${prefix}-allocation-cap`, budget.available
+        ? `${money(budget.sideCap, 2)} aktif · target ${money(budget.targetSideCap, 2)} ${quote()}`
+        : 'Cap aktif N/A');
+      text(`${prefix}-allocation-meta`, budget.available
+        ? `Exposure saat evaluasi ${money(budget.currentExposure, 2)} ${quote()} · dicek ${time(budget.lastCheckedAt)}`
+        : 'Target dan evaluasi belum tersedia');
+    }
+  }
+
   function renderOverview() {
     const data = state.data;
     const adaptive = intel().adaptive || {};
@@ -431,7 +489,7 @@
     const data = state.data; text('status-text', state.loading ? 'Memperbarui' : !data.running ? `${state.positionSide} · Bot offline` : data.tradingEnabled ? `${state.positionSide} · Trading aktif` : `${state.positionSide} · Order dijeda`); byId('status-mark').dataset.state = state.loading ? '' : data.tradingEnabled ? 'active' : data.running ? 'paused' : 'error';
     text('updated-at', `Diperbarui ${time(data.generatedAt)}`); text('runtime-label', `${String(data.mode || '').toUpperCase()} · ${data.source || 'Binance'} · refresh ${num(data.refreshSeconds) || 5} detik`); byId('logout-form').hidden = !data.dashboardAuthEnabled;
   }
-  function render() { renderPositionTabs(); renderComparison(); renderOverview(); renderFlow(); renderInspector(); renderLedger(); renderRisk(); renderOrders(); renderChartMeta(); renderRuntime(); }
+  function render() { renderPositionTabs(); renderComparison(); renderAllocation(); renderOverview(); renderFlow(); renderInspector(); renderLedger(); renderRisk(); renderOrders(); renderChartMeta(); renderRuntime(); }
   function renderSymbols(symbols, selected) {
     const select = byId('symbol-select'); const current = [...select.options].map(option => option.value);
     if (JSON.stringify(current) !== JSON.stringify(symbols)) { select.replaceChildren(); for (const symbol of symbols) { const option = document.createElement('option'); option.value = symbol; option.textContent = symbol; select.append(option); } }

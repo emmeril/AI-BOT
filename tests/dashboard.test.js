@@ -167,7 +167,11 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
     tradingFees: 0.2,
   };
   const shortState = {
-    exposureBudget: { symbolCap: 20, sideCap: 40 },
+    exposureBudget: {
+      enabled: true, sidePct: 45, combinedPct: 90, bufferPct: 10,
+      symbolCap: 20, sideCap: 40, targetSideCap: 42, currentExposure: 38,
+      status: 'DEFERRED', deferredReason: 'active_exposure', lastCheckedAt: '2026-10-19T00:00:00.000Z',
+    },
     symbols: {
       'TEST/USDT:USDT': {
         config: { count: 2, orderSizeUsdt: 10, rangeAdvisor: {
@@ -190,7 +194,14 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
     },
   };
   const engine = new TestEngine();
-  engine.state = { getSymbol: () => longState };
+  engine.state = {
+    data: { exposureBudget: {
+      enabled: true, sidePct: 45, combinedPct: 90, bufferPct: 10,
+      symbolCap: 21, sideCap: 40, targetSideCap: 40, currentExposure: 32,
+      status: 'APPLIED', lastCheckedAt: '2026-10-19T00:01:00.000Z',
+    } },
+    getSymbol: () => longState,
+  };
   engine.exposureLimits = { symbol: 21, total: 40 };
   engine.exchange = {
     fetchTicker: async () => ({ last: 10, high: 11, low: 9 }),
@@ -239,6 +250,13 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
   assert.equal(snapshot.intelligence.volumeDelta.allow, false);
   assert.equal(snapshot.intelligence.volumeDelta.deltaRatio, 0.33683);
   assert.equal(snapshot.intelligence.volumeDelta.windowMinutes, 60);
+  assert.equal(snapshot.exposureAllocation.enabled, true);
+  assert.equal(snapshot.exposureAllocation.walletBalance, 100);
+  assert.equal(snapshot.exposureAllocation.sidePct, 45);
+  assert.equal(snapshot.exposureAllocation.bufferPct, 10);
+  assert.equal(snapshot.exposureAllocation.LONG.status, 'APPLIED');
+  assert.equal(snapshot.exposureAllocation.SHORT.status, 'DEFERRED');
+  assert.equal(snapshot.exposureAllocation.SHORT.targetSideCap, 42);
 
   const longSnapshot = await buildFuturesDashboardSnapshot(
     engine, 'TEST/USDT:USDT', 'LONG', { shortState, shortRunning: true }

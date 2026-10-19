@@ -407,6 +407,22 @@ function sideComparison(positionSide, available, running, symState, orders, rawP
   };
 }
 
+function exposureBudgetSnapshot(positionSide, budget, fallbackLimits) {
+  const source = budget && typeof budget === 'object' ? budget : null;
+  return {
+    available: Boolean(source),
+    positionSide,
+    status: source?.status || 'PENDING',
+    deferredReason: source?.deferredReason || null,
+    symbolCap: numberOrZero(source?.symbolCap ?? fallbackLimits?.symbol),
+    sideCap: numberOrZero(source?.sideCap ?? fallbackLimits?.total),
+    targetSideCap: numberOrZero(source?.targetSideCap ?? source?.sideCap ?? fallbackLimits?.total),
+    currentExposure: numberOrZero(source?.currentExposure),
+    lastCheckedAt: source?.lastCheckedAt || null,
+    appliedAt: source?.appliedAt || null,
+  };
+}
+
 function exitOverview(orders, rawPosition, positionSide) {
   const exitSide = positionSide === 'SHORT' ? 'buy' : 'sell';
   const exits = orders.filter(order => order.side === exitSide && Number(order.price) > 0)
@@ -475,6 +491,16 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedS
   const usedMargin = numberOrZero(walletInfo.totalInitialMargin ?? balance?.used?.USDT);
   const shortRunning = options.shortRunning ?? lockIsActive(shortLockFile);
   const selectedRunning = selectedPositionSide === 'SHORT' ? shortRunning : engine.circuitAllows();
+  const longBudget = engine.state.data?.exposureBudget || null;
+  const shortBudget = shortState?.exposureBudget || null;
+  const primaryBudget = longBudget || shortBudget;
+  const sidePct = numberOrZero(primaryBudget?.sidePct ?? process.env.FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT);
+  const combinedPct = numberOrZero(primaryBudget?.combinedPct) || sidePct * 2;
+  const longExposureBudget = exposureBudgetSnapshot('LONG', longBudget, engine.exposureLimits);
+  const shortExposureBudget = exposureBudgetSnapshot('SHORT', shortBudget, {
+    symbol: process.env.SHORT_FUTURES_MAX_SYMBOL_EXPOSURE_USDT,
+    total: process.env.SHORT_FUTURES_MAX_TOTAL_EXPOSURE_USDT,
+  });
   const longExchangeExposure = exposureBySymbol([symbol], positions, exchangeOrders, 'LONG').values[symbol];
   const shortExchangeExposure = exposureBySymbol([symbol], positions, exchangeOrders, 'SHORT').values[symbol];
   const longComparison = sideComparison('LONG', longAvailable, engine.circuitAllows(), longState, longOrders, long, leverage, longExchangeExposure);
@@ -504,6 +530,17 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedS
       combined: { exposure: combinedExposure, strategyPnl: combinedStrategyPnl },
       LONG: longComparison,
       SHORT: shortComparison,
+    },
+    exposureAllocation: {
+      enabled: Boolean(primaryBudget?.enabled),
+      walletBalance,
+      sidePct,
+      combinedPct,
+      bufferPct: numberOrZero(primaryBudget?.bufferPct) || Math.max(0, 100 - combinedPct),
+      rebalanceThresholdPct: numberOrZero(process.env.FUTURES_DYNAMIC_EXPOSURE_REBALANCE_THRESHOLD_PCT),
+      refreshMinutes: numberOrZero(process.env.FUTURES_DYNAMIC_EXPOSURE_REFRESH_MINUTES),
+      LONG: longExposureBudget,
+      SHORT: shortExposureBudget,
     },
     market: {
       price: marketPrice(engine, symbol, ticker.last), priceText: marketPriceText(engine, symbol, ticker.last),
