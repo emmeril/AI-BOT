@@ -34,6 +34,40 @@ test('futures sell target skips an adjacent level below required profit', () => 
   });
 });
 
+test('new LONG inventory may target the second profitable Fibonacci level and clamps at the farthest', () => {
+  const engine = createEngine();
+  const levels = [100, 100.2, 100.5, 101];
+  const second = engine.findSellTargetForBuy(
+    'TEST/USDT:USDT', levels, 0,
+    { amount: 1, sellableAmount: 1, totalCostQuote: 100, totalFeeQuote: 0, exitTargetLevelOffset: 1 }
+  );
+  const clamped = engine.findSellTargetForBuy(
+    'TEST/USDT:USDT', levels, 2,
+    { amount: 1, sellableAmount: 1, totalCostQuote: 100.5, totalFeeQuote: 0, exitTargetLevelOffset: 1 }
+  );
+
+  assert.equal(second.sellLevelIndex, 3);
+  assert.equal(second.sellPrice, 101);
+  assert.equal(clamped.sellLevelIndex, 3);
+  assert.equal(clamped.sellPrice, 101);
+});
+
+test('merging a new fill into legacy inventory keeps the safer nearest exit', () => {
+  const engine = createEngine();
+  const merged = engine.mergeBuyRecords(
+    { amount: 1, sellableAmount: 1, totalCostQuote: 100, totalFeeQuote: 0 },
+    {
+      amount: 1,
+      sellableAmount: 1,
+      totalCostQuote: 99,
+      totalFeeQuote: 0,
+      exitTargetLevelOffset: 1,
+    }
+  );
+
+  assert.equal(merged.exitTargetLevelOffset, 0);
+});
+
 test('futures sell target stays above the current average position entry', () => {
   const engine = createEngine();
   engine.latestPositions = new Map([['TEST/USDT:USDT', { entryPrice: 100.8 }]]);

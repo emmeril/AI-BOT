@@ -79,6 +79,20 @@ test('SHORT exit target is below entry and covers two-sided fees', () => {
   assert.ok(engine.isTrackedShortExitProfitable(symbol, entry, target.buyPrice));
 });
 
+test('SHORT exit offset is symmetric and clamps at the farthest profitable level', () => {
+  const engine = shortEngine();
+  const entry = {
+    amount: 1,
+    sellableAmount: 1,
+    totalCostQuote: 110,
+    totalFeeQuote: 0.022,
+    exitTargetLevelOffset: 1,
+  };
+  const target = engine.findBuyTargetForShort(symbol, [90, 100, 110], 2, entry);
+  assert.equal(target.buyLevelIndex, 0);
+  assert.equal(target.buyPrice, 90);
+});
+
 test('SHORT sell entry followed by BUY exit records positive grid profit', async () => {
   const engine = shortEngine();
   const symState = {

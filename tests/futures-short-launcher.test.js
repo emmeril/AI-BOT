@@ -38,3 +38,14 @@ test('SHORT enables the validated volume-delta risk overlay', () => {
   assert.equal(environment.VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT, '2.5');
   assert.equal(environment.VOLUME_DELTA_FAIL_CLOSED, 'false');
 });
+
+test('SHORT keeps the nearest profitable Fibonacci exit target', () => {
+  const env = buildShortEnvironment({ GRID_EXIT_TARGET_LEVEL_OFFSET: '1' });
+  assert.equal(env.GRID_EXIT_TARGET_LEVEL_OFFSET, '0');
+
+  const overridden = buildShortEnvironment({
+    GRID_EXIT_TARGET_LEVEL_OFFSET: '1',
+    SHORT_GRID_EXIT_TARGET_LEVEL_OFFSET: '2',
+  });
+  assert.equal(overridden.GRID_EXIT_TARGET_LEVEL_OFFSET, '2');
+});

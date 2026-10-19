@@ -15,6 +15,7 @@
     "backtest:futures-short": "BACKTEST_BASELINE_ONLY=true BACKTEST_POSITION_SIDE=SHORT BACKTEST_SHORT_ENTRY_DIRECTION=BEARISH GRID_COUNT=10 GRID_TOTAL_INVESTMENT_USDT=60 GRID_MAX_ACTIVE_BUY_ORDERS=10 node scripts/backtest-adaptive-variants.js",
     "backtest:volume-delta": "node scripts/backtest-volume-delta.js",
     "backtest:scalping-volume-delta": "BACKTEST_BASE_TIMEFRAME=5m BACKTEST_SCALPING_MODE=true node scripts/backtest-volume-delta.js",
+    "backtest:fibonacci-exits": "node scripts/backtest-exit-targets.js",
     "backtest:gemini-cache": "node scripts/cache-gemini-backtest-decisions.js",
     "backtest:full-grid-pnl": "node scripts/backtest-adaptive-variants.js",
     "backtest:adaptive-variants": "node scripts/backtest-adaptive-variants.js",

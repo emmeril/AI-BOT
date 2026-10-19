@@ -227,6 +227,7 @@ const GRID_PRICE_PRECISION_MAX_DEVIATION_PCT = Config.number('GRID_PRICE_PRECISI
 // configurable so it can match the account's Binance VIP/BNB fee tier.
 const BINANCE_FUTURES_MAKER_FEE_RATE = Config.number('BINANCE_FUTURES_MAKER_FEE_RATE', 0.0002);
 const GRID_MIN_NET_PROFIT_PCT = Config.number('GRID_MIN_NET_PROFIT_PCT', 0.05);
+const GRID_EXIT_TARGET_LEVEL_OFFSET = Config.number('GRID_EXIT_TARGET_LEVEL_OFFSET', 0);
 const FUTURES_SELL_ENTRY_FLOOR_ENABLED = Config.boolean('FUTURES_SELL_ENTRY_FLOOR_ENABLED', true);
 
 const FIBONACCI_RANGE_ADVISOR_ENABLED = Config.boolean('FIBONACCI_RANGE_ADVISOR_ENABLED', false);
@@ -521,6 +522,7 @@ function validateRuntimeConfiguration() {
   requirePositive('LEVERAGE', LEVERAGE);
   requireNonNegative('BINANCE_FUTURES_MAKER_FEE_RATE', BINANCE_FUTURES_MAKER_FEE_RATE);
   requireNonNegative('GRID_MIN_NET_PROFIT_PCT', GRID_MIN_NET_PROFIT_PCT);
+  requireInteger('GRID_EXIT_TARGET_LEVEL_OFFSET', GRID_EXIT_TARGET_LEVEL_OFFSET, 0);
   if (FIBONACCI_DIRECTION_ANALYZER_ENABLED && !FIBONACCI_RANGE_ADVISOR_ENABLED) {
     errors.push('FIBONACCI_DIRECTION_ANALYZER_ENABLED requires FIBONACCI_RANGE_ADVISOR_ENABLED=true');
   }
@@ -2098,6 +2100,10 @@ class FuturesGridEngine {
         Number(incoming.refillCount) || 0
       ),
       at: Date.parse(incoming.at || 0) > Date.parse(existing.at || 0) ? incoming.at : existing.at,
+      exitTargetLevelOffset: Math.min(
+        Math.max(0, Math.floor(Number(existing.exitTargetLevelOffset) || 0)),
+        Math.max(0, Math.floor(Number(incoming.exitTargetLevelOffset) || 0))
+      ),
       aggregated: aggregatedAcrossLevels || existing.aggregated === true || incoming.aggregated === true,
     };
   }
@@ -3464,6 +3470,7 @@ class FuturesGridEngine {
         totalCostQuote: costQuote,
         totalFeeQuote: feeQuote,
         refillCount,
+        exitTargetLevelOffset: GRID_EXIT_TARGET_LEVEL_OFFSET,
         at: trade.datetime,
       }
     );
@@ -3703,6 +3710,7 @@ class FuturesGridEngine {
         totalCostQuote: price * amount,
         totalFeeQuote: feeQuote,
         refillCount,
+        exitTargetLevelOffset: GRID_EXIT_TARGET_LEVEL_OFFSET,
         at: trade.datetime,
       }
     );
@@ -4786,6 +4794,7 @@ class FuturesGridEngine {
     if (!(sellableAmount > 0)) return null;
     const effectiveMinimumPrice = Math.max(minimumPrice, this.getPositionEntryFloor(symbol));
     const minCost = this.getMinCost(symbol);
+    const candidates = [];
     for (let sellLevelIndex = sourceLevel + 1; sellLevelIndex < levels.length; sellLevelIndex++) {
       const sellPrice = Number(levels[sellLevelIndex]);
       if (!(sellPrice > effectiveMinimumPrice) || !this.isTrackedSellProfitable(symbol, trackedBuy, sellPrice)) continue;
@@ -4793,13 +4802,17 @@ class FuturesGridEngine {
       try { precise = this.getPreciseOrderNumbers(symbol, sellPrice, sellableAmount); } catch { continue; }
       if (!(Number(precise.amountNum ?? precise.preciseAmount) > 0)) continue;
       if (minCost > 0 && precise.notional < minCost - 1e-8) continue;
-      return {
+      candidates.push({
         buyLevelIndex: sourceLevel,
         sellLevelIndex,
         sellPrice,
         amount: Number(precise.amountNum ?? precise.preciseAmount),
         notional: precise.notional,
-      };
+      });
+    }
+    if (candidates.length) {
+      const offset = Math.max(0, Math.floor(Number(trackedBuy?.exitTargetLevelOffset) || 0));
+      return candidates[Math.min(offset, candidates.length - 1)];
     }
     const tick = this.getMarketTickSize(symbol);
     if (!(tick > 0)) return null;
@@ -4875,6 +4888,7 @@ class FuturesGridEngine {
       this.getMaximumProfitableShortExitPrice(trackedEntry)
     );
     const minCost = this.getMinCost(symbol);
+    const candidates = [];
     for (let buyLevelIndex = sourceLevel - 1; buyLevelIndex >= 0; buyLevelIndex--) {
       const buyPrice = Number(levels[buyLevelIndex]);
       if (!(buyPrice < effectiveMaximum) ||
@@ -4883,13 +4897,17 @@ class FuturesGridEngine {
       try { precise = this.getPreciseOrderNumbers(symbol, buyPrice, exitAmount); } catch { continue; }
       if (!(Number(precise.amountNum ?? precise.preciseAmount) > 0)) continue;
       if (minCost > 0 && precise.notional < minCost - 1e-8) continue;
-      return {
+      candidates.push({
         entryLevelIndex: sourceLevel,
         buyLevelIndex,
         buyPrice,
         amount: Number(precise.amountNum ?? precise.preciseAmount),
         notional: precise.notional,
-      };
+      });
+    }
+    if (candidates.length) {
+      const offset = Math.max(0, Math.floor(Number(trackedEntry?.exitTargetLevelOffset) || 0));
+      return candidates[Math.min(offset, candidates.length - 1)];
     }
     const tick = this.getMarketTickSize(symbol);
     const preciseAmount = Number(this.exchange.amountToPrecision(symbol, exitAmount));
@@ -5292,6 +5310,9 @@ Dynamic Exposure Allocation: ${FUTURES_DYNAMIC_EXPOSURE_ENABLED
       ? `ON (${FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT}% per side; buffer=${Math.max(0, 100 - FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT * 2)}%; threshold=${FUTURES_DYNAMIC_EXPOSURE_REBALANCE_THRESHOLD_PCT}%; refresh=${FUTURES_DYNAMIC_EXPOSURE_REFRESH_MS / MINUTE_MS}m)`
       : 'OFF'}
 Max Refills Per Level: ${GRID_MAX_REFILLS}
+Exit Target: ${GRID_EXIT_TARGET_LEVEL_OFFSET === 0
+      ? 'nearest profitable Fibonacci level'
+      : `profitable Fibonacci level #${GRID_EXIT_TARGET_LEVEL_OFFSET + 1} for new entries`}
 Aggregated Exit Ladder: ${GRID_AGGREGATED_EXIT_LADDER_ENABLED
       ? `ON (max ${GRID_AGGREGATED_EXIT_LADDER_MAX_ORDERS} orders; symbols=${GRID_AGGREGATED_EXIT_LADDER_SYMBOLS.join(',') || 'all'})`
       : 'OFF'}

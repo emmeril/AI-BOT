@@ -6,6 +6,7 @@ const {
   entryDirectionAllows,
   maximumProfitableShortBuyPrice,
   minimumProfitableSellPrice,
+  selectProfitableExitLevel,
   zoneForRank,
 } = require('../src/full-grid-backtester');
 
@@ -85,6 +86,16 @@ test('maximum profitable SHORT buy includes entry fee, exit fee, and requested n
   );
   assert.ok(price < 99.92);
   assert.ok(price > 99.9);
+});
+
+test('exit target offset skips Fibonacci levels symmetrically and clamps to the farthest level', () => {
+  const levels = [90, 100, 110, 120, 130];
+  assert.equal(selectProfitableExitLevel(levels, 100, 'LONG'), 110);
+  assert.equal(selectProfitableExitLevel(levels, 100, 'LONG', { exitTargetLevelOffset: 1 }), 120);
+  assert.equal(selectProfitableExitLevel(levels, 100, 'LONG', { exitTargetLevelOffset: 99 }), 130);
+  assert.equal(selectProfitableExitLevel(levels, 120, 'SHORT'), 110);
+  assert.equal(selectProfitableExitLevel(levels, 120, 'SHORT', { exitTargetLevelOffset: 1 }), 100);
+  assert.equal(selectProfitableExitLevel(levels, 120, 'SHORT', { exitTargetFurthest: true }), 90);
 });
 
 test('SHORT simulation opens with SELL and closes with a lower BUY', () => {

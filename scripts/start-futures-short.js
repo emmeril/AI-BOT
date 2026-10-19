@@ -19,6 +19,7 @@ function buildShortEnvironment(baseEnvironment) {
     FUTURES_MAX_TOTAL_EXPOSURE_USDT: '300',
     GRID_MAX_ACTIVE_BUY_ORDERS: '10',
     GRID_MAX_ACTIVE_SELL_ORDERS: '10',
+    GRID_EXIT_TARGET_LEVEL_OFFSET: '0',
     GRID_AGGREGATED_EXIT_LADDER_ENABLED: 'false',
     FIBONACCI_RANGE_ADVISOR_STATE_FILE: 'fibonacci-range-advisor-futures-short.json',
     FIBONACCI_DIRECTION_ANALYZER_ENABLED: 'true',

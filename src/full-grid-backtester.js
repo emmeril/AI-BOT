@@ -30,6 +30,8 @@ const DEFAULT_OPTIONS = Object.freeze({
   maxRefills: 2,
   makerFeeRate: 0.0002,
   minimumNetProfitPct: 0.05,
+  exitTargetLevelOffset: 0,
+  exitTargetFurthest: false,
   minimumNotional: 5,
   positionSide: 'LONG',
   longEntryDirection: 'ALWAYS',
@@ -76,6 +78,17 @@ function maximumProfitableShortBuyPrice(lot, options) {
   const netEntryProceeds = lot.entryCost - lot.buyFee;
   const targetProfit = lot.entryCost * options.minimumNetProfitPct / 100;
   return (netEntryProceeds - targetProfit) / lot.quantity / (1 + options.makerFeeRate);
+}
+
+function selectProfitableExitLevel(levels, boundary, positionSide, options = {}) {
+  const short = String(positionSide || '').toUpperCase() === 'SHORT';
+  const candidates = short
+    ? [...levels].reverse().filter(level => level < boundary - 1e-12)
+    : levels.filter(level => level > boundary + 1e-12);
+  if (!candidates.length) return null;
+  if (options.exitTargetFurthest) return candidates.at(-1);
+  const offset = Math.max(0, Math.floor(Number(options.exitTargetLevelOffset) || 0));
+  return candidates[Math.min(offset, candidates.length - 1)];
 }
 
 function chooseSpacedLevels(candidates, multiplier) {
@@ -297,13 +310,13 @@ class FullGridBacktester {
           const maximum = Math.min(maximumProfitableShortBuyPrice(lot, targetOptions), currentPrice);
           target = lot.handoff
             ? maximum - Math.max(maximum * 1e-8, 1e-12)
-            : [...activeSuggestion.levels].reverse().find(level => level < maximum - 1e-12);
+            : selectProfitableExitLevel(activeSuggestion.levels, maximum, 'SHORT', options);
           if (!target) target = maximum - Math.max(maximum * 1e-8, 1e-12);
         } else {
           const minimum = Math.max(minimumProfitableSellPrice(lot, targetOptions), currentPrice);
           target = lot.handoff
             ? minimum + Math.max(minimum * 1e-8, 1e-12)
-            : activeSuggestion.levels.find(level => level > minimum + 1e-12);
+            : selectProfitableExitLevel(activeSuggestion.levels, minimum, 'LONG', options);
           if (!target) target = minimum + Math.max(minimum * 1e-8, 1e-12);
         }
         target = getMarketNumber(this.exchange, 'priceToPrecision', symbol, target);
@@ -711,5 +724,6 @@ module.exports = {
   geometricLevels,
   minimumProfitableSellPrice,
   maximumProfitableShortBuyPrice,
+  selectProfitableExitLevel,
   zoneForRank,
 };

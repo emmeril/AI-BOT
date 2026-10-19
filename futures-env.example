@@ -73,6 +73,10 @@ GRID_POST_ONLY=true
 # Maker fee used by the fee-aware grid spacing/profit guard.
 BINANCE_FUTURES_MAKER_FEE_RATE=0.0002
 GRID_MIN_NET_PROFIT_PCT=0.05
+# 0 = nearest profitable Fibonacci level. The validated LONG profile uses 1;
+# SHORT remains at 0 through SHORT_GRID_EXIT_TARGET_LEVEL_OFFSET.
+GRID_EXIT_TARGET_LEVEL_OFFSET=1
+SHORT_GRID_EXIT_TARGET_LEVEL_OFFSET=0
 # Prevent grid SELL orders below Binance's current average LONG entry.
 FUTURES_SELL_ENTRY_FLOOR_ENABLED=true
 
