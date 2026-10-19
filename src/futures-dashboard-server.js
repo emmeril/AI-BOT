@@ -210,10 +210,10 @@ function decisionSnapshot(engine, symbol, symState, orders, position, options = 
   const configuredCap = numberOrZero(process.env.GRID_TOTAL_INVESTMENT_USDT);
   const stateCap = numberOrZero(symState?.config?.orderSizeUsdt) * numberOrZero(symState?.config?.count);
   const gridInvestmentCap = positionSide === 'LONG' ? configuredCap : stateCap;
-  const symbolExposureCap = numberOrZero(
+  const symbolExposureCap = numberOrZero(options.exposureLimits?.symbol) || numberOrZero(
     process.env[`${exposurePrefix}FUTURES_MAX_SYMBOL_EXPOSURE_USDT`]
   ) || gridInvestmentCap;
-  const sideExposureCap = numberOrZero(
+  const sideExposureCap = numberOrZero(options.exposureLimits?.total) || numberOrZero(
     process.env[`${exposurePrefix}FUTURES_MAX_TOTAL_EXPOSURE_USDT`]
   );
   let allocatedInvestment = 0;
@@ -483,6 +483,12 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedS
   const intelligence = decisionSnapshot(engine, symbol, symState, orders, position, {
     positionSide: selectedPositionSide,
     pairExposure: selectedComparison.exposure,
+    exposureLimits: selectedPositionSide === 'SHORT'
+      ? {
+          symbol: shortState?.exposureBudget?.symbolCap,
+          total: shortState?.exposureBudget?.sideCap,
+        }
+      : engine.exposureLimits,
   });
   const combinedStrategyPnl = longComparison.strategyPnl + shortComparison.strategyPnl;
   const combinedExposure = longComparison.exposure + shortComparison.exposure;

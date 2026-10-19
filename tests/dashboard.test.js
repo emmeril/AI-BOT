@@ -167,6 +167,7 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
     tradingFees: 0.2,
   };
   const shortState = {
+    exposureBudget: { symbolCap: 20, sideCap: 40 },
     symbols: {
       'TEST/USDT:USDT': {
         config: { count: 2, orderSizeUsdt: 10, rangeAdvisor: {
@@ -190,6 +191,7 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
   };
   const engine = new TestEngine();
   engine.state = { getSymbol: () => longState };
+  engine.exposureLimits = { symbol: 21, total: 40 };
   engine.exchange = {
     fetchTicker: async () => ({ last: 10, high: 11, low: 9 }),
     fetchOpenOrders: async () => [
@@ -220,6 +222,8 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
   assert.equal(snapshot.comparison.SHORT.exposure, 60);
   assert.equal(snapshot.comparison.combined.exposure, 92);
   assert.equal(snapshot.intelligence.adaptive.allocatedInvestment, 60);
+  assert.equal(snapshot.intelligence.adaptive.symbolExposureCap, 20);
+  assert.equal(snapshot.intelligence.adaptive.sideExposureCap, 40);
   assert.equal(snapshot.intelligence.adaptive.exposureSource, 'exchange-conservative');
   assert.equal(snapshot.comparison.LONG.strategyPnl, 4.9);
   assert.equal(snapshot.comparison.SHORT.strategyPnl, 4.95);
@@ -235,6 +239,12 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
   assert.equal(snapshot.intelligence.volumeDelta.allow, false);
   assert.equal(snapshot.intelligence.volumeDelta.deltaRatio, 0.33683);
   assert.equal(snapshot.intelligence.volumeDelta.windowMinutes, 60);
+
+  const longSnapshot = await buildFuturesDashboardSnapshot(
+    engine, 'TEST/USDT:USDT', 'LONG', { shortState, shortRunning: true }
+  );
+  assert.equal(longSnapshot.intelligence.adaptive.symbolExposureCap, 21);
+  assert.equal(longSnapshot.intelligence.adaptive.sideExposureCap, 40);
 });
 
 test('futures decision snapshot exposes deterministic flow and SELL coverage without mutating execution', () => {
