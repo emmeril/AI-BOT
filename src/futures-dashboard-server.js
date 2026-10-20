@@ -508,6 +508,7 @@ function exposureBudgetSnapshot(positionSide, budget, fallbackLimits) {
     positionSide,
     status: source?.status || 'PENDING',
     deferredReason: source?.deferredReason || null,
+    pairCount: numberOrZero(source?.pairCount),
     symbolCap: numberOrZero(source?.symbolCap ?? fallbackLimits?.symbol),
     sideCap: numberOrZero(source?.sideCap ?? fallbackLimits?.total),
     targetSideCap: numberOrZero(source?.targetSideCap ?? source?.sideCap ?? fallbackLimits?.total),

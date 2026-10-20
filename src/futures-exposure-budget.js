@@ -25,16 +25,16 @@ function roundUsdt(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 }
 
-function exposureBudgetTarget(walletBalance, sidePct, symbolCeiling) {
+function exposureBudgetTarget(walletBalance, sidePct, pairCount = 1) {
   const wallet = finitePositive(walletBalance);
   const percent = finitePositive(sidePct);
-  const ceiling = finitePositive(symbolCeiling);
+  const pairs = Number(pairCount);
   if (!(wallet > 0)) throw new Error('Wallet balance must be greater than 0');
   if (!(percent > 0 && percent <= 50)) throw new Error('Side allocation must be greater than 0 and at most 50%');
-  if (!(ceiling > 0)) throw new Error('Symbol exposure ceiling must be greater than 0');
+  if (!Number.isInteger(pairs) || pairs < 1) throw new Error('Pair count must be a positive integer');
   const total = roundUsdt(wallet * percent / 100);
   return {
-    symbol: Math.min(ceiling, total),
+    symbol: roundUsdt(total / pairs),
     total,
   };
 }
@@ -49,22 +49,29 @@ function walletChangePct(referenceWalletBalance, walletBalance) {
 function decideExposureBudget({
   walletBalance,
   sidePct,
-  symbolCeiling,
+  pairCount = 1,
+  referencePairCount = pairCount,
   currentLimits,
   referenceWalletBalance,
   rebalanceThresholdPct,
   currentExposure = 0,
 }) {
-  const target = exposureBudgetTarget(walletBalance, sidePct, symbolCeiling);
+  const target = exposureBudgetTarget(walletBalance, sidePct, pairCount);
   const changePct = walletChangePct(referenceWalletBalance, walletBalance);
   const threshold = Math.max(0, Number(rebalanceThresholdPct) || 0);
-  if (changePct < threshold) {
+  const pairCountChanged = Number(referencePairCount) !== Number(pairCount);
+  if (!pairCountChanged && changePct < threshold) {
     return { action: 'UNCHANGED', target, changePct, limits: currentLimits };
   }
 
   const currentTotal = finitePositive(currentLimits?.total);
   if (target.total > currentTotal && finitePositive(currentExposure) > 0) {
-    return { action: 'DEFERRED', target, changePct, limits: currentLimits };
+    return {
+      action: 'DEFERRED',
+      target,
+      changePct,
+      limits: { ...currentLimits, symbol: Math.min(target.symbol, currentTotal) },
+    };
   }
 
   return { action: 'APPLIED', target, changePct, limits: target };

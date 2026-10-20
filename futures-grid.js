@@ -1223,17 +1223,19 @@ class FuturesGridEngine {
     const savedBudgetMatchesConfig = FUTURES_DYNAMIC_EXPOSURE_ENABLED &&
       savedExposureBudget?.enabled === true &&
       Number(savedExposureBudget.sidePct) === FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT &&
-      Number(savedExposureBudget.symbolCeiling) === FUTURES_MAX_SYMBOL_EXPOSURE_USDT &&
+      Number(savedExposureBudget.pairCount) === SYMBOLS.length &&
       Number(savedExposureBudget.sideCap) > 0;
     this.exposureLimits = savedBudgetMatchesConfig
       ? {
-          symbol: Math.min(
-            FUTURES_MAX_SYMBOL_EXPOSURE_USDT,
-            Number(savedExposureBudget.symbolCap) || FUTURES_MAX_SYMBOL_EXPOSURE_USDT
-          ),
+          symbol: Number(savedExposureBudget.symbolCap) || Number(savedExposureBudget.sideCap),
           total: Number(savedExposureBudget.sideCap),
         }
-      : { symbol: FUTURES_MAX_SYMBOL_EXPOSURE_USDT, total: FUTURES_MAX_TOTAL_EXPOSURE_USDT };
+      : {
+          symbol: FUTURES_DYNAMIC_EXPOSURE_ENABLED
+            ? FUTURES_MAX_TOTAL_EXPOSURE_USDT
+            : FUTURES_MAX_SYMBOL_EXPOSURE_USDT,
+          total: FUTURES_MAX_TOTAL_EXPOSURE_USDT,
+        };
     this.exposureBudgetReferenceWalletBalance = savedBudgetMatchesConfig
       ? Number(savedExposureBudget.referenceWalletBalance) || 0
       : 0;
@@ -3102,15 +3104,18 @@ class FuturesGridEngine {
     const decision = decideExposureBudget({
       walletBalance,
       sidePct: FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT,
-      symbolCeiling: FUTURES_MAX_SYMBOL_EXPOSURE_USDT,
+      pairCount: SYMBOLS.length,
+      referencePairCount: this.state.data.exposureBudget?.pairCount,
       currentLimits: this.exposureLimits,
       referenceWalletBalance: this.exposureBudgetReferenceWalletBalance,
       rebalanceThresholdPct: FUTURES_DYNAMIC_EXPOSURE_REBALANCE_THRESHOLD_PCT,
       currentExposure: exposure.total,
     });
 
-    if (decision.action === 'APPLIED') {
+    if (decision.action === 'APPLIED' || decision.action === 'DEFERRED') {
       this.exposureLimits = decision.limits;
+    }
+    if (decision.action === 'APPLIED') {
       this.exposureBudgetReferenceWalletBalance = walletBalance;
     }
     this.state.data.exposureBudget = {
@@ -3119,7 +3124,7 @@ class FuturesGridEngine {
       sidePct: FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT,
       combinedPct: FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT * 2,
       bufferPct: Math.max(0, 100 - FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT * 2),
-      symbolCeiling: FUTURES_MAX_SYMBOL_EXPOSURE_USDT,
+      pairCount: SYMBOLS.length,
       symbolCap: this.exposureLimits.symbol,
       sideCap: this.exposureLimits.total,
       targetSideCap: decision.target.total,
@@ -3139,7 +3144,8 @@ class FuturesGridEngine {
     if (decision.action === 'APPLIED') {
       console.log(
         `[EXPOSURE BUDGET] ${POSITION_SIDE} applied: wallet=${roundNumber(walletBalance, 2)} USDT ` +
-        `symbol-cap=${this.exposureLimits.symbol} USDT side-cap=${this.exposureLimits.total} USDT`
+        `pairs=${SYMBOLS.length} symbol-cap=${this.exposureLimits.symbol} USDT ` +
+        `side-cap=${this.exposureLimits.total} USDT`
       );
     } else if (decision.action === 'DEFERRED') {
       console.log(

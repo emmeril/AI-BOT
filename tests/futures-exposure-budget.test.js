@@ -7,15 +7,24 @@ const {
   walletChangePct,
 } = require('../src/futures-exposure-budget');
 
-test('45 percent budget keeps a 10 percent combined buffer and caps each symbol', () => {
-  assert.deepEqual(exposureBudgetTarget(92.62192843, 45, 22), {
-    symbol: 22,
+test('45 percent budget is divided equally across configured pairs without a fixed symbol ceiling', () => {
+  assert.deepEqual(exposureBudgetTarget(92.62192843, 45), {
+    symbol: 41.68,
     total: 41.68,
   });
-  assert.deepEqual(exposureBudgetTarget(20, 45, 22), {
-    symbol: 9,
-    total: 9,
+  assert.deepEqual(exposureBudgetTarget(92.62192843, 45, 2), {
+    symbol: 20.84,
+    total: 41.68,
   });
+  assert.deepEqual(exposureBudgetTarget(92.62192843, 45, 4), {
+    symbol: 10.42,
+    total: 41.68,
+  });
+});
+
+test('budget rejects an invalid configured pair count', () => {
+  assert.throws(() => exposureBudgetTarget(100, 45, 0), /Pair count/);
+  assert.throws(() => exposureBudgetTarget(100, 45, 1.5), /Pair count/);
 });
 
 test('wallet balance prefers realized futures wallet fields over generic totals', () => {
@@ -33,7 +42,6 @@ test('budget ignores sub-threshold balance movement', () => {
   const decision = decideExposureBudget({
     walletBalance: 99,
     sidePct: 45,
-    symbolCeiling: 22,
     currentLimits: { symbol: 22, total: 45 },
     referenceWalletBalance: 100,
     rebalanceThresholdPct: 10,
@@ -47,36 +55,64 @@ test('budget applies reductions but defers increases while exposure is active', 
   const reduction = decideExposureBudget({
     walletBalance: 80,
     sidePct: 45,
-    symbolCeiling: 22,
     currentLimits: { symbol: 22, total: 45 },
     referenceWalletBalance: 100,
     rebalanceThresholdPct: 10,
     currentExposure: 44,
   });
   assert.equal(reduction.action, 'APPLIED');
-  assert.deepEqual(reduction.limits, { symbol: 22, total: 36 });
+  assert.deepEqual(reduction.limits, { symbol: 36, total: 36 });
 
   const increase = decideExposureBudget({
     walletBalance: 120,
     sidePct: 45,
-    symbolCeiling: 22,
     currentLimits: { symbol: 22, total: 45 },
     referenceWalletBalance: 100,
     rebalanceThresholdPct: 10,
     currentExposure: 5,
   });
   assert.equal(increase.action, 'DEFERRED');
-  assert.deepEqual(increase.limits, { symbol: 22, total: 45 });
+  assert.deepEqual(increase.limits, { symbol: 45, total: 45 });
 
   const flat = decideExposureBudget({
     walletBalance: 120,
     sidePct: 45,
-    symbolCeiling: 22,
     currentLimits: { symbol: 22, total: 45 },
     referenceWalletBalance: 100,
     rebalanceThresholdPct: 10,
     currentExposure: 0,
   });
   assert.equal(flat.action, 'APPLIED');
-  assert.deepEqual(flat.limits, { symbol: 22, total: 54 });
+  assert.deepEqual(flat.limits, { symbol: 54, total: 54 });
+});
+
+test('pair count changes rebalance immediately without waiting for wallet threshold', () => {
+  const decision = decideExposureBudget({
+    walletBalance: 92.62192843,
+    sidePct: 45,
+    pairCount: 2,
+    referencePairCount: 5,
+    currentLimits: { symbol: 8.34, total: 41.68 },
+    referenceWalletBalance: 92.62192843,
+    rebalanceThresholdPct: 10,
+    currentExposure: 0,
+  });
+  assert.equal(decision.action, 'APPLIED');
+  assert.deepEqual(decision.limits, { symbol: 20.84, total: 41.68 });
+});
+
+test('pair cap changes immediately while an active exposure defers only a total-cap increase', () => {
+  const decision = decideExposureBudget({
+    walletBalance: 120,
+    sidePct: 45,
+    pairCount: 4,
+    referencePairCount: 2,
+    currentLimits: { symbol: 22, total: 45 },
+    referenceWalletBalance: 100,
+    rebalanceThresholdPct: 10,
+    currentExposure: 20,
+  });
+  assert.equal(decision.action, 'DEFERRED');
+  assert.deepEqual(decision.target, { symbol: 13.5, total: 54 });
+  assert.deepEqual(decision.limits, { symbol: 13.5, total: 45 });
 });
