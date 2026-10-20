@@ -7,24 +7,25 @@ const {
   walletChangePct,
 } = require('../src/futures-exposure-budget');
 
-test('45 percent budget is divided equally across configured pairs without a fixed symbol ceiling', () => {
-  assert.deepEqual(exposureBudgetTarget(92.62192843, 45), {
-    symbol: 41.68,
-    total: 41.68,
+test('45 percent margin budget is multiplied by leverage and divided equally across pairs', () => {
+  assert.deepEqual(exposureBudgetTarget(92.62192843, 45, 5), {
+    symbol: 208.4,
+    total: 208.4,
   });
-  assert.deepEqual(exposureBudgetTarget(92.62192843, 45, 2), {
-    symbol: 20.84,
-    total: 41.68,
+  assert.deepEqual(exposureBudgetTarget(92.62192843, 45, 5, 2), {
+    symbol: 104.2,
+    total: 208.4,
   });
-  assert.deepEqual(exposureBudgetTarget(92.62192843, 45, 4), {
-    symbol: 10.42,
-    total: 41.68,
+  assert.deepEqual(exposureBudgetTarget(92.62192843, 45, 5, 4), {
+    symbol: 52.1,
+    total: 208.4,
   });
 });
 
-test('budget rejects an invalid configured pair count', () => {
-  assert.throws(() => exposureBudgetTarget(100, 45, 0), /Pair count/);
-  assert.throws(() => exposureBudgetTarget(100, 45, 1.5), /Pair count/);
+test('budget rejects invalid leverage and configured pair count', () => {
+  assert.throws(() => exposureBudgetTarget(100, 45, 0), /Leverage/);
+  assert.throws(() => exposureBudgetTarget(100, 45, 5, 0), /Pair count/);
+  assert.throws(() => exposureBudgetTarget(100, 45, 5, 1.5), /Pair count/);
 });
 
 test('wallet balance prefers realized futures wallet fields over generic totals', () => {
@@ -42,6 +43,7 @@ test('budget ignores sub-threshold balance movement', () => {
   const decision = decideExposureBudget({
     walletBalance: 99,
     sidePct: 45,
+    leverage: 1,
     currentLimits: { symbol: 22, total: 45 },
     referenceWalletBalance: 100,
     rebalanceThresholdPct: 10,
@@ -55,6 +57,7 @@ test('budget applies reductions but defers increases while exposure is active', 
   const reduction = decideExposureBudget({
     walletBalance: 80,
     sidePct: 45,
+    leverage: 1,
     currentLimits: { symbol: 22, total: 45 },
     referenceWalletBalance: 100,
     rebalanceThresholdPct: 10,
@@ -66,6 +69,7 @@ test('budget applies reductions but defers increases while exposure is active', 
   const increase = decideExposureBudget({
     walletBalance: 120,
     sidePct: 45,
+    leverage: 1,
     currentLimits: { symbol: 22, total: 45 },
     referenceWalletBalance: 100,
     rebalanceThresholdPct: 10,
@@ -77,6 +81,7 @@ test('budget applies reductions but defers increases while exposure is active', 
   const flat = decideExposureBudget({
     walletBalance: 120,
     sidePct: 45,
+    leverage: 1,
     currentLimits: { symbol: 22, total: 45 },
     referenceWalletBalance: 100,
     rebalanceThresholdPct: 10,
@@ -90,6 +95,7 @@ test('pair count changes rebalance immediately without waiting for wallet thresh
   const decision = decideExposureBudget({
     walletBalance: 92.62192843,
     sidePct: 45,
+    leverage: 1,
     pairCount: 2,
     referencePairCount: 5,
     currentLimits: { symbol: 8.34, total: 41.68 },
@@ -105,6 +111,7 @@ test('pair cap changes immediately while an active exposure defers only a total-
   const decision = decideExposureBudget({
     walletBalance: 120,
     sidePct: 45,
+    leverage: 1,
     pairCount: 4,
     referencePairCount: 2,
     currentLimits: { symbol: 22, total: 45 },
@@ -115,4 +122,21 @@ test('pair cap changes immediately while an active exposure defers only a total-
   assert.equal(decision.action, 'DEFERRED');
   assert.deepEqual(decision.target, { symbol: 13.5, total: 54 });
   assert.deepEqual(decision.limits, { symbol: 13.5, total: 45 });
+});
+
+test('leverage-aware model migration applies immediately with active exposure', () => {
+  const decision = decideExposureBudget({
+    walletBalance: 100,
+    sidePct: 45,
+    leverage: 5,
+    referenceLeverage: null,
+    pairCount: 2,
+    referencePairCount: 2,
+    currentLimits: { symbol: 22.5, total: 45 },
+    referenceWalletBalance: 100,
+    rebalanceThresholdPct: 10,
+    currentExposure: 40,
+  });
+  assert.equal(decision.action, 'APPLIED');
+  assert.deepEqual(decision.limits, { symbol: 112.5, total: 225 });
 });

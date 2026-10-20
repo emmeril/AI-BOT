@@ -25,14 +25,16 @@ function roundUsdt(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 }
 
-function exposureBudgetTarget(walletBalance, sidePct, pairCount = 1) {
+function exposureBudgetTarget(walletBalance, sidePct, leverage = 1, pairCount = 1) {
   const wallet = finitePositive(walletBalance);
   const percent = finitePositive(sidePct);
+  const multiplier = finitePositive(leverage);
   const pairs = Number(pairCount);
   if (!(wallet > 0)) throw new Error('Wallet balance must be greater than 0');
   if (!(percent > 0 && percent <= 50)) throw new Error('Side allocation must be greater than 0 and at most 50%');
+  if (!(multiplier > 0)) throw new Error('Leverage must be greater than 0');
   if (!Number.isInteger(pairs) || pairs < 1) throw new Error('Pair count must be a positive integer');
-  const total = roundUsdt(wallet * percent / 100);
+  const total = roundUsdt(wallet * percent / 100 * multiplier);
   return {
     symbol: roundUsdt(total / pairs),
     total,
@@ -49,23 +51,26 @@ function walletChangePct(referenceWalletBalance, walletBalance) {
 function decideExposureBudget({
   walletBalance,
   sidePct,
+  leverage = 1,
   pairCount = 1,
   referencePairCount = pairCount,
+  referenceLeverage = leverage,
   currentLimits,
   referenceWalletBalance,
   rebalanceThresholdPct,
   currentExposure = 0,
 }) {
-  const target = exposureBudgetTarget(walletBalance, sidePct, pairCount);
+  const target = exposureBudgetTarget(walletBalance, sidePct, leverage, pairCount);
   const changePct = walletChangePct(referenceWalletBalance, walletBalance);
   const threshold = Math.max(0, Number(rebalanceThresholdPct) || 0);
   const pairCountChanged = Number(referencePairCount) !== Number(pairCount);
-  if (!pairCountChanged && changePct < threshold) {
+  const leverageChanged = Number(referenceLeverage) !== Number(leverage);
+  if (!pairCountChanged && !leverageChanged && changePct < threshold) {
     return { action: 'UNCHANGED', target, changePct, limits: currentLimits };
   }
 
   const currentTotal = finitePositive(currentLimits?.total);
-  if (target.total > currentTotal && finitePositive(currentExposure) > 0) {
+  if (!leverageChanged && target.total > currentTotal && finitePositive(currentExposure) > 0) {
     return {
       action: 'DEFERRED',
       target,

@@ -195,3 +195,130 @@ test('configurable base timeframe builds complete higher-timeframe candles', () 
   assert.equal(series['15m'].length, 4);
   assert.equal(series['1h'].length, 1);
 });
+
+test('controlled handoff can place one Fibonacci rescue order and exit the enlarged position profitably', () => {
+  const simulator = new FixedRangeBacktester(exchange, {
+    gridCount: 2,
+    totalInvestment: 10,
+    orderSizeUsdt: 5,
+    maxExposureUsdt: 10,
+    maxActiveBuyOrders: 2,
+    minimumNotional: 5,
+    candleLimit: 100,
+    rangeRebuildCooldownMs: Infinity,
+    mutualExclusion: true,
+    controlledHandoff: true,
+    handoffMinimumNetProfitPct: 0.05,
+    handoffRescueNotionalUsdt: 10,
+    longEntryDirection: 'ALWAYS',
+    shortEntryDirection: 'ALWAYS',
+  });
+  simulator.createRangeAdvisor = () => ({
+    buildSuggestion: () => ({ lower: 70, upper: 110, levels: [70, 90, 110] }),
+    shouldAdoptSuggestion: previous => !previous,
+  });
+  const rows = [
+    candle(0, 100, 101, 99, 100),
+    candle(1, 90, 91, 89, 90),
+    candle(2, 80, 85, 79, 80),
+    candle(3, 71, 72, 69, 71),
+    candle(4, 75, 80, 74, 78),
+  ];
+  const result = simulator.simulate({
+    symbol: 'TEST/USDT:USDT',
+    rows,
+    start: 0,
+    end: 5 * INTERVAL,
+    positionSideProvider: ({ timestamp }) => timestamp >= 3 * INTERVAL ? 'SHORT' : 'LONG',
+  });
+  assert.equal(result.handoffRescueOrders, 1);
+  assert.equal(result.handoffRescueFills, 1);
+  assert.equal(result.handoffCompleted, 1);
+  assert.equal(result.finalInventoryNotional, 0);
+  assert.ok(result.netLiquidationPnl > 0);
+});
+
+test('stale handoff can spend realized profit to clear inventory on a Fibonacci bounce', () => {
+  const simulator = new FixedRangeBacktester(exchange, {
+    gridCount: 2,
+    totalInvestment: 10,
+    orderSizeUsdt: 5,
+    maxExposureUsdt: 10,
+    maxActiveBuyOrders: 2,
+    minimumNotional: 5,
+    candleLimit: 100,
+    rangeRebuildCooldownMs: Infinity,
+    mutualExclusion: true,
+    controlledHandoff: true,
+    handoffMinimumNetProfitPct: 0.05,
+    handoffProfitBankExitEnabled: true,
+    handoffProfitBankActivationMs: 0,
+    handoffProfitBankExitFraction: 1,
+    handoffProfitBankReserveUsdt: 0.05,
+    longEntryDirection: 'ALWAYS',
+    shortEntryDirection: 'ALWAYS',
+  });
+  simulator.createRangeAdvisor = () => ({
+    buildSuggestion: () => ({ lower: 70, upper: 110, levels: [70, 90, 100, 110] }),
+    shouldAdoptSuggestion: previous => !previous,
+  });
+  const rows = [
+    candle(0, 100, 101, 99, 100),
+    candle(1, 100, 100, 89, 90),
+    candle(2, 90, 101, 90, 100),
+    candle(3, 100, 100, 79, 80),
+    candle(4, 80, 90, 79, 85),
+  ];
+  const result = simulator.simulate({
+    symbol: 'TEST/USDT:USDT',
+    rows,
+    start: 0,
+    end: 5 * INTERVAL,
+    positionSideProvider: ({ timestamp }) => timestamp >= 4 * INTERVAL ? 'SHORT' : 'LONG',
+  });
+  assert.equal(result.handoffProfitBankOrders, 1);
+  assert.equal(result.handoffProfitBankFills, 1);
+  assert.equal(result.handoffProfitBankFullExits, 1);
+  assert.equal(result.handoffCompleted, 1);
+  assert.equal(result.finalInventoryNotional, 0);
+  assert.ok(result.realizedCashPnl >= 0.05);
+});
+
+test('profit-bank handoff does not realize a loss when its reserve is unavailable', () => {
+  const simulator = new FixedRangeBacktester(exchange, {
+    gridCount: 2,
+    totalInvestment: 10,
+    orderSizeUsdt: 5,
+    maxExposureUsdt: 10,
+    maxActiveBuyOrders: 2,
+    minimumNotional: 5,
+    candleLimit: 100,
+    rangeRebuildCooldownMs: Infinity,
+    mutualExclusion: true,
+    controlledHandoff: true,
+    handoffProfitBankExitEnabled: true,
+    handoffProfitBankActivationMs: 0,
+    handoffProfitBankExitFraction: 1,
+    handoffProfitBankReserveUsdt: 0.05,
+    longEntryDirection: 'ALWAYS',
+    shortEntryDirection: 'ALWAYS',
+  });
+  simulator.createRangeAdvisor = () => ({
+    buildSuggestion: () => ({ lower: 70, upper: 110, levels: [70, 90, 100, 110] }),
+    shouldAdoptSuggestion: previous => !previous,
+  });
+  const rows = [
+    candle(0, 100, 101, 99, 100),
+    candle(1, 100, 100, 89, 80),
+    candle(2, 80, 90, 79, 85),
+  ];
+  const result = simulator.simulate({
+    symbol: 'TEST/USDT:USDT',
+    rows,
+    start: 0,
+    end: 3 * INTERVAL,
+    positionSideProvider: ({ timestamp }) => timestamp >= 2 * INTERVAL ? 'SHORT' : 'LONG',
+  });
+  assert.equal(result.handoffProfitBankFills, 0);
+  assert.ok(result.finalInventoryNotional > 0);
+});

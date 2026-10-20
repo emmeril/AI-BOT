@@ -42,6 +42,11 @@ const DEFAULT_OPTIONS = Object.freeze({
   controlledHandoff: false,
   handoffMinimumNetProfitPct: 0,
   handoffEntryCooldownMs: 0,
+  handoffRescueNotionalUsdt: 0,
+  handoffProfitBankExitEnabled: false,
+  handoffProfitBankActivationMs: 0,
+  handoffProfitBankExitFraction: 1,
+  handoffProfitBankReserveUsdt: 0,
   candleLimit: 100,
   rangeWidthPct: 20,
   rangeMinimumWidthPct: 6,
@@ -143,6 +148,14 @@ function createMetrics() {
     handoffCompleted: 0,
     handoffCancelled: 0,
     handoffExitFills: 0,
+    handoffRescueOrders: 0,
+    handoffRescueFills: 0,
+    handoffProfitBankOrders: 0,
+    handoffProfitBankFills: 0,
+    handoffProfitBankFullExits: 0,
+    handoffProfitBankPartialExits: 0,
+    handoffProfitBankExitNotional: 0,
+    handoffProfitBankRealizedPnl: 0,
     blockedEntrySamples: 0,
     gridCycles: 0,
     rangeResets: 0,
@@ -155,6 +168,9 @@ function createMetrics() {
     cashPnl: 0,
     maxInventoryNotional: 0,
     maxPendingBuyNotional: 0,
+    maxInventoryAgeHours: 0,
+    inventoryNotionalHours: 0,
+    staleInventoryNotionalHours: 0,
     exposureSamples: 0,
     exposureAbove90Samples: 0,
     profileSamples: { BULLISH: 0, SIDEWAYS: 0, BEARISH: 0, RISK_OFF: 0 },
@@ -227,6 +243,7 @@ class FullGridBacktester {
     learningPolicyProvider = null,
     entryDecisionProvider = null,
     entryLevelPlanProvider = null,
+    positionSideProvider = null,
     variant = null,
   }) {
     const options = this.options;
@@ -277,6 +294,9 @@ class FullGridBacktester {
     let activePositionSide = mutualExclusion ? 'LONG' : configuredPositionSide;
     let handoffTargetSide = null;
     let lastHandoffCompletedAt = -Infinity;
+    let handoffRescueUsed = false;
+    let handoffStartedAt = null;
+    let handoffProfitBankOrder = null;
 
     const funding = [...fundingRates]
       .map(item => ({ timestamp: Number(item.timestamp), rate: Number(item.rate) }))
@@ -296,6 +316,110 @@ class FullGridBacktester {
         : marketNotional - lot.entryCost;
       return sum + pricePnl - marketNotional * options.makerFeeRate;
     }, 0);
+    const openPositionNetPnl = price => lots.reduce((sum, lot) => {
+      const marketNotional = lot.quantity * price;
+      const pricePnl = sideIsShort(lot.positionSide)
+        ? lot.entryCost - marketNotional
+        : marketNotional - lot.entryCost;
+      return sum + pricePnl - lot.buyFee - marketNotional * options.makerFeeRate;
+    }, 0);
+
+    const scheduleHandoffProfitBankExit = (currentPrice, now) => {
+      if (!options.handoffProfitBankExitEnabled || !handoffTargetSide || !lots.length ||
+          !activeSuggestion?.levels?.length || handoffProfitBankOrder) return;
+      const activationMs = Math.max(0, Number(options.handoffProfitBankActivationMs) || 0);
+      if (!Number.isFinite(handoffStartedAt) || now - handoffStartedAt < activationMs) return;
+      const short = sideIsShort(activePositionSide);
+      const candidatePrice = activeSuggestion.levels
+        .filter(price => short ? price < currentPrice : price > currentPrice)
+        .sort((left, right) => short ? right - left : left - right)[0];
+      if (!(candidatePrice > 0)) return;
+      handoffProfitBankOrder = {
+        generation: rangeGeneration,
+        positionSide: activePositionSide,
+        price: getMarketNumber(this.exchange, 'priceToPrecision', symbol, candidatePrice),
+        placedAt: now,
+      };
+      metrics.handoffProfitBankOrders++;
+    };
+
+    const executeHandoffProfitBankExit = (timestamp, high, low) => {
+      const order = handoffProfitBankOrder;
+      if (!order || order.generation !== rangeGeneration || order.placedAt > timestamp) return;
+      const short = sideIsShort(order.positionSide);
+      const touched = short ? low - 1e-12 <= order.price : high + 1e-12 >= order.price;
+      if (!touched) return;
+      const exitLots = lots.filter(lot => lot.handoff && lot.positionSide === order.positionSide);
+      handoffProfitBankOrder = null;
+      if (!exitLots.length) return;
+
+      const fullQuantity = exitLots.reduce((sum, lot) => sum + lot.quantity, 0);
+      const fullEntryCost = exitLots.reduce((sum, lot) => sum + lot.entryCost, 0);
+      const fullExitNotional = fullQuantity * order.price;
+      const fullGrossPnl = short
+        ? fullEntryCost - fullExitNotional
+        : fullExitNotional - fullEntryCost;
+      const fullExitFee = fullExitNotional * options.makerFeeRate;
+      const fullCashDelta = fullGrossPnl - fullExitFee;
+      const reserve = Math.max(0, Number(options.handoffProfitBankReserveUsdt) || 0);
+      const configuredFraction = Math.min(
+        1,
+        Math.max(0, Number(options.handoffProfitBankExitFraction) || 0)
+      );
+      let fraction = configuredFraction;
+      if (fullCashDelta < 0) {
+        const spendableProfit = Math.max(0, metrics.cashPnl - reserve);
+        fraction = Math.min(fraction, spendableProfit / -fullCashDelta);
+      }
+      if (!(fraction > 0)) return;
+
+      const exitNotional = fullExitNotional * fraction;
+      if (exitNotional + 1e-8 < options.minimumNotional) return;
+      const remainingNotional = fullExitNotional - exitNotional;
+      if (remainingNotional > 1e-8 && remainingNotional < options.minimumNotional) {
+        const fullExitAffordable = metrics.cashPnl + fullCashDelta >= reserve - 1e-12;
+        if (fullExitAffordable) fraction = 1;
+        else fraction = Math.max(0, 1 - options.minimumNotional / fullExitNotional);
+      }
+      if (!(fraction > 0)) return;
+
+      let grossPnl = 0;
+      let closedNotional = 0;
+      for (let index = lots.length - 1; index >= 0; index--) {
+        const lot = lots[index];
+        if (!lot.handoff || lot.positionSide !== order.positionSide) continue;
+        const closedQuantity = lot.quantity * fraction;
+        const closedEntryCost = lot.entryCost * fraction;
+        const lotExitNotional = closedQuantity * order.price;
+        grossPnl += short
+          ? closedEntryCost - lotExitNotional
+          : lotExitNotional - closedEntryCost;
+        closedNotional += lotExitNotional;
+        if (fraction >= 1 - 1e-12) {
+          lots.splice(index, 1);
+        } else {
+          const remainingFraction = 1 - fraction;
+          lot.quantity *= remainingFraction;
+          lot.entryCost *= remainingFraction;
+          lot.buyFee *= remainingFraction;
+          lot.sellTarget = null;
+          lot.sellPlacedAt = Infinity;
+        }
+      }
+      const exitFee = closedNotional * options.makerFeeRate;
+      const cashDelta = grossPnl - exitFee;
+      metrics.grossGridProfit += grossPnl;
+      metrics.sellFees += exitFee;
+      metrics.cashPnl += cashDelta;
+      metrics.sellFills++;
+      metrics.gridCycles++;
+      metrics.handoffExitFills++;
+      metrics.handoffProfitBankFills++;
+      metrics.handoffProfitBankExitNotional += closedNotional;
+      metrics.handoffProfitBankRealizedPnl += cashDelta;
+      if (fraction >= 1 - 1e-12) metrics.handoffProfitBankFullExits++;
+      else metrics.handoffProfitBankPartialExits++;
+    };
 
     const profitablePriceOptions = lot => lot.handoff
       ? { ...options, minimumNetProfitPct: options.handoffMinimumNetProfitPct }
@@ -309,14 +433,26 @@ class FullGridBacktester {
         let target;
         const targetOptions = profitablePriceOptions(lot);
         const short = sideIsShort(lot.positionSide);
+        const handoffLots = lot.handoff
+          ? lots.filter(item => item.handoff && item.positionSide === lot.positionSide)
+          : [lot];
+        const profitBasis = handoffLots.length === 1 ? lot : {
+          entryCost: handoffLots.reduce((sum, item) => sum + item.entryCost, 0),
+          buyFee: handoffLots.reduce((sum, item) => sum + item.buyFee, 0),
+          quantity: handoffLots.reduce((sum, item) => sum + item.quantity, 0),
+        };
         if (short) {
-          const maximum = Math.min(maximumProfitableShortBuyPrice(lot, targetOptions), currentPrice);
+          const maximum = Math.min(
+            maximumProfitableShortBuyPrice(profitBasis, targetOptions), currentPrice
+          );
           target = lot.handoff
             ? maximum - Math.max(maximum * 1e-8, 1e-12)
             : selectProfitableExitLevel(activeSuggestion.levels, maximum, 'SHORT', options);
           if (!target) target = maximum - Math.max(maximum * 1e-8, 1e-12);
         } else {
-          const minimum = Math.max(minimumProfitableSellPrice(lot, targetOptions), currentPrice);
+          const minimum = Math.max(
+            minimumProfitableSellPrice(profitBasis, targetOptions), currentPrice
+          );
           target = lot.handoff
             ? minimum + Math.max(minimum * 1e-8, 1e-12)
             : selectProfitableExitLevel(activeSuggestion.levels, minimum, 'LONG', options);
@@ -324,8 +460,8 @@ class FullGridBacktester {
         }
         target = getMarketNumber(this.exchange, 'priceToPrecision', symbol, target);
         const profitable = short
-          ? target < maximumProfitableShortBuyPrice(lot, targetOptions) && target < currentPrice
-          : target > minimumProfitableSellPrice(lot, targetOptions) && target > currentPrice;
+          ? target < maximumProfitableShortBuyPrice(profitBasis, targetOptions) && target < currentPrice
+          : target > minimumProfitableSellPrice(profitBasis, targetOptions) && target > currentPrice;
         if (profitable) {
           lot.sellTarget = target;
           lot.sellPlacedAt = lot.lastUpdatedAt;
@@ -339,9 +475,53 @@ class FullGridBacktester {
       return appliedDirection === requiredShortDirection ? 'SHORT' : 'LONG';
     };
 
-    const updateMutualOwnership = (appliedDirection, now) => {
+    const placeHandoffRescue = (currentPrice, now) => {
+      const rescueNotional = Number(options.handoffRescueNotionalUsdt) || 0;
+      if (!(rescueNotional > 0) || handoffRescueUsed || !lots.length ||
+          !activeSuggestion?.levels?.length || openPositionNetPnl(currentPrice) >= 0) return;
+      const short = sideIsShort(activePositionSide);
+      const occupied = new Set(lots.map(lot => lot.levelIndex));
+      const candidate = activeSuggestion.levels
+        .map((price, levelIndex) => ({ price, levelIndex }))
+        .filter(item => (short ? item.price > currentPrice : item.price < currentPrice) &&
+          !occupied.has(item.levelIndex) && !pendingBuys.has(item.levelIndex))
+        .sort((left, right) => short ? left.price - right.price : right.price - left.price)[0];
+      if (!candidate) return;
+      const configuredCap = Number(options.maxExposureUsdt) > 0
+        ? Number(options.maxExposureUsdt)
+        : options.totalInvestment;
+      const available = Math.max(0, configuredCap + rescueNotional - exposureNotional());
+      const targetNotional = Math.min(rescueNotional, available);
+      if (targetNotional + 1e-12 < options.minimumNotional) return;
+      const price = getMarketNumber(this.exchange, 'priceToPrecision', symbol, candidate.price);
+      const quantity = getMarketNumber(
+        this.exchange, 'amountToPrecision', symbol, targetNotional / price
+      );
+      const notional = price * quantity;
+      if (!(quantity > 0) || notional + 1e-8 < options.minimumNotional) return;
+      pendingBuys.set(candidate.levelIndex, {
+        generation: rangeGeneration,
+        levelIndex: candidate.levelIndex,
+        price,
+        quantity,
+        notional,
+        placedAt: now,
+        refillCount: 0,
+        positionSide: activePositionSide,
+        handoffRescue: true,
+      });
+      handoffRescueUsed = true;
+      metrics.handoffRescueOrders++;
+    };
+
+    const updateMutualOwnership = (appliedDirection, now, currentPrice, context) => {
       if (!mutualExclusion) return;
-      const preferred = preferredPositionSide(appliedDirection);
+      const providedSide = typeof positionSideProvider === 'function'
+        ? String(positionSideProvider(context) || '').toUpperCase()
+        : '';
+      const preferred = ['LONG', 'SHORT'].includes(providedSide)
+        ? providedSide
+        : preferredPositionSide(appliedDirection);
       if (!lots.length) {
         if (activePositionSide !== preferred) {
           pendingBuys.clear();
@@ -353,12 +533,20 @@ class FullGridBacktester {
           }
         }
         handoffTargetSide = null;
+        handoffRescueUsed = false;
+        handoffStartedAt = null;
+        handoffProfitBankOrder = null;
         return;
       }
       if (preferred === activePositionSide) {
         if (handoffTargetSide) {
           metrics.handoffCancelled++;
           handoffTargetSide = null;
+          handoffStartedAt = null;
+          handoffProfitBankOrder = null;
+          for (const [levelIndex, order] of pendingBuys) {
+            if (order.handoffRescue) pendingBuys.delete(levelIndex);
+          }
           for (const lot of lots) {
             lot.handoff = false;
             lot.sellTarget = null;
@@ -366,14 +554,21 @@ class FullGridBacktester {
         }
         return;
       }
-      pendingBuys.clear();
-      if (handoffTargetSide !== preferred) metrics.handoffSignals++;
+      for (const [levelIndex, order] of pendingBuys) {
+        if (!order.handoffRescue) pendingBuys.delete(levelIndex);
+      }
+      if (handoffTargetSide !== preferred) {
+        metrics.handoffSignals++;
+        handoffStartedAt = now;
+        handoffProfitBankOrder = null;
+      }
       handoffTargetSide = preferred;
       if (options.controlledHandoff) {
         for (const lot of lots) {
           if (!lot.handoff) lot.sellTarget = null;
           lot.handoff = true;
         }
+        placeHandoffRescue(currentPrice, now);
       }
     };
 
@@ -382,6 +577,7 @@ class FullGridBacktester {
       lastRangeAppliedAt = now;
       rangeGeneration++;
       pendingBuys.clear();
+      handoffProfitBankOrder = null;
       slotFillCounts.clear();
       for (const lot of lots) {
         let nearestIndex = 0;
@@ -543,6 +739,8 @@ class FullGridBacktester {
         lots.splice(index, 1);
       }
 
+      executeHandoffProfitBankExit(timestamp, high, low);
+
       for (const [levelIndex, order] of [...pendingBuys.entries()]) {
         const short = sideIsShort(order.positionSide);
         const entryTouched = short ? high + 1e-12 >= order.price : low - 1e-12 <= order.price;
@@ -553,6 +751,13 @@ class FullGridBacktester {
         metrics.buyFills++;
         if (short) metrics.shortEntryFills++;
         else metrics.longEntryFills++;
+        if (order.handoffRescue) {
+          metrics.handoffRescueFills++;
+          for (const lot of lots) {
+            lot.handoff = true;
+            lot.sellTarget = null;
+          }
+        }
         lots.push({
           generation: rangeGeneration,
           levelIndex,
@@ -564,8 +769,9 @@ class FullGridBacktester {
           sellPlacedAt: Infinity,
           lastRangeResetAt: order.placedAt,
           lastUpdatedAt: evaluationTime,
+          entryFilledAt: evaluationTime,
           positionSide: order.positionSide,
-          handoff: false,
+          handoff: Boolean(order.handoffRescue),
         });
         pendingBuys.delete(levelIndex);
       }
@@ -637,7 +843,16 @@ class FullGridBacktester {
           analysis: lastAnalysis,
         })
         : null;
-      updateMutualOwnership(direction, evaluationTime);
+      updateMutualOwnership(direction, evaluationTime, close, {
+        symbol,
+        timestamp: evaluationTime,
+        rowIndex,
+        rows,
+        currentPrice: close,
+        activePositionSide,
+        direction,
+        analysis: lastAnalysis,
+      });
       const outsideActiveRange = activeSuggestion &&
         (close <= activeSuggestion.lower || close >= activeSuggestion.upper);
       const shouldEvaluateRange = !activeSuggestion || outsideActiveRange ||
@@ -669,10 +884,22 @@ class FullGridBacktester {
       for (const lot of lots) lot.lastUpdatedAt = evaluationTime;
       updateSellTargets(close);
       placeBuyOrders(close, evaluationTime, direction, entryDecision);
+      scheduleHandoffProfitBankExit(close, evaluationTime);
       const marketNotional = inventoryMarketNotional(close);
       const pending = pendingNotional();
+      const oldestEntryAt = lots.length
+        ? Math.min(...lots.map(lot => Number(lot.entryFilledAt) || evaluationTime))
+        : evaluationTime;
+      const inventoryAgeHours = lots.length
+        ? Math.max(0, (evaluationTime - oldestEntryAt) / (60 * MINUTE_MS))
+        : 0;
       metrics.maxInventoryNotional = Math.max(metrics.maxInventoryNotional, marketNotional);
       metrics.maxPendingBuyNotional = Math.max(metrics.maxPendingBuyNotional, pending);
+      metrics.maxInventoryAgeHours = Math.max(metrics.maxInventoryAgeHours, inventoryAgeHours);
+      metrics.inventoryNotionalHours += marketNotional * baseTimeframeMs / (60 * MINUTE_MS);
+      if (inventoryAgeHours >= 24) {
+        metrics.staleInventoryNotionalHours += marketNotional * baseTimeframeMs / (60 * MINUTE_MS);
+      }
       metrics.exposureSamples++;
       if ((marketNotional + pending) / configuredExposureCap >= 0.9) metrics.exposureAbove90Samples++;
 
@@ -694,6 +921,28 @@ class FullGridBacktester {
     const netLiquidationPnl = metrics.cashPnl + liquidationComponent - finalExitFee;
     const fees = metrics.buyFees + metrics.sellFees + finalExitFee;
     const durationDays = firstEvaluationAt ? Math.max(0, (Math.min(end, rows.at(-1)[0] + baseTimeframeMs) - firstEvaluationAt) / 86_400_000) : 0;
+    const finalPositionSides = [...new Set(lots.map(lot => lot.positionSide))];
+    const finalOldestEntryAt = lots.length
+      ? Math.min(...lots.map(lot => Number(lot.entryFilledAt) || Number(lot.lastUpdatedAt) || end))
+      : null;
+    const finalInventoryAgeHours = finalOldestEntryAt === null
+      ? 0
+      : Math.max(0, (end - finalOldestEntryAt) / (60 * MINUTE_MS));
+    const finalProfitBasis = lots.length ? {
+      entryCost: inventoryEntryNotional(),
+      buyFee: lots.reduce((sum, lot) => sum + lot.buyFee, 0),
+      quantity: positionQuantity(),
+    } : null;
+    const finalBreakEvenPrice = finalProfitBasis
+      ? (finalPositionSides[0] === 'SHORT'
+        ? maximumProfitableShortBuyPrice(finalProfitBasis, { ...options, minimumNetProfitPct: 0 })
+        : minimumProfitableSellPrice(finalProfitBasis, { ...options, minimumNetProfitPct: 0 }))
+      : null;
+    const finalBreakEvenDistancePct = finalBreakEvenPrice && lastClose
+      ? (finalPositionSides[0] === 'SHORT'
+        ? Math.max(0, (lastClose - finalBreakEvenPrice) / lastClose * 100)
+        : Math.max(0, (finalBreakEvenPrice - lastClose) / lastClose * 100))
+      : 0;
     return {
       symbol,
       variant: variant || (riskStateMachine ? 'risk-state-machine' : adaptive ? 'adaptive' : 'baseline'),
@@ -711,6 +960,11 @@ class FullGridBacktester {
       finalInventoryQuantity: round(positionQuantity(), 12),
       finalInventoryNotional: round(finalMarketNotional),
       finalInventoryCost: round(inventoryEntryNotional()),
+      finalInventoryNetPnl: round(openPositionNetPnl(lastClose || 0)),
+      finalPositionSide: finalPositionSides.length === 1 ? finalPositionSides[0] : null,
+      finalInventoryAgeHours: round(finalInventoryAgeHours, 2),
+      finalBreakEvenPrice: round(finalBreakEvenPrice, 12),
+      finalBreakEvenDistancePct: round(finalBreakEvenDistancePct, 3),
       liquidationComponent: round(liquidationComponent),
       accountingIdentityDelta: round(
         netLiquidationPnl - (metrics.grossGridProfit + metrics.fundingPnl + liquidationComponent - fees),
@@ -722,6 +976,9 @@ class FullGridBacktester {
       maximumDrawdownOnNotionalPct: round(maximumDrawdown / options.totalInvestment * 100, 3),
       maxInventoryNotional: round(metrics.maxInventoryNotional),
       maxPendingBuyNotional: round(metrics.maxPendingBuyNotional),
+      maxInventoryAgeHours: round(metrics.maxInventoryAgeHours, 2),
+      inventoryNotionalHours: round(metrics.inventoryNotionalHours),
+      staleInventoryNotionalHours: round(metrics.staleInventoryNotionalHours),
       exposureAbove90Pct: metrics.exposureSamples
         ? round(metrics.exposureAbove90Samples / metrics.exposureSamples * 100, 2)
         : null,
@@ -733,6 +990,14 @@ class FullGridBacktester {
       handoffCompleted: metrics.handoffCompleted,
       handoffCancelled: metrics.handoffCancelled,
       handoffExitFills: metrics.handoffExitFills,
+      handoffRescueOrders: metrics.handoffRescueOrders,
+      handoffRescueFills: metrics.handoffRescueFills,
+      handoffProfitBankOrders: metrics.handoffProfitBankOrders,
+      handoffProfitBankFills: metrics.handoffProfitBankFills,
+      handoffProfitBankFullExits: metrics.handoffProfitBankFullExits,
+      handoffProfitBankPartialExits: metrics.handoffProfitBankPartialExits,
+      handoffProfitBankExitNotional: round(metrics.handoffProfitBankExitNotional),
+      handoffProfitBankRealizedPnl: round(metrics.handoffProfitBankRealizedPnl),
       blockedEntrySamples: metrics.blockedEntrySamples,
       entryFilterBlockedSamples: metrics.entryFilterBlockedSamples,
       gridCycles: metrics.gridCycles,

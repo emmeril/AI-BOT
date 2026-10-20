@@ -43,6 +43,15 @@ const {
   PriceMomentumAnalyzer,
   evaluatePriceMomentumEntry,
 } = require('./src/price-momentum-entry-filter');
+const {
+  buildProfitBankExit,
+  momentumState,
+  nearestAdverseLevel,
+  nearestFavorableLevel,
+  realizedProfitBank,
+  reversalAgeHours,
+  trackedInventorySummary,
+} = require('./src/reversal-inventory-manager');
 const futuresTelegramCommandPath = path.resolve(process.cwd(), 'futures-telegram-command.json');
 
 // Tracks, per async call chain, which symbols' locks are currently held by
@@ -168,6 +177,14 @@ const PRICE_MOMENTUM_DEADBAND_PCT = Math.max(
   0, Config.number('PRICE_MOMENTUM_DEADBAND_PCT', 0)
 );
 const PRICE_MOMENTUM_FAIL_CLOSED = Config.boolean('PRICE_MOMENTUM_FAIL_CLOSED', true);
+const REVERSAL_INVENTORY_ENABLED = Config.boolean('REVERSAL_INVENTORY_ENABLED', false);
+const REVERSAL_RESCUE_MARGIN_PCT = Config.number('REVERSAL_RESCUE_MARGIN_PCT', 5);
+const REVERSAL_STALE_HOURS = Config.number('REVERSAL_STALE_HOURS', 24);
+const REVERSAL_PROFIT_RESERVE_USDT = Config.number('REVERSAL_PROFIT_RESERVE_USDT', 0.05);
+const REVERSAL_MAX_EXIT_FRACTION = Config.number('REVERSAL_MAX_EXIT_FRACTION', 1);
+const REVERSAL_APPLY_TO_EXISTING_POSITIONS = Config.boolean(
+  'REVERSAL_APPLY_TO_EXISTING_POSITIONS', false
+);
 const INTERVAL_MINUTES = Config.number('INTERVAL_MINUTES', 1);
 const INTERVAL_MS = INTERVAL_MINUTES * MINUTE_MS;
 const FUTURES_USER_STREAM_ENABLED = Config.boolean('FUTURES_USER_STREAM_ENABLED', true);
@@ -685,6 +702,22 @@ function validateRuntimeConfiguration() {
   }
   requireInteger('PRICE_MOMENTUM_LOOKBACK_CANDLES', PRICE_MOMENTUM_LOOKBACK_CANDLES, 1);
   requireNonNegative('PRICE_MOMENTUM_DEADBAND_PCT', PRICE_MOMENTUM_DEADBAND_PCT);
+  if (REVERSAL_INVENTORY_ENABLED) {
+    if (!PRICE_MOMENTUM_ENTRY_FILTER_ENABLED || PRICE_MOMENTUM_ENTRY_FILTER_MODE !== 'LIVE') {
+      errors.push(
+        'REVERSAL_INVENTORY_ENABLED requires PRICE_MOMENTUM_ENTRY_FILTER_ENABLED=true and ' +
+        'PRICE_MOMENTUM_ENTRY_FILTER_MODE=LIVE'
+      );
+    }
+    if (!(REVERSAL_RESCUE_MARGIN_PCT > 0 && REVERSAL_RESCUE_MARGIN_PCT <= 10)) {
+      errors.push('REVERSAL_RESCUE_MARGIN_PCT must be greater than 0 and at most 10');
+    }
+    requirePositive('REVERSAL_STALE_HOURS', REVERSAL_STALE_HOURS);
+    requireNonNegative('REVERSAL_PROFIT_RESERVE_USDT', REVERSAL_PROFIT_RESERVE_USDT);
+    if (!(REVERSAL_MAX_EXIT_FRACTION > 0 && REVERSAL_MAX_EXIT_FRACTION <= 1)) {
+      errors.push('REVERSAL_MAX_EXIT_FRACTION must be greater than 0 and at most 1');
+    }
+  }
 
   const hasLower = GRID_LOWER_PRICE > 0;
   const hasUpper = GRID_UPPER_PRICE > 0;
@@ -1094,6 +1127,7 @@ class GridState {
     sym.orders = isPlainObject(sym.orders) ? sym.orders : {};
     sym.lastBuyByLevel = isPlainObject(sym.lastBuyByLevel) ? sym.lastBuyByLevel : {};
     sym.refillCountByLevel = isPlainObject(sym.refillCountByLevel) ? sym.refillCountByLevel : {};
+    sym.reversalInventory = isPlainObject(sym.reversalInventory) ? sym.reversalInventory : {};
     sym.filledBuys = numberOrZero(sym.filledBuys);
     sym.filledSells = numberOrZero(sym.filledSells);
     sym.realizedGridProfit = numberOrZero(sym.realizedGridProfit);
@@ -1125,6 +1159,9 @@ class GridState {
       levelIndex: meta.levelIndex,
       refillCount: Number(meta.refillCount) || 0,
       sourceBuyLevelIndex: meta.sourceBuyLevelIndex ?? null,
+      kind: meta.kind || null,
+      isPositionExit: meta.isPositionExit === true,
+      isReversalRescue: meta.isReversalRescue === true,
       price: Number(order.price),
       amount: Number(order.amount),
       createdAt: new Date().toISOString(),
@@ -1223,6 +1260,7 @@ class FuturesGridEngine {
     const savedBudgetMatchesConfig = FUTURES_DYNAMIC_EXPOSURE_ENABLED &&
       savedExposureBudget?.enabled === true &&
       Number(savedExposureBudget.sidePct) === FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT &&
+      Number(savedExposureBudget.leverage) === LEVERAGE &&
       Number(savedExposureBudget.pairCount) === SYMBOLS.length &&
       Number(savedExposureBudget.sideCap) > 0;
     this.exposureLimits = savedBudgetMatchesConfig
@@ -2906,6 +2944,31 @@ class FuturesGridEngine {
 
   getBotOrderMeta(order) {
     const clientOrderId = this.getOrderClientId(order);
+    const reversalPrefix = POSITION_SIDE === 'SHORT' ? 'sgrid' : 'grid';
+    const rescueMatch = clientOrderId.match(
+      new RegExp(`^${reversalPrefix}-[a-z0-9]+-([bs])-(\\d+)-rr-`)
+    );
+    if (rescueMatch) {
+      return {
+        side: rescueMatch[1] === 'b' ? 'buy' : 'sell',
+        levelIndex: Number(rescueMatch[2]),
+        refillCount: 0,
+        kind: 'REVERSAL_RESCUE',
+        isReversalRescue: true,
+      };
+    }
+    const bankExitMatch = clientOrderId.match(
+      new RegExp(`^${reversalPrefix}-[a-z0-9]+-([bs])-exit-rb-`)
+    );
+    if (bankExitMatch) {
+      return {
+        side: bankExitMatch[1] === 'b' ? 'buy' : 'sell',
+        levelIndex: null,
+        refillCount: 0,
+        kind: 'REVERSAL_BANK_EXIT',
+        isPositionExit: true,
+      };
+    }
     const pattern = POSITION_SIDE === 'SHORT'
       ? /^sgrid-[a-z0-9]+-([bs])-(\d+)(?:-e(\d+))?-(?:r(\d+)-)?/
       : /^grid-[a-z0-9]+-([bs])-(\d+)(?:-[be](\d+))?-(?:r(\d+)-)?/;
@@ -2928,6 +2991,13 @@ class FuturesGridEngine {
       ? `-e${Number(sourceBuyLevelIndex)}`
       : '';
     return `${ORDER_ID_PREFIX}-${market}-${side[0]}-${levelIndex}${source}-r${refillCount}-${nonce}`.slice(0, 36);
+  }
+
+  makeReversalClientOrderId(symbol, side, kind, levelIndex = null) {
+    const market = symbol.replace(/[^a-z0-9]/gi, '').slice(0, 10).toLowerCase();
+    const nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+    const marker = kind === 'REVERSAL_BANK_EXIT' ? 'exit-rb' : `${levelIndex}-rr`;
+    return `${ORDER_ID_PREFIX}-${market}-${side[0]}-${marker}-${nonce}`.slice(0, 36);
   }
 
   async cancelGridOrders(symbol, reason) {
@@ -2971,8 +3041,10 @@ class FuturesGridEngine {
 
   async cancelManagedEntryOrders(symbol, managedOrders, reason) {
     let changed = false;
+    const symState = this.state?.getSymbol?.(symbol) || { orders: {} };
     for (const order of managedOrders) {
       if (String(order.side).toLowerCase() !== ENTRY_SIDE) continue;
+      if (symState.orders?.[String(order.id)]?.kind === 'REVERSAL_RESCUE') continue;
       try {
         await this.cancelOrder(symbol, order, `${reason}; ${EXIT_SIDE.toUpperCase()} exits preserved`);
         changed = true;
@@ -3104,8 +3176,10 @@ class FuturesGridEngine {
     const decision = decideExposureBudget({
       walletBalance,
       sidePct: FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT,
+      leverage: LEVERAGE,
       pairCount: SYMBOLS.length,
       referencePairCount: this.state.data.exposureBudget?.pairCount,
+      referenceLeverage: this.state.data.exposureBudget?.leverage ?? null,
       currentLimits: this.exposureLimits,
       referenceWalletBalance: this.exposureBudgetReferenceWalletBalance,
       rebalanceThresholdPct: FUTURES_DYNAMIC_EXPOSURE_REBALANCE_THRESHOLD_PCT,
@@ -3122,6 +3196,7 @@ class FuturesGridEngine {
       enabled: true,
       positionSide: POSITION_SIDE,
       sidePct: FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT,
+      leverage: LEVERAGE,
       combinedPct: FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT * 2,
       bufferPct: Math.max(0, 100 - FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT * 2),
       pairCount: SYMBOLS.length,
@@ -3144,7 +3219,7 @@ class FuturesGridEngine {
     if (decision.action === 'APPLIED') {
       console.log(
         `[EXPOSURE BUDGET] ${POSITION_SIDE} applied: wallet=${roundNumber(walletBalance, 2)} USDT ` +
-        `pairs=${SYMBOLS.length} symbol-cap=${this.exposureLimits.symbol} USDT ` +
+        `leverage=${LEVERAGE}x pairs=${SYMBOLS.length} symbol-cap=${this.exposureLimits.symbol} USDT ` +
         `side-cap=${this.exposureLimits.total} USDT`
       );
     } else if (decision.action === 'DEFERRED') {
@@ -3161,7 +3236,11 @@ class FuturesGridEngine {
     await this.withExposureLock(async () => {
       let exposure = await this.fetchExposure();
       const managed = await this.getManagedOpenOrders(symbol, exposure.orders.filter(order => order.symbol === symbol));
-      const buys = managed.filter(order => order.side === 'buy').sort((a, b) => Number(a.price) - Number(b.price));
+      const symState = this.state?.getSymbol?.(symbol) || { orders: {} };
+      const buys = managed
+        .filter(order => order.side === 'buy' &&
+          symState.orders?.[String(order.id)]?.kind !== 'REVERSAL_RESCUE')
+        .sort((a, b) => Number(a.price) - Number(b.price));
       for (const order of buys) {
         if (exposure.values[symbol] <= this.exposureLimits.symbol + 1e-8 && exposure.total <= this.exposureLimits.total + 1e-8) break;
         await this.cancelOrder(symbol, order, 'exposure cap; preserve SELL exits');
@@ -3270,6 +3349,282 @@ class FuturesGridEngine {
     } finally {
       this.pendingOrderLevels.delete(pendingKey);
     }
+  }
+
+  async placeReversalLimitOrder(symbol, side, levelIndex, price, amount, kind) {
+    const pendingKey = `${symbol}|${kind}`;
+    if (this.pendingOrderLevels.has(pendingKey)) return null;
+    this.pendingOrderLevels.add(pendingKey);
+    try {
+      const precise = this.getPreciseOrderNumbers(symbol, price, amount);
+      const preciseAmount = Number(precise.preciseAmount);
+      const precisePrice = Number(precise.precisePrice);
+      if (!(preciseAmount > 0) || !(precisePrice > 0)) return null;
+      const minCost = this.getMinCost(symbol);
+      if (minCost > 0 && precise.notional < minCost - 1e-8) {
+        console.warn(
+          `[REVERSAL] ${symbol} ${kind} skipped: notional ${precise.notional.toFixed(8)} ` +
+          `below minimum ${minCost}`
+        );
+        return null;
+      }
+      const params = {
+        newClientOrderId: this.makeReversalClientOrderId(symbol, side, kind, levelIndex),
+        positionSide: POSITION_SIDE,
+      };
+      if (GRID_POST_ONLY) params.postOnly = true;
+      const order = await retry(() => this.exchange.createLimitOrder(
+        symbol, side, precise.preciseAmount, precise.precisePrice, params
+      ));
+      const meta = {
+        levelIndex,
+        refillCount: 0,
+        kind,
+        isPositionExit: kind === 'REVERSAL_BANK_EXIT',
+        isReversalRescue: kind === 'REVERSAL_RESCUE',
+      };
+      await this.state.rememberOrder(symbol, order, meta);
+      console.log(
+        `[REVERSAL] ${symbol} ${kind} ${side.toUpperCase()} amount=${precise.preciseAmount} ` +
+        `price=${precise.precisePrice}${GRID_POST_ONLY ? ' (postOnly)' : ''}`
+      );
+      return order;
+    } catch (err) {
+      if (this.isInsufficientFundsError(err) || this.isInvalidOrderAmountError(err) ||
+          this.isMaxOpenOrdersError(err)) {
+        console.warn(`[REVERSAL] ${symbol} ${kind} not placed: ${err.message}`);
+        return null;
+      }
+      throw err;
+    } finally {
+      this.pendingOrderLevels.delete(pendingKey);
+    }
+  }
+
+  getReversalOrder(symState, kind, managedOrders = []) {
+    const stateOrder = Object.values(symState.orders || {}).find(order => order.kind === kind);
+    if (!stateOrder) return null;
+    return managedOrders.find(order => String(order.id) === String(stateOrder.id)) || stateOrder;
+  }
+
+  async cancelReversalOrder(symbol, symState, kind, managedOrders, reason) {
+    const stateOrder = Object.values(symState.orders || {}).find(order => order.kind === kind);
+    if (!stateOrder) return false;
+    const order = managedOrders.find(item => String(item.id) === String(stateOrder.id));
+    if (!order) return false;
+    await this.cancelOrder(symbol, order, reason);
+    return true;
+  }
+
+  async cancelOrdersForProfitBankExit(symbol, symState, managedOrders) {
+    for (const order of managedOrders) {
+      const stored = symState.orders?.[String(order.id)];
+      if (!stored) continue;
+      if (stored?.kind === 'REVERSAL_BANK_EXIT') continue;
+      await this.cancelOrder(symbol, order, 'replace grid orders with reversal profit-bank exit');
+    }
+  }
+
+  getUsedReversalRescueNotional(excludedSymbol) {
+    return Object.entries(this.state?.data?.symbols || {}).reduce((total, [symbol, state]) => {
+      const hasPendingRescue = Object.values(state?.orders || {})
+        .some(order => order?.kind === 'REVERSAL_RESCUE');
+      const consumesPool = state?.reversalInventory?.rescueFilled === true || hasPendingRescue;
+      if (symbol === excludedSymbol || !consumesPool) return total;
+      return total + Math.max(0, Number(state.reversalInventory.rescueNotional) || 0);
+    }, 0);
+  }
+
+  async manageReversalInventory({
+    symbol,
+    symState,
+    priceMomentumDecision,
+    currentPrice,
+    levels,
+    balance,
+    positions,
+    managedOrders,
+    now = Date.now(),
+  }) {
+    if (!REVERSAL_INVENTORY_ENABLED) return { exclusive: false, mode: 'DISABLED' };
+
+    const position = this.getActivePosition(positions, symbol);
+    const positionAmount = Math.abs(Number(position?.contracts) || 0);
+    const inventory = trackedInventorySummary(symState.lastBuyByLevel);
+    const reversal = symState.reversalInventory ||= {};
+    const signal = momentumState(priceMomentumDecision, POSITION_SIDE);
+    const hasPosition = positionAmount > 0;
+
+    if (!reversal.initializedAt) {
+      reversal.initializedAt = new Date(now).toISOString();
+      reversal.lastSignal = signal;
+      reversal.mode = 'MONITORING';
+      reversal.grandfathered = hasPosition && !REVERSAL_APPLY_TO_EXISTING_POSITIONS;
+      await this.state.save();
+      if (reversal.grandfathered) {
+        console.log(
+          `[REVERSAL] ${symbol} existing ${POSITION_SIDE} position is grandfathered; ` +
+          'management starts after the next aligned-to-opposing transition'
+        );
+      }
+      return { exclusive: false, mode: reversal.mode, grandfathered: reversal.grandfathered };
+    }
+
+    if (!hasPosition) {
+      await this.cancelReversalOrder(
+        symbol, symState, 'REVERSAL_RESCUE', managedOrders, 'position inventory cleared'
+      );
+      await this.cancelReversalOrder(
+        symbol, symState, 'REVERSAL_BANK_EXIT', managedOrders, 'position inventory cleared'
+      );
+      symState.reversalInventory = {
+        initializedAt: reversal.initializedAt,
+        lastSignal: signal,
+        mode: 'MONITORING',
+        grandfathered: false,
+        rescueUsed: false,
+        opposingSince: null,
+      };
+      await this.state.save();
+      return { exclusive: false, mode: 'MONITORING' };
+    }
+
+    if (signal === 'ALIGNED') {
+      await this.cancelReversalOrder(
+        symbol, symState, 'REVERSAL_RESCUE', managedOrders, 'momentum realigned'
+      );
+      await this.cancelReversalOrder(
+        symbol, symState, 'REVERSAL_BANK_EXIT', managedOrders, 'momentum realigned'
+      );
+      reversal.lastSignal = signal;
+      reversal.mode = 'MONITORING';
+      reversal.grandfathered = false;
+      reversal.opposingSince = null;
+      reversal.bankExitOrderId = null;
+      await this.state.save();
+      return { exclusive: false, mode: reversal.mode };
+    }
+
+    if (signal === 'UNKNOWN') {
+      reversal.lastSignal = signal;
+      await this.state.save();
+      return {
+        exclusive: Boolean(this.getReversalOrder(symState, 'REVERSAL_BANK_EXIT', managedOrders)),
+        mode: reversal.mode || 'MONITORING',
+      };
+    }
+
+    if (reversal.grandfathered) {
+      reversal.lastSignal = signal;
+      await this.state.save();
+      return { exclusive: false, mode: 'GRANDFATHERED', grandfathered: true };
+    }
+
+    reversal.lastSignal = signal;
+    reversal.opposingSince ||= new Date(now).toISOString();
+    reversal.mode = 'RESCUE';
+
+    const unrealizedPnl = Number(position?.unrealizedPnl ?? position?.info?.unRealizedProfit);
+    const rescueOrder = this.getReversalOrder(symState, 'REVERSAL_RESCUE', managedOrders);
+    if (!reversal.rescueUsed && !rescueOrder && Number.isFinite(unrealizedPnl) && unrealizedPnl < 0) {
+      const target = nearestAdverseLevel(levels, currentPrice, POSITION_SIDE);
+      const wallet = walletBalanceUsdt(balance);
+      const freeMargin = this.getQuoteFree(balance, symbol);
+      const sideRescueBudget = wallet * REVERSAL_RESCUE_MARGIN_PCT / 100 * LEVERAGE;
+      const remainingRescueBudget = Math.max(
+        0, sideRescueBudget - this.getUsedReversalRescueNotional(symbol)
+      );
+      const rescueNotional = Math.min(
+        remainingRescueBudget,
+        freeMargin * LEVERAGE
+      );
+      if (target && rescueNotional > 0) {
+        const order = await this.placeReversalLimitOrder(
+          symbol, ENTRY_SIDE, target.index, target.price, rescueNotional / target.price,
+          'REVERSAL_RESCUE'
+        );
+        if (order) {
+          reversal.rescueUsed = true;
+          reversal.rescueOrderId = String(order.id);
+          reversal.rescueNotional = Number(order.amount) * Number(order.price) || rescueNotional;
+          reversal.rescuePlacedAt = new Date(now).toISOString();
+          await this.state.save();
+          await this.sendAlert([
+            `[REVERSAL RESCUE] ${symbol}`,
+            `${POSITION_SIDE} ${displayNumber(Number(order.amount), 8)} @ ${displayNumber(Number(order.price), 8)}`,
+            `One-time margin: ${displayNumber(rescueNotional / LEVERAGE, 4)} USDT`,
+          ].join('\n'));
+        }
+      }
+    }
+
+    const ageHours = reversalAgeHours(reversal.opposingSince, now);
+    reversal.opposingHours = ageHours;
+    if (ageHours < REVERSAL_STALE_HOURS) {
+      await this.state.save();
+      return { exclusive: false, mode: reversal.mode, ageHours };
+    }
+
+    reversal.mode = 'PROFIT_BANK_UNWIND';
+    if (this.getReversalOrder(symState, 'REVERSAL_BANK_EXIT', managedOrders)) {
+      await this.state.save();
+      return { exclusive: true, mode: reversal.mode, ageHours };
+    }
+
+    await this.cancelReversalOrder(
+      symbol, symState, 'REVERSAL_RESCUE', managedOrders, 'stale inventory unwind started'
+    );
+    const target = nearestFavorableLevel(levels, currentPrice, POSITION_SIDE);
+    const availableProfit = realizedProfitBank(symState, REVERSAL_PROFIT_RESERVE_USDT);
+    const plan = target && buildProfitBankExit({
+      positionSide: POSITION_SIDE,
+      inventory,
+      positionAmount,
+      exitPrice: target.price,
+      availableProfit,
+      makerFeeRate: BINANCE_FUTURES_MAKER_FEE_RATE,
+      maximumFraction: REVERSAL_MAX_EXIT_FRACTION,
+    });
+    if (!plan) {
+      reversal.lastSkipReason = target
+        ? 'profit bank cannot fund the minimum partial exit'
+        : 'no favorable Fibonacci level is available';
+      await this.state.save();
+      return { exclusive: false, mode: reversal.mode, ageHours };
+    }
+
+    let preciseAmount;
+    try {
+      preciseAmount = Number(this.exchange.amountToPrecision(symbol, plan.amount));
+    } catch {
+      preciseAmount = plan.amount;
+    }
+    const minCost = this.getMinCost(symbol);
+    if (!(preciseAmount > 0) || (minCost > 0 && preciseAmount * target.price < minCost - 1e-8)) {
+      reversal.lastSkipReason = 'affordable partial exit is below exchange minimum notional';
+      await this.state.save();
+      return { exclusive: false, mode: reversal.mode, ageHours };
+    }
+
+    await this.cancelOrdersForProfitBankExit(symbol, symState, managedOrders);
+    const order = await this.placeReversalLimitOrder(
+      symbol, EXIT_SIDE, target.index, target.price, preciseAmount, 'REVERSAL_BANK_EXIT'
+    );
+    if (!order) return { exclusive: false, mode: reversal.mode, ageHours };
+
+    reversal.bankExitOrderId = String(order.id);
+    reversal.bankExitPlacedAt = new Date(now).toISOString();
+    reversal.bankExitEstimatedPnl = plan.estimatedNetPnl;
+    reversal.bankExitProfitBudget = availableProfit;
+    reversal.lastSkipReason = null;
+    await this.state.save();
+    await this.sendAlert([
+      `[REVERSAL UNWIND] ${symbol}`,
+      `${POSITION_SIDE} ${displayNumber(preciseAmount, 8)} @ ${displayNumber(target.price, 8)}`,
+      `Profit bank: ${displayNumber(availableProfit, 4)} USDT`,
+      `Estimated PnL: ${signedUsdt(plan.estimatedNetPnl)}`,
+    ].join('\n'));
+    return { exclusive: true, mode: reversal.mode, ageHours };
   }
 
   isInsufficientFundsError(err) {
@@ -3656,6 +4011,12 @@ class FuturesGridEngine {
     symState.tradingFees += feeQuote;
     this.state.data.totals.tradingFees += feeQuote;
     this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
+    if (orderMeta.isReversalRescue) {
+      const reversal = symState.reversalInventory ||= {};
+      reversal.rescueFilled = true;
+      reversal.lastRescueFillAt = trade.datetime || new Date(trade.timestamp || Date.now()).toISOString();
+      if (!openOrderIds.has(String(trade.order))) reversal.rescueOrderId = null;
+    }
     // All mutations for this fill are applied in-memory first and persisted
     // together in ONE save(). If the process crashes anywhere above this
     // line, none of it was written and the fill is reprocessed cleanly next
@@ -3896,6 +4257,12 @@ class FuturesGridEngine {
     symState.tradingFees += feeQuote;
     this.state.data.totals.tradingFees += feeQuote;
     this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
+    if (orderMeta.isReversalRescue) {
+      const reversal = symState.reversalInventory ||= {};
+      reversal.rescueFilled = true;
+      reversal.lastRescueFillAt = trade.datetime || new Date(trade.timestamp || Date.now()).toISOString();
+      if (!openOrderIds.has(String(trade.order))) reversal.rescueOrderId = null;
+    }
     this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
     await this.sendAlert([
@@ -4042,7 +4409,7 @@ class FuturesGridEngine {
     return allocatedEntryFee;
   }
 
-  async handleExitFill(symbol, symState, trade, openOrderIds) {
+  async handleExitFill(symbol, symState, trade, openOrderIds, orderMeta = null) {
     const price = Number(trade.price);
     const base = this.getBaseAsset(symbol);
     const quote = this.getQuoteAsset(symbol);
@@ -4069,6 +4436,13 @@ class FuturesGridEngine {
       this.state.data.totals.filledSells++;
     }
     this.forgetOrderIfClosedLocal(symState, trade, openOrderIds);
+    if (orderMeta?.kind === 'REVERSAL_BANK_EXIT') {
+      const reversal = symState.reversalInventory ||= {};
+      reversal.bankExitFillCount = numberOrZero(reversal.bankExitFillCount) + 1;
+      reversal.lastBankExitFillAt = trade.datetime || new Date(trade.timestamp || Date.now()).toISOString();
+      reversal.lastBankExitNetPnl = netExitProfit;
+      if (!openOrderIds.has(String(trade.order))) reversal.bankExitOrderId = null;
+    }
     this.state.markProcessedTradeLocal(symbol, this.getTradeId(trade));
     await this.state.save();
     await this.sendAlert(sellFillMessage({ symbol, price, amount: trade.amount,
@@ -4313,7 +4687,7 @@ class FuturesGridEngine {
         orderMetadataById.set(tradeOrderId, orderMeta);
       }
       if (orderMeta.isPositionExit) {
-        await this.handleExitFill(symbol, symState, trade, openOrderIds);
+        await this.handleExitFill(symbol, symState, trade, openOrderIds, orderMeta);
       } else if (POSITION_SIDE === 'SHORT' && side === ENTRY_SIDE) {
         await this.handleShortEntryFill(symbol, levels, symState, trade, orderMeta, openOrderIds);
       } else if (POSITION_SIDE === 'SHORT' && side === EXIT_SIDE) {
@@ -4522,6 +4896,7 @@ class FuturesGridEngine {
     ]);
     this.updatePositionSnapshot(symbol, positions);
     let managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+    const symState = this.state.getSymbol(symbol);
 
     if (await this.cancelSellsBelowPositionEntry(symbol, managedOrders)) {
       freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
@@ -4569,9 +4944,28 @@ class FuturesGridEngine {
       }
     }
 
+    const reversalDecision = await this.manageReversalInventory({
+      symbol,
+      symState,
+      priceMomentumDecision,
+      currentPrice,
+      levels,
+      balance,
+      positions,
+      managedOrders,
+    });
+    if (reversalDecision.exclusive) {
+      console.log(
+        `[REVERSAL] ${symbol} ${POSITION_SIDE} mode=${reversalDecision.mode} ` +
+        `age=${roundNumber(reversalDecision.ageHours, 2)}h; normal grid placement paused`
+      );
+      return;
+    }
+
     if (GRID_CANCEL_OUT_OF_RANGE) {
       for (const order of managedOrders) {
         if (order.side === 'sell') continue;
+        if (symState.orders?.[String(order.id)]?.kind === 'REVERSAL_RESCUE') continue;
         const orderTimestamp = Number(order.timestamp) || Date.parse(order.datetime || 0) || 0;
         const orderAgeMs = Date.now() - orderTimestamp;
         if (orderAgeMs < GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MS) continue;
@@ -4586,7 +4980,6 @@ class FuturesGridEngine {
     }
 
     const activeBuyLevels = new Set();
-    const symState = this.state.getSymbol(symbol);
     symState.refillCountByLevel ||= {};
     for (const order of managedOrders) {
       const idx = this.getLevelIndex(levels, Number(order.price));
@@ -4769,6 +5162,7 @@ class FuturesGridEngine {
     ]);
     this.updatePositionSnapshot(symbol, positions);
     let managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+    const symState = this.state.getSymbol(symbol);
     if (await this.cancelShortBuysAbovePositionEntry(symbol, managedOrders)) {
       freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
       managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
@@ -4815,9 +5209,28 @@ class FuturesGridEngine {
       }
     }
 
+    const reversalDecision = await this.manageReversalInventory({
+      symbol,
+      symState,
+      priceMomentumDecision,
+      currentPrice,
+      levels,
+      balance,
+      positions,
+      managedOrders,
+    });
+    if (reversalDecision.exclusive) {
+      console.log(
+        `[REVERSAL] ${symbol} ${POSITION_SIDE} mode=${reversalDecision.mode} ` +
+        `age=${roundNumber(reversalDecision.ageHours, 2)}h; normal grid placement paused`
+      );
+      return;
+    }
+
     if (GRID_CANCEL_OUT_OF_RANGE) {
       for (const order of managedOrders) {
         if (String(order.side).toLowerCase() !== ENTRY_SIDE) continue;
+        if (symState.orders?.[String(order.id)]?.kind === 'REVERSAL_RESCUE') continue;
         const orderTimestamp = Number(order.timestamp) || Date.parse(order.datetime || 0) || 0;
         if (Date.now() - orderTimestamp < GRID_CANCEL_OUT_OF_RANGE_THRESHOLD_MS) continue;
         if (this.isOrderCloseToPriceLevel(order.price, levels, this.exchange.markets[symbol])) continue;
@@ -4829,7 +5242,6 @@ class FuturesGridEngine {
       managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
     }
 
-    const symState = this.state.getSymbol(symbol);
     symState.refillCountByLevel ||= {};
     const activeEntryLevels = new Set();
     for (const order of managedOrders) {
@@ -4925,8 +5337,10 @@ class FuturesGridEngine {
       const managed = await this.getManagedOpenOrders(
         symbol, exposure.orders.filter(order => order.symbol === symbol)
       );
+      const symState = this.state?.getSymbol?.(symbol) || { orders: {} };
       const entries = managed
-        .filter(order => String(order.side).toLowerCase() === ENTRY_SIDE)
+        .filter(order => String(order.side).toLowerCase() === ENTRY_SIDE &&
+          symState.orders?.[String(order.id)]?.kind !== 'REVERSAL_RESCUE')
         .sort((left, right) => Number(right.price) - Number(left.price));
       for (const order of entries) {
         if (exposure.values[symbol] <= this.exposureLimits.symbol + 1e-8 &&
@@ -4940,8 +5354,11 @@ class FuturesGridEngine {
   async cancelShortBuysAbovePositionEntry(symbol, managedOrders) {
     const entryPrice = this.getPositionEntryFloor(symbol);
     if (!(entryPrice > 0)) return 0;
+    const symState = this.state?.getSymbol?.(symbol) || { orders: {} };
     const invalid = managedOrders.filter(order =>
-      String(order.side).toLowerCase() === EXIT_SIDE && Number(order.price) - 1e-12 > entryPrice
+      String(order.side).toLowerCase() === EXIT_SIDE &&
+      symState.orders?.[String(order.id)]?.kind !== 'REVERSAL_BANK_EXIT' &&
+      Number(order.price) - 1e-12 > entryPrice
     );
     for (const order of invalid) {
       await this.cancelOrder(
@@ -4977,8 +5394,10 @@ class FuturesGridEngine {
   async cancelSellsBelowPositionEntry(symbol, managedOrders) {
     const entryFloor = this.getPositionEntryFloor(symbol);
     if (!(entryFloor > 0)) return 0;
+    const symState = this.state?.getSymbol?.(symbol) || { orders: {} };
     const belowEntry = (managedOrders || []).filter(order =>
       String(order?.side).toLowerCase() === 'sell' &&
+      symState.orders?.[String(order.id)]?.kind !== 'REVERSAL_BANK_EXIT' &&
       Number(order?.price) + 1e-12 < entryFloor
     );
     for (const order of belowEntry) {
@@ -5516,6 +5935,9 @@ EMA Trend Entry Guard: ${EMA_TREND_ENTRY_FILTER_ENABLED
       : 'OFF'}
 Price Momentum Entry Guard: ${PRICE_MOMENTUM_ENTRY_FILTER_ENABLED
       ? `ON (${PRICE_MOMENTUM_ENTRY_FILTER_MODE}; ${PRICE_MOMENTUM_LOOKBACK_CANDLES}x${PRICE_MOMENTUM_TIMEFRAME}; deadband=${PRICE_MOMENTUM_DEADBAND_PCT}%; fail-${PRICE_MOMENTUM_FAIL_CLOSED ? 'closed' : 'open'})`
+      : 'OFF'}
+Reversal Inventory: ${REVERSAL_INVENTORY_ENABLED
+      ? `ON (one rescue=${REVERSAL_RESCUE_MARGIN_PCT}% wallet margin; stale=${REVERSAL_STALE_HOURS}h; reserve=${REVERSAL_PROFIT_RESERVE_USDT} USDT; existing=${REVERSAL_APPLY_TO_EXISTING_POSITIONS ? 'managed' : 'grandfathered'})`
       : 'OFF'}
 Grid Mode: ${GRID_MODE}
 Grid Count: ${GRID_COUNT}

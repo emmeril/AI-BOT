@@ -55,3 +55,21 @@ test('SHORT keeps the nearest profitable Fibonacci exit target', () => {
   });
   assert.equal(overridden.GRID_EXIT_TARGET_LEVEL_OFFSET, '2');
 });
+
+test('SHORT inherits reversal inventory controls and accepts side-specific overrides', () => {
+  const inherited = buildShortEnvironment({
+    REVERSAL_INVENTORY_ENABLED: 'true',
+    REVERSAL_STALE_HOURS: '24',
+  });
+  assert.equal(inherited.REVERSAL_INVENTORY_ENABLED, 'true');
+  assert.equal(inherited.REVERSAL_STALE_HOURS, '24');
+
+  const overridden = buildShortEnvironment({
+    REVERSAL_INVENTORY_ENABLED: 'true',
+    REVERSAL_STALE_HOURS: '24',
+    SHORT_REVERSAL_INVENTORY_ENABLED: 'false',
+    SHORT_REVERSAL_STALE_HOURS: '36',
+  });
+  assert.equal(overridden.REVERSAL_INVENTORY_ENABLED, 'false');
+  assert.equal(overridden.REVERSAL_STALE_HOURS, '36');
+});

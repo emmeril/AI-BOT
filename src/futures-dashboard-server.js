@@ -508,6 +508,7 @@ function exposureBudgetSnapshot(positionSide, budget, fallbackLimits) {
     positionSide,
     status: source?.status || 'PENDING',
     deferredReason: source?.deferredReason || null,
+    leverage: numberOrZero(source?.leverage),
     pairCount: numberOrZero(source?.pairCount),
     symbolCap: numberOrZero(source?.symbolCap ?? fallbackLimits?.symbol),
     sideCap: numberOrZero(source?.sideCap ?? fallbackLimits?.total),
@@ -629,6 +630,7 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedS
     exposureAllocation: {
       enabled: Boolean(primaryBudget?.enabled),
       walletBalance,
+      leverage,
       sidePct,
       combinedPct,
       bufferPct: numberOrZero(primaryBudget?.bufferPct) || Math.max(0, 100 - combinedPct),
