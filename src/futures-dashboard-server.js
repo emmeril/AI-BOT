@@ -196,6 +196,94 @@ function volumeDeltaFromState(symState, positionSide) {
   };
 }
 
+function emaTrendFromState(symState, positionSide) {
+  const side = String(positionSide || 'LONG').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+  const prefix = side === 'SHORT' ? 'SHORT_' : '';
+  const persisted = symState?.config?.emaTrendEntryGuard || null;
+  const configuredEnabled = process.env[`${prefix}EMA_TREND_ENTRY_FILTER_ENABLED`];
+  const enabled = booleanValue(
+    configuredEnabled === undefined ? persisted?.enabled : configuredEnabled,
+    false
+  );
+  const configuredFailClosed = process.env[`${prefix}EMA_TREND_ENTRY_FAIL_CLOSED`];
+  const failClosed = booleanValue(
+    configuredFailClosed === undefined ? persisted?.failClosed : configuredFailClosed,
+    true
+  );
+  const available = enabled && Boolean(persisted?.available);
+  return {
+    enabled,
+    mode: String(
+      process.env[`${prefix}EMA_TREND_ENTRY_FILTER_MODE`] ?? persisted?.mode ?? 'OFF'
+    ).toUpperCase(),
+    positionSide: side,
+    timeframe: String(
+      process.env[`${prefix}EMA_TREND_ENTRY_TIMEFRAME`] || persisted?.timeframe || '5m'
+    ),
+    failClosed,
+    available,
+    allow: !enabled || (persisted?.allow ?? !failClosed),
+    reason: !enabled ? 'disabled' : persisted?.reason || 'ema_trend_unavailable',
+    trend: persisted?.trend || null,
+    requiredTrend: persisted?.requiredTrend || (side === 'SHORT' ? 'BEARISH' : 'BULLISH'),
+    ema20: Number.isFinite(Number(persisted?.ema20)) ? Number(persisted.ema20) : null,
+    ema50: Number.isFinite(Number(persisted?.ema50)) ? Number(persisted.ema50) : null,
+    evaluatedAt: persisted?.evaluatedAt || null,
+  };
+}
+
+function priceMomentumFromState(symState, positionSide) {
+  const side = String(positionSide || 'LONG').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+  const prefix = side === 'SHORT' ? 'SHORT_' : '';
+  const persisted = symState?.config?.priceMomentumEntryGuard || null;
+  const configuredEnabled = process.env[`${prefix}PRICE_MOMENTUM_ENTRY_FILTER_ENABLED`];
+  const enabled = booleanValue(
+    configuredEnabled === undefined ? persisted?.enabled : configuredEnabled,
+    false
+  );
+  const timeframe = String(
+    process.env[`${prefix}PRICE_MOMENTUM_TIMEFRAME`] || persisted?.timeframe || '5m'
+  );
+  const lookbackCandles = numberOrZero(
+    process.env[`${prefix}PRICE_MOMENTUM_LOOKBACK_CANDLES`] ?? persisted?.lookbackCandles
+  );
+  const configuredFailClosed = process.env[`${prefix}PRICE_MOMENTUM_FAIL_CLOSED`];
+  const failClosed = booleanValue(
+    configuredFailClosed === undefined ? persisted?.failClosed : configuredFailClosed,
+    true
+  );
+  const available = enabled && Boolean(persisted?.available);
+  return {
+    enabled,
+    mode: String(
+      process.env[`${prefix}PRICE_MOMENTUM_ENTRY_FILTER_MODE`] ?? persisted?.mode ?? 'OFF'
+    ).toUpperCase(),
+    positionSide: side,
+    timeframe,
+    lookbackCandles,
+    windowMinutes: process.env[`${prefix}PRICE_MOMENTUM_TIMEFRAME`] !== undefined ||
+      process.env[`${prefix}PRICE_MOMENTUM_LOOKBACK_CANDLES`] !== undefined
+      ? Math.round(timeframeToMs(timeframe) * lookbackCandles / 60_000)
+      : numberOrZero(persisted?.windowMinutes) ||
+        Math.round(timeframeToMs(timeframe) * lookbackCandles / 60_000),
+    deadbandPct: numberOrZero(
+      process.env[`${prefix}PRICE_MOMENTUM_DEADBAND_PCT`] ?? persisted?.deadbandPct
+    ),
+    failClosed,
+    available,
+    allow: !enabled || (persisted?.allow ?? !failClosed),
+    reason: !enabled ? 'disabled' : persisted?.reason || 'price_momentum_unavailable',
+    direction: persisted?.direction || null,
+    requiredDirection: persisted?.requiredDirection || (side === 'SHORT' ? 'BEARISH' : 'BULLISH'),
+    returnRatio: available && Number.isFinite(Number(persisted?.returnRatio))
+      ? Number(persisted.returnRatio)
+      : null,
+    candleTimestamp: numberOrZero(persisted?.candleTimestamp) || null,
+    evaluatedAt: persisted?.evaluatedAt || null,
+    error: persisted?.error || null,
+  };
+}
+
 function decisionSnapshot(engine, symbol, symState, orders, position, options = {}) {
   const positionSide = String(options.positionSide || 'LONG').toUpperCase();
   const entrySide = positionSide === 'SHORT' ? 'sell' : 'buy';
@@ -258,6 +346,8 @@ function decisionSnapshot(engine, symbol, symState, orders, position, options = 
     .reduce((sum, order) => sum + numberOrZero(order.remaining), 0);
   const uncovered = Math.max(0, contracts - reservedExit);
   const volumeDelta = volumeDeltaFromState(symState, positionSide);
+  const emaTrend = emaTrendFromState(symState, positionSide);
+  const priceMomentum = priceMomentumFromState(symState, positionSide);
 
   return {
     fibonacci: {
@@ -265,7 +355,9 @@ function decisionSnapshot(engine, symbol, symState, orders, position, options = 
       direction: fibonacci?.direction || 'UNKNOWN',
       confirmedDirection: fibonacci?.confirmedDirection || 'RANGING',
       appliedDirection,
+      applyMode,
       requiredEntryDirection,
+      directionGateEnabled: requiredEntryDirection !== 'ALWAYS',
       entryDirectionAllowed: requiredEntryDirection === 'ALWAYS' || appliedDirection === requiredEntryDirection,
       strategy: fibonacci?.strategy || directionStrategy,
       score: fibonacci?.score ?? null,
@@ -314,6 +406,8 @@ function decisionSnapshot(engine, symbol, symState, orders, position, options = 
       generatedAt: adaptive?.generatedAt || null,
     },
     volumeDelta,
+    emaTrend,
+    priceMomentum,
     execution: {
       gridCount: numberOrZero(symState?.config?.count || process.env.GRID_COUNT),
       buyCount: orders.filter(order => order.side === 'buy').length,

@@ -184,6 +184,12 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
           failClosed: false, available: true, allow: false, reason: 'opposing_delta',
           deltaRatio: 0.33683, candleTimestamp: 10, candleCloseTime: 20,
           evaluatedAt: '2026-10-17T08:00:00.000Z', error: null,
+        }, priceMomentumEntryGuard: {
+          enabled: true, mode: 'LIVE', positionSide: 'SHORT', timeframe: '5m',
+          lookbackCandles: 144, windowMinutes: 720, deadbandPct: 0,
+          failClosed: true, available: true, allow: true, reason: 'momentum_aligned',
+          direction: 'BEARISH', requiredDirection: 'BEARISH', returnRatio: -0.0125,
+          candleTimestamp: 30, evaluatedAt: '2026-10-17T08:05:00.000Z', error: null,
         } },
         orders: { shortEntry: { levelIndex: 2 } },
         lastBuyByLevel: { 2: { totalCostQuote: 8, totalFeeQuote: 0.05 } },
@@ -250,6 +256,12 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
   assert.equal(snapshot.intelligence.volumeDelta.allow, false);
   assert.equal(snapshot.intelligence.volumeDelta.deltaRatio, 0.33683);
   assert.equal(snapshot.intelligence.volumeDelta.windowMinutes, 60);
+  assert.equal(snapshot.intelligence.priceMomentum.enabled, true);
+  assert.equal(snapshot.intelligence.priceMomentum.allow, true);
+  assert.equal(snapshot.intelligence.priceMomentum.direction, 'BEARISH');
+  assert.equal(snapshot.intelligence.priceMomentum.returnRatio, -0.0125);
+  assert.equal(snapshot.intelligence.priceMomentum.windowMinutes, 720);
+  assert.equal(snapshot.intelligence.emaTrend.enabled, false);
   assert.equal(snapshot.exposureAllocation.enabled, true);
   assert.equal(snapshot.exposureAllocation.walletBalance, 100);
   assert.equal(snapshot.exposureAllocation.sidePct, 45);

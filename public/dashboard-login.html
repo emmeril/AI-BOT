@@ -146,7 +146,7 @@
       margin: 0;
       padding: 0;
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       list-style: none;
     }
 
@@ -413,13 +413,14 @@
       <div class="intro">
         <p class="eyebrow">Access node</p>
         <h1 id="access-title">Masuk ke kontrol bot.</h1>
-        <p>Pantau jalur aktif dari data market, gate arah Fibonacci, filter Volume Delta, sampai eksekusi grid BUY dan SELL.</p>
+        <p>Pantau jalur aktif dari data market, level Fibonacci, Price Momentum, sampai eksekusi grid BUY dan SELL.</p>
       </div>
 
       <ol class="flow" aria-label="Alur kerja dashboard">
-        <li><span class="flow-node">01</span><span class="flow-step">Market signals</span></li>
-        <li><span class="flow-node">02</span><span class="flow-step">Directional gate</span></li>
-        <li><span class="flow-node">03</span><span class="flow-step">Grid execution</span></li>
+        <li><span class="flow-node">01</span><span class="flow-step">Market data</span></li>
+        <li><span class="flow-node">02</span><span class="flow-step">Fibonacci levels</span></li>
+        <li><span class="flow-node">03</span><span class="flow-step">Momentum guard</span></li>
+        <li><span class="flow-node">04</span><span class="flow-step">Grid execution</span></li>
       </ol>
     </section>
 

@@ -36,13 +36,6 @@
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? 'Belum tersedia' : date.toLocaleString('id-ID', { hour12: false });
   }
-  function toneFor(value) {
-    const normalized = String(value || '').toUpperCase();
-    if (['BULLISH', 'ACCEPTED', 'ACTIVE', 'COVERED'].includes(normalized)) return 'positive';
-    if (['BEARISH', 'RISK_OFF', 'PAUSED'].includes(normalized)) return 'warning';
-    if (['ERROR', 'UNCOVERED', 'OFFLINE'].includes(normalized)) return 'negative';
-    return 'accent';
-  }
   function pnlTone(element, value) {
     element.classList.remove('positive', 'negative', 'warning');
     const numeric = nullable(value);
@@ -156,7 +149,74 @@
     };
   }
 
-  function entryGateView(fib, volumeDelta) {
+  function emaTrendView(emaTrend) {
+    if (!emaTrend.enabled) return { label: 'EMA Trend', status: 'OFF', tone: '', value: 'Filter tidak aktif', reason: 'EMA tidak membatasi entry.' };
+    const status = emaTrend.allow ? 'ALLOWED' : 'BLOCKED';
+    return {
+      label: `EMA Trend ${emaTrend.timeframe || '5m'}`,
+      status,
+      tone: emaTrend.allow ? 'positive' : 'negative',
+      value: emaTrend.available
+        ? `Trend ${emaTrend.trend || 'NEUTRAL'} · wajib ${emaTrend.requiredTrend || 'N/A'}`
+        : 'Data EMA belum tersedia',
+      reason: emaTrend.available
+        ? `EMA20 ${price(emaTrend.ema20)} · EMA50 ${price(emaTrend.ema50)}`
+        : emaTrend.allow ? 'Fail-open: entry tetap boleh.' : 'Fail-closed: entry ditahan.',
+    };
+  }
+
+  function priceMomentumView(momentum) {
+    const side = String(momentum.positionSide || state.positionSide).toUpperCase();
+    if (!momentum.enabled) {
+      return {
+        label: 'Price Momentum', status: 'OFF', tone: '', value: 'Filter tidak aktif',
+        reason: `Momentum harga tidak membatasi entry ${side}.`,
+      };
+    }
+    const windowMinutes = num(momentum.windowMinutes);
+    const windowLabel = windowMinutes > 0 && windowMinutes % 60 === 0
+      ? `${windowMinutes / 60} jam`
+      : `${num(momentum.lookbackCandles)}×${momentum.timeframe || '5m'}`;
+    if (!momentum.available) {
+      return {
+        label: `Price Momentum ${windowLabel}`,
+        status: momentum.allow ? 'ALLOWED' : 'BLOCKED',
+        tone: momentum.allow ? 'positive' : 'negative',
+        value: 'Perubahan harga belum tersedia',
+        reason: momentum.allow
+          ? 'Fail-open: entry tetap boleh saat data belum tersedia.'
+          : 'Fail-closed: entry ditahan sampai candle cukup.',
+      };
+    }
+    const returnPct = num(momentum.returnRatio) * 100;
+    return {
+      label: `Price Momentum ${windowLabel}`,
+      status: momentum.allow ? 'ALLOWED' : 'BLOCKED',
+      tone: momentum.allow ? 'positive' : 'negative',
+      value: `${signed(returnPct, 2)}% · ${momentum.direction || 'NEUTRAL'}`,
+      reason: momentum.allow
+        ? `Selaras dengan ${side} · candle ${time(momentum.candleTimestamp)}`
+        : `${momentum.direction || 'NEUTRAL'} tidak selaras dengan ${side} · candle ${time(momentum.candleTimestamp)}`,
+    };
+  }
+
+  function primaryEntrySignal(fib, volumeDelta, emaTrend, momentum) {
+    if (momentum.enabled) return priceMomentumView(momentum);
+    if (emaTrend.enabled) return emaTrendView(emaTrend);
+    if (volumeDelta.enabled) return volumeDeltaView(volumeDelta);
+    if (fib.directionGateEnabled) {
+      return {
+        label: 'Fibonacci Direction',
+        status: fib.entryDirectionAllowed ? 'ALLOWED' : 'BLOCKED',
+        tone: fib.entryDirectionAllowed ? 'positive' : 'negative',
+        value: `${fib.appliedDirection || 'RANGING'} · wajib ${fib.requiredEntryDirection || 'N/A'}`,
+        reason: 'Arah Fibonacci membatasi sisi entry.',
+      };
+    }
+    return { label: 'Entry Guard', status: 'ALLOWED', tone: 'positive', value: 'Tanpa filter arah', reason: 'Tidak ada guard arah aktif.' };
+  }
+
+  function entryGateView(fib, volumeDelta, emaTrend, momentum) {
     const entrySide = isShort() ? 'SELL' : 'BUY';
     const requiredDirection = fib.requiredEntryDirection || (isShort() ? 'BEARISH' : 'BULLISH');
     if (!fib.requiredEntryDirection) {
@@ -164,6 +224,8 @@
         allowed: false,
         available: false,
         deltaAllowed: false,
+        emaAllowed: false,
+        momentumAllowed: false,
         directionAllowed: false,
         entrySide,
         requiredDirection,
@@ -172,30 +234,42 @@
         tone: 'warning',
       };
     }
-    const directionAllowed = fib.entryDirectionAllowed ?? fib.appliedDirection === requiredDirection;
+    const directionGateEnabled = fib.directionGateEnabled ?? requiredDirection !== 'ALWAYS';
+    const directionAllowed = !directionGateEnabled ||
+      (fib.entryDirectionAllowed ?? fib.appliedDirection === requiredDirection);
     const deltaAllowed = !volumeDelta.enabled || volumeDelta.allow !== false;
-    const available = Boolean(state.data?.running && fib.available);
+    const emaAllowed = !emaTrend.enabled || emaTrend.allow !== false;
+    const momentumAllowed = !momentum.enabled || momentum.allow !== false;
+    const available = Boolean(state.data?.running && (!directionGateEnabled || fib.available));
     const tradingEnabled = Boolean(state.data?.tradingEnabled);
-    const allowed = Boolean(available && tradingEnabled && directionAllowed && deltaAllowed);
+    const filtersAllowed = directionAllowed && deltaAllowed && emaAllowed && momentumAllowed;
+    const allowed = Boolean(available && tradingEnabled && filtersAllowed);
+    const blockers = [
+      !directionAllowed && 'Fibonacci Direction',
+      !deltaAllowed && 'Volume Delta',
+      !emaAllowed && 'EMA Trend',
+      !momentumAllowed && 'Price Momentum',
+    ].filter(Boolean);
     let status = 'MENUNGGU';
-    let tone = toneFor(fib.appliedDirection);
-    let summary = `Entry ${entrySide} menunggu arah Fibonacci ${requiredDirection} yang terkonfirmasi.`;
-    if (available && directionAllowed && deltaAllowed && !tradingEnabled) {
+    let tone = 'accent';
+    let summary = `Entry ${entrySide} menunggu evaluasi filter aktif.`;
+    if (available && filtersAllowed && !tradingEnabled) {
       status = 'ORDER DIJEDA';
       tone = 'warning';
       summary = `Sinyal entry ${entrySide} memenuhi gate, tetapi penempatan order baru sedang dijeda.`;
-    } else if (available && directionAllowed && !deltaAllowed) {
+    } else if (available && blockers.length) {
       status = 'ENTRY BLOCKED';
       tone = 'negative';
-      summary = `Fibonacci sudah ${requiredDirection}, tetapi Volume Delta masih menahan entry ${entrySide}.`;
+      summary = `${blockers.join(', ')} menahan entry ${entrySide}.`;
     } else if (allowed) {
       status = 'GATE LULUS';
       tone = 'positive';
-      summary = volumeDelta.enabled
-        ? `Fibonacci ${requiredDirection} dan Volume Delta mengizinkan mesin memeriksa entry ${entrySide}.`
-        : `Fibonacci ${requiredDirection} mengizinkan mesin memeriksa entry ${entrySide}. Volume Delta tidak digunakan.`;
+      summary = `Semua filter aktif mengizinkan mesin memeriksa dan memasang grid ${entrySide}.`;
     }
-    return { allowed, available, deltaAllowed, directionAllowed, entrySide, requiredDirection, status, summary, tone };
+    return {
+      allowed, available, deltaAllowed, emaAllowed, momentumAllowed, directionAllowed,
+      directionGateEnabled, entrySide, requiredDirection, status, summary, tone, blockers,
+    };
   }
 
   function entryOrderView(gate, entryCount, entrySide) {
@@ -311,8 +385,10 @@
     const adaptive = intel().adaptive || {};
     const fib = intel().fibonacci || {};
     const volumeDelta = intel().volumeDelta || {};
-    const deltaView = volumeDeltaView(volumeDelta);
-    const gate = entryGateView(fib, volumeDelta);
+    const emaTrend = intel().emaTrend || {};
+    const momentum = intel().priceMomentum || {};
+    const signal = primaryEntrySignal(fib, volumeDelta, emaTrend, momentum);
+    const gate = entryGateView(fib, volumeDelta, emaTrend, momentum);
     text('source-label', data.source || 'Binance');
     text('overview-title', `${data.selectedSymbol || 'Pair belum dipilih'} · ${state.positionSide}`);
     text('overview-copy', gate.summary);
@@ -320,12 +396,12 @@
     text('market-change', `24 jam: ${signed(data.market?.changePercent, 2)}%`);
     text('profile-label', `Gate ${gate.entrySide}`);
     text('active-profile', gate.status);
-    text('profile-source', `Arah wajib ${gate.requiredDirection} · raw ${fib.direction || 'UNKNOWN'}`);
-    text('volume-delta-label', deltaView.label);
-    text('volume-delta-status', deltaView.status);
-    text('volume-delta-value', deltaView.value);
-    text('volume-delta-reason', deltaView.reason);
-    byId('volume-delta-status').className = `metric-value ${deltaView.tone}`.trim();
+    text('profile-source', gate.blockers?.length ? `Ditahan: ${gate.blockers.join(', ')}` : 'Semua filter aktif lolos');
+    text('entry-signal-label', signal.label);
+    text('entry-signal-status', signal.status);
+    text('entry-signal-value', signal.value);
+    text('entry-signal-reason', signal.reason);
+    byId('entry-signal-status').className = `metric-value ${signal.tone}`.trim();
     text('exposure-label', `Exposure ${data.selectedSymbol || 'pair'}`);
     text('exposure-value', percent(adaptive.exposurePct));
     text('exposure-note', adaptive.investmentCap > 0
@@ -343,7 +419,10 @@
     const fib = intel().fibonacci || {};
     const execution = intel().execution || {};
     const volumeDelta = intel().volumeDelta || {};
-    const deltaView = volumeDeltaView(volumeDelta);
+    const emaTrend = intel().emaTrend || {};
+    const momentum = intel().priceMomentum || {};
+    const signal = primaryEntrySignal(fib, volumeDelta, emaTrend, momentum);
+    const range = data.range || {};
     const position = data.futures?.position;
     const coverage = execution.exitCoveragePct ?? execution.sellCoveragePct;
     const entrySide = isShort() ? 'SELL' : 'BUY';
@@ -352,26 +431,26 @@
     const exitCount = num(execution.exitCount ?? data.orders?.[`${exitSide.toLowerCase()}Count`]);
     const entryValue = num(data.orders?.[`${entrySide.toLowerCase()}Value`]);
     const marketAvailable = Boolean(data.running && num(data.market?.price) > 0);
-    const fibonacciAvailable = Boolean(marketAvailable && fib.available);
-    const gate = entryGateView(fib, volumeDelta);
+    const fibonacciAvailable = Boolean(marketAvailable && num(range.lower) > 0 && num(range.upper) > 0);
+    const gate = entryGateView(fib, volumeDelta, emaTrend, momentum);
     const positionAvailable = Boolean(data.running && position && num(position.contracts) > 0);
     const exitNeedsAttention = Boolean(positionAvailable && num(execution.uncovered) > 0);
     const exitAvailable = Boolean(positionAvailable && !exitNeedsAttention && coverage !== null && coverage !== undefined && num(coverage) >= 99.999);
     const entryView = entryOrderView(gate, entryCount, entrySide);
-    text('flow-title', `Dari sinyal pasar ke exit ${exitSide}`);
-    text('supervisor-node-title', `${state.positionSide} entry gates`);
+    text('flow-title', `Dari harga ke exit ${exitSide}`);
+    text('supervisor-node-title', `${state.positionSide} entry guard`);
     text('entry-node-title', `${entrySide} grid`);
     text('position-node-title', `${state.positionSide} position`);
     text('exit-node-title', `${exitSide} ladder`);
     setNode('market', 'accent', String(data.mode || 'LIVE').toUpperCase(), `${data.market?.priceText || price(data.market?.price)} ${quote()}`, `${signed(data.market?.changePercent, 2)}% dalam 24 jam`);
-    setNode('fibonacci', toneFor(fib.direction), fib.direction || 'MENUNGGU', `Score ${fib.score ?? 'N/A'}`, fib.available ? `Applied ${fib.appliedDirection} · conf ${percent(num(fib.confidence) * 100, 1)}` : 'Belum ada analisis');
-    setNode('supervisor', gate.tone, gate.status, `Fib ${fib.appliedDirection || 'RANGING'} · Delta ${deltaView.status}`, `Wajib ${gate.requiredDirection} · ${volumeDelta.enabled ? `ambang delta ${percent(volumeDelta.oppositionThresholdPct, 1)}` : 'delta OFF'}`);
+    setNode('fibonacci', fibonacciAvailable ? 'positive' : 'accent', fibonacciAvailable ? 'LEVEL FINAL' : 'MENUNGGU', fibonacciAvailable ? `${price(range.lower)} – ${price(range.upper)}` : 'Range belum tersedia', `Direction ${fib.direction || 'UNKNOWN'} · ${fib.applyMode || 'REPORT_ONLY'}`);
+    setNode('supervisor', gate.tone, gate.status, `${signal.label.replace('Price ', '')} · ${signal.status}`, signal.value);
     setNode('buy', entryView.tone, entryView.status, `${money(entryValue, 2)} ${quote()}`, entryView.meta);
     setNode('position', position ? (num(data.profit?.unrealizedPnl) >= 0 ? 'positive' : 'negative') : 'accent', position ? `${state.positionSide} AKTIF` : 'TIDAK ADA POSISI', position ? compact(position.contracts) : '0', `PnL berjalan ${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`);
     setNode('sell', coverage !== null && coverage !== undefined && coverage < 99.999 ? 'negative' : 'positive', `${exitCount} ORDER`, coverage == null ? 'Coverage N/A' : `Coverage ${percent(coverage, 0)}`, execution.uncovered > 0 ? `${compact(execution.uncovered)} kontrak belum tertutup` : 'Tidak ada posisi tanpa exit');
     setFlowNodeState('market', marketAvailable ? 'active' : 'waiting');
     setFlowNodeState('fibonacci', fibonacciAvailable ? 'active' : 'waiting');
-    setFlowNodeState('supervisor', gate.allowed ? 'active' : gate.available && gate.directionAllowed && !gate.deltaAllowed ? 'error' : 'waiting');
+    setFlowNodeState('supervisor', gate.allowed ? 'active' : gate.available && gate.blockers?.length ? 'error' : 'waiting');
     setFlowNodeState('buy', entryCount > 0 ? 'active' : 'waiting');
     setFlowNodeState('position', positionAvailable ? 'active' : 'waiting');
     setFlowNodeState('sell', exitNeedsAttention ? 'error' : exitAvailable ? 'active' : 'waiting');
@@ -389,8 +468,12 @@
     const adaptive = intel().adaptive || {};
     const execution = intel().execution || {};
     const volumeDelta = intel().volumeDelta || {};
+    const emaTrend = intel().emaTrend || {};
+    const momentum = intel().priceMomentum || {};
     const deltaView = volumeDeltaView(volumeDelta);
-    const gate = entryGateView(fib, volumeDelta);
+    const emaView = emaTrendView(emaTrend);
+    const momentumView = priceMomentumView(momentum);
+    const gate = entryGateView(fib, volumeDelta, emaTrend, momentum);
     const position = data.futures?.position;
     const entrySide = isShort() ? 'SELL' : 'BUY';
     const exitSide = isShort() ? 'BUY' : 'SELL';
@@ -402,9 +485,9 @@
     const tfTags = Object.entries(fib.timeframes || {}).map(([key, value]) => `${key}: ${value.direction}`);
     return ({
       market: { title: 'Market feed', status: String(data.mode || 'LIVE').toUpperCase(), summary: 'Ticker dan candle Binance menjadi input harga untuk range, sinyal, dan penempatan level grid.', tags: data.market?.timeframe ? [`Chart ${data.market.timeframe}`] : [], details: [['Harga terakhir', `${data.market?.priceText || price(data.market?.price)} ${quote()}`], ['Perubahan 24 jam', `${signed(data.market?.changePercent, 2)}%`], ['High 24 jam', `${data.market?.highText || price(data.market?.high)} ${quote()}`], ['Low 24 jam', `${data.market?.lowText || price(data.market?.low)} ${quote()}`]] },
-      fibonacci: { title: 'Fibonacci direction', status: fib.direction || 'MENUNGGU', summary: fib.available ? `Arah mentah ${fib.direction}. Arah yang diterapkan ke bias level saat ini ${fib.appliedDirection}.` : 'Analisis Fibonacci belum tersedia untuk pair ini.', tags: tfTags, details: [['Score', fib.score ?? 'N/A'], ['Confidence', fib.confidence == null ? 'N/A' : percent(num(fib.confidence) * 100, 1)], ['Alignment', fib.alignment == null ? 'N/A' : percent(num(fib.alignment) * 100, 1)], ['Konfirmasi', `${num(fib.confirmationCount)}/${num(fib.confirmationsRequired)}`], ['Confirmed', fib.confirmedDirection || 'RANGING'], ['Diperbarui', time(fib.generatedAt)]] },
-      supervisor: { title: `${state.positionSide} entry gates`, status: gate.status, summary: gate.summary, tags: [...tfTags, `Delta ${deltaView.status}`], details: [['Arah mentah', fib.direction || 'UNKNOWN'], ['Arah terapan', fib.appliedDirection || 'RANGING'], ['Arah wajib', gate.requiredDirection], ['Volume Delta', volumeDelta.available ? `${signed(num(volumeDelta.deltaRatio) * 100, 2)}%` : deltaView.status], ['Ambang oposisi', volumeDelta.enabled ? percent(volumeDelta.oppositionThresholdPct, 1) : 'Tidak digunakan'], ['Keputusan delta', deltaView.status], ['Candle delta', volumeDelta.enabled ? time(volumeDelta.candleCloseTime) : 'Tidak digunakan'], ['Mode', `${fib.strategy || 'N/A'} · Delta ${volumeDelta.mode || 'OFF'}`]] },
-      buy: { title: `${entrySide} grid`, status: entryView.status, summary: entryView.summary, tags: [`Gate ${gate.status}`, `Fibonacci ${fib.appliedDirection || 'RANGING'}`, `Delta ${deltaView.status}`], details: [['Order entry aktif', entryCount], ['Nilai pending', `${money(entryValue, 4)} ${quote()}`], ['Grid count', num(execution.gridCount) || 'N/A'], ['Exposure pair konservatif', `${money(adaptive.allocatedInvestment, 4)} ${quote()}`], ['Cap exposure pair', adaptive.symbolExposureCap > 0 ? `${money(adaptive.symbolExposureCap, 2)} ${quote()}` : 'N/A'], [`Cap total ${state.positionSide}`, adaptive.sideExposureCap > 0 ? `${money(adaptive.sideExposureCap, 2)} ${quote()}` : 'N/A'], ['Budget sizing grid internal', adaptive.gridInvestmentCap > 0 ? `${money(adaptive.gridInvestmentCap, 2)} ${quote()}` : 'N/A'], ['Sisi entry', entrySide]] },
+      fibonacci: { title: 'Fibonacci grid', status: data.range?.lower > 0 && data.range?.upper > 0 ? 'LEVEL FINAL' : 'MENUNGGU', summary: data.range?.lower > 0 && data.range?.upper > 0 ? `Level grid final tersedia di range ${price(data.range.lower)} sampai ${price(data.range.upper)} ${quote()}. Analisis arah berjalan dalam mode ${fib.applyMode || 'REPORT_ONLY'}.` : 'Range Fibonacci belum tersedia untuk pair ini.', tags: tfTags, details: [['Batas bawah', data.range?.lower > 0 ? `${price(data.range.lower)} ${quote()}` : 'N/A'], ['Batas atas', data.range?.upper > 0 ? `${price(data.range.upper)} ${quote()}` : 'N/A'], ['Arah laporan', fib.direction || 'UNKNOWN'], ['Mode arah', fib.applyMode || 'REPORT_ONLY'], ['Confidence', fib.confidence == null ? 'N/A' : percent(num(fib.confidence) * 100, 1)], ['Diperbarui', time(fib.generatedAt)]] },
+      supervisor: { title: `${state.positionSide} entry guard`, status: gate.status, summary: gate.summary, tags: [`Momentum ${momentumView.status}`, `EMA ${emaView.status}`, `Delta ${deltaView.status}`], details: [['Price Momentum', momentumView.value], ['Keputusan momentum', momentumView.status], ['Window momentum', momentum.enabled ? `${num(momentum.lookbackCandles)}×${momentum.timeframe || '5m'}` : 'Tidak digunakan'], ['Candle momentum', momentum.enabled ? time(momentum.candleTimestamp) : 'Tidak digunakan'], ['EMA Trend', emaView.status], ['Volume Delta', deltaView.status], ['Arah Fibonacci', gate.directionGateEnabled ? `${fib.appliedDirection || 'RANGING'} · wajib ${gate.requiredDirection}` : 'REPORT ONLY'], ['Mode aktif', `Momentum ${momentum.mode || 'OFF'}`]] },
+      buy: { title: `${entrySide} grid`, status: entryView.status, summary: entryView.summary, tags: [`Gate ${gate.status}`, `Momentum ${momentumView.status}`, `Fibonacci level final`], details: [['Order entry aktif', entryCount], ['Nilai pending', `${money(entryValue, 4)} ${quote()}`], ['Grid count', num(execution.gridCount) || 'N/A'], ['Exposure pair konservatif', `${money(adaptive.allocatedInvestment, 4)} ${quote()}`], ['Cap exposure pair', adaptive.symbolExposureCap > 0 ? `${money(adaptive.symbolExposureCap, 2)} ${quote()}` : 'N/A'], [`Cap total ${state.positionSide}`, adaptive.sideExposureCap > 0 ? `${money(adaptive.sideExposureCap, 2)} ${quote()}` : 'N/A'], ['Budget sizing grid internal', adaptive.gridInvestmentCap > 0 ? `${money(adaptive.gridInvestmentCap, 2)} ${quote()}` : 'N/A'], ['Sisi entry', entrySide]] },
       position: { title: `${state.positionSide} position`, status: position ? 'AKTIF' : 'KOSONG', summary: position ? `Posisi ${state.positionSide} berasal dari ${entrySide} grid yang sudah terisi. PnL berjalan mengikuti mark price Binance.` : `Tidak ada kontrak ${state.positionSide} terbuka pada pair ini.`, tags: position ? [`${data.futures?.leverage || 0}x`, data.futures?.marginMode || 'N/A', data.futures?.positionSide || state.positionSide] : [], details: [['Kontrak', position ? compact(position.contracts) : '0'], ['Entry', position ? price(position.entryPrice) : 'N/A'], ['Mark', position ? price(position.markPrice) : 'N/A'], ['Likuidasi', position?.liquidationPrice > 0 ? price(position.liquidationPrice) : 'N/A'], ['Margin posisi', `${money(data.futures?.positionMargin, 4)} ${quote()}`], ['ROI posisi', position ? percent(position.roiPct, 2) : 'N/A'], ['PnL berjalan', `${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`]] },
       sell: { title: `${exitSide} ladder`, status: !position ? 'TIDAK DIPERLUKAN' : execution.uncovered > 0 ? 'PERLU REKONSILIASI' : 'TERLINDUNGI', summary: !position ? `Tidak ada posisi ${state.positionSide} terbuka, jadi order exit belum diperlukan.` : execution.uncovered > 0 ? `Sebagian posisi belum memiliki jumlah ${exitSide} yang setara pada snapshot ini. Bot akan merekonsiliasi pada siklus berikutnya.` : `Jumlah kontrak ${state.positionSide} sudah dicadangkan oleh ${exitSide} aktif.`, tags: data.futures?.exits?.nearestLabel ? [data.futures.exits.nearestLabel] : [], details: [[`Order ${exitSide}`, exitCount], [`Reserved ${exitSide}`, compact(execution.reservedExit)], [`Kontrak ${state.positionSide}`, compact(execution.positionContracts)], ['Belum tertutup', compact(execution.uncovered)], ['Coverage', coverage == null ? 'N/A' : percent(coverage, 0)], [`${exitSide} terdekat`, data.futures?.exits?.nearestPrice ? `${price(data.futures.exits.nearestPrice)} ${quote()}` : 'N/A']] },
     })[state.activeNode];

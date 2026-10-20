@@ -58,12 +58,15 @@ test('futures dashboard combines LONG and SHORT with accessible side filters', (
   assert.match(script, /Kenaikan ditunda, exposure aktif/);
   assert.match(script, /Saldo belum berubah/);
   assert.match(css, /@media\(max-width:900px\).*\.allocation-body\{grid-template-columns:1fr\}/s);
-  assert.match(html, /id="volume-delta-status"/);
-  assert.match(html, /id="volume-delta-reason"/);
+  assert.match(html, /id="entry-signal-status"/);
+  assert.match(html, /id="entry-signal-reason"/);
+  assert.match(html, /Price Momentum/);
   assert.match(script, /function volumeDeltaView\(volumeDelta\)/);
+  assert.match(script, /function priceMomentumView\(momentum\)/);
+  assert.match(script, /function primaryEntrySignal\(fib, volumeDelta, emaTrend, momentum\)/);
   assert.match(script, /Tekanan taker \$\{opposingTaker\} terlalu kuat/);
   assert.match(script, /value: 'Filter tidak aktif'/);
-  assert.match(script, /FUTURES_LONG_ENTRY_DIRECTION|requiredEntryDirection|Wajib \$\{gate\.requiredDirection\}/);
+  assert.match(script, /Price Momentum.*menahan entry|blockers\.join/);
   assert.match(script, /RESTART DIPERLUKAN/);
   assert.match(html, /Funding Binance pair \(semua trade\)/);
   assert.match(html, /Ambang peringatan exposure/);
@@ -123,7 +126,7 @@ test('dashboard omits inactive Gemini and learning surfaces from the operator vi
 
   assert.doesNotMatch(html, /Gemini|Adaptive learning|learning-panel/);
   assert.doesNotMatch(login, /Gemini/);
-  assert.match(login, /gate arah Fibonacci, filter Volume Delta/);
+  assert.match(login, /level Fibonacci, Price Momentum/);
   assert.doesNotMatch(html, /Adaptive supervisor|Profil BUY|profil adaptive/i);
   assert.doesNotMatch(login, /Adaptive Supervisor|Adaptive decision/i);
   assert.doesNotMatch(script, /renderLearning|trustPolicyView|setNode\('gemini'|setNode\('trust'/);
