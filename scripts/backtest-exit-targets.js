@@ -266,4 +266,12 @@ if (require.main === module) {
   });
 }
 
-module.exports = { VARIANTS, applySelection, chooseOnTraining };
+module.exports = {
+  VARIANTS,
+  applySelection,
+  buildAnalysisMap,
+  cachedRows,
+  chooseOnTraining,
+  combined,
+  round,
+};

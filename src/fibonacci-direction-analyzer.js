@@ -51,6 +51,52 @@ function averageTrueRange(candles, period = 14) {
   return window.reduce((sum, value) => sum + value, 0) / window.length;
 }
 
+function averageDirectionalIndex(candles, period = 14) {
+  if (!Array.isArray(candles) || candles.length < period * 2 + 1) return null;
+  const trueRanges = [];
+  const plusDm = [];
+  const minusDm = [];
+  for (let index = 1; index < candles.length; index++) {
+    const current = candles[index];
+    const previous = candles[index - 1];
+    const upMove = current.high - previous.high;
+    const downMove = previous.low - current.low;
+    trueRanges.push(Math.max(
+      current.high - current.low,
+      Math.abs(current.high - previous.close),
+      Math.abs(current.low - previous.close)
+    ));
+    plusDm.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    minusDm.push(downMove > upMove && downMove > 0 ? downMove : 0);
+  }
+
+  let smoothedTr = trueRanges.slice(0, period).reduce((sum, value) => sum + value, 0);
+  let smoothedPlus = plusDm.slice(0, period).reduce((sum, value) => sum + value, 0);
+  let smoothedMinus = minusDm.slice(0, period).reduce((sum, value) => sum + value, 0);
+  const dx = [];
+  for (let index = period - 1; index < trueRanges.length; index++) {
+    if (index >= period) {
+      smoothedTr = smoothedTr - smoothedTr / period + trueRanges[index];
+      smoothedPlus = smoothedPlus - smoothedPlus / period + plusDm[index];
+      smoothedMinus = smoothedMinus - smoothedMinus / period + minusDm[index];
+    }
+    if (!(smoothedTr > 0)) {
+      dx.push(0);
+      continue;
+    }
+    const plusDi = 100 * smoothedPlus / smoothedTr;
+    const minusDi = 100 * smoothedMinus / smoothedTr;
+    const total = plusDi + minusDi;
+    dx.push(total > 0 ? 100 * Math.abs(plusDi - minusDi) / total : 0);
+  }
+  if (dx.length < period) return null;
+  let adx = dx.slice(0, period).reduce((sum, value) => sum + value, 0) / period;
+  for (let index = period; index < dx.length; index++) {
+    adx = (adx * (period - 1) + dx[index]) / period;
+  }
+  return adx;
+}
+
 function findConfirmedPivots(candles, lookback = 2) {
   const highs = [];
   const lows = [];
@@ -84,6 +130,7 @@ function analyzeTimeframe(candleInput, timeframe, options = {}) {
   const ema50 = emaSeries(closes, 50);
   const atr14 = averageTrueRange(candles, 14);
   const atr50 = averageTrueRange(candles, 50);
+  const adx14 = averageDirectionalIndex(candles, 14);
   if (!(atr14 > 0) || !ema20.length || !ema50.length) return null;
 
   const lastIndex = candles.length - 1;
@@ -94,6 +141,7 @@ function analyzeTimeframe(candleInput, timeframe, options = {}) {
   const ema20SlopeAtr = (lastEma20 - ema20[slopeReferenceIndex]) / atr14;
   const { highs, lows } = findConfirmedPivots(candles, pivotLookback);
   let score = 0;
+  let structure = 'RANGING';
   const reasons = [];
 
   if (highs.length >= 2 && lows.length >= 2) {
@@ -102,9 +150,11 @@ function analyzeTimeframe(candleInput, timeframe, options = {}) {
     const lowerHigh = highs.at(-1).price < highs.at(-2).price;
     const lowerLow = lows.at(-1).price < lows.at(-2).price;
     if (higherHigh && higherLow) {
+      structure = 'BULLISH';
       score += 2;
       reasons.push('HH_HL');
     } else if (lowerHigh && lowerLow) {
+      structure = 'BEARISH';
       score -= 2;
       reasons.push('LH_LL');
     } else {
@@ -188,6 +238,8 @@ function analyzeTimeframe(candleInput, timeframe, options = {}) {
     score,
     close: lastClose,
     atr14: roundNumber(atr14, 8),
+    adx14: roundNumber(adx14, 4),
+    structure,
     atrPct: roundNumber(atr14 / lastClose * 100, 4),
     volatilityRatio: roundNumber(atr50 > 0 ? atr14 / atr50 : 1, 4),
     recentMoveAtr: roundNumber((lastClose - closes[recentReferenceIndex]) / atr14, 4),
@@ -379,6 +431,7 @@ module.exports = {
   normalizeCandle,
   emaSeries,
   averageTrueRange,
+  averageDirectionalIndex,
   findConfirmedPivots,
   analyzeTimeframe,
   aggregateTimeframes,

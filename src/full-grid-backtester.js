@@ -25,6 +25,8 @@ const DEFAULT_OPTIONS = Object.freeze({
   directionTimeframes: DIRECTION_TIMEFRAMES,
   gridCount: 27,
   totalInvestment: 150,
+  orderSizeUsdt: null,
+  maxExposureUsdt: null,
   leverage: 5,
   maxActiveBuyOrders: 20,
   maxRefills: 2,
@@ -224,6 +226,7 @@ class FullGridBacktester {
     monitorDecisionProvider = null,
     learningPolicyProvider = null,
     entryDecisionProvider = null,
+    entryLevelPlanProvider = null,
     variant = null,
   }) {
     const options = this.options;
@@ -424,14 +427,39 @@ class FullGridBacktester {
       const recommendation = adaptiveEnabled && lastDecision
         ? lastDecision.recommendation
         : { buyWeight: { upper: 1, middle: 1, lower: 1 }, spacingMultiplier: 1 };
-      const cap = options.totalInvestment;
+      const cap = Number(options.maxExposureUsdt) > 0
+        ? Number(options.maxExposureUsdt)
+        : options.totalInvestment;
       const occupied = new Set(lots.filter(lot => lot.generation === rangeGeneration).map(lot => lot.levelIndex));
       const candidates = activeSuggestion.levels
         .map((price, levelIndex) => ({ price, levelIndex }))
         .filter(item => (short ? item.price > currentPrice : item.price < currentPrice) &&
           !occupied.has(item.levelIndex) && !pendingBuys.has(item.levelIndex))
         .sort((left, right) => short ? left.price - right.price : right.price - left.price);
-      const spaced = chooseSpacedLevels(candidates, recommendation.spacingMultiplier)
+      let plannedCandidates = candidates;
+      if (typeof entryLevelPlanProvider === 'function' && candidates.length) {
+        const planned = entryLevelPlanProvider({
+          symbol,
+          timestamp: now,
+          currentPrice,
+          positionSide: activePositionSide,
+          direction: appliedDirection,
+          analysis: lastAnalysis,
+          candidates: [...candidates],
+        });
+        const allowedIndexes = new Set(candidates.map(candidate => candidate.levelIndex));
+        if (Array.isArray(planned)) {
+          const seen = new Set();
+          plannedCandidates = planned.filter(candidate => {
+            const index = Number(candidate?.levelIndex);
+            if (!allowedIndexes.has(index) || seen.has(index)) return false;
+            seen.add(index);
+            return true;
+          });
+          if (!plannedCandidates.length) plannedCandidates = [candidates.at(-1)];
+        }
+      }
+      const spaced = chooseSpacedLevels(plannedCandidates, recommendation.spacingMultiplier)
         .slice(0, options.maxActiveBuyOrders);
       const count = spaced.length;
       for (let rank = 0; rank < count; rank++) {
@@ -440,7 +468,10 @@ class FullGridBacktester {
         if (fills > options.maxRefills) continue;
         const zone = zoneForRank(rank + 1, count);
         const weight = Number(recommendation.buyWeight[zone]) || 0;
-        const targetNotional = options.totalInvestment / options.gridCount * weight;
+        const baseOrderNotional = Number(options.orderSizeUsdt) > 0
+          ? Number(options.orderSizeUsdt)
+          : options.totalInvestment / options.gridCount;
+        const targetNotional = baseOrderNotional * weight;
         if (targetNotional + 1e-12 < options.minimumNotional) {
           metrics.skippedBelowMinimum++;
           continue;
@@ -562,7 +593,10 @@ class FullGridBacktester {
       }
 
       const currentInventoryMarketNotional = inventoryMarketNotional(close);
-      const exposureRatio = (currentInventoryMarketNotional + pendingNotional()) / options.totalInvestment;
+      const configuredExposureCap = Number(options.maxExposureUsdt) > 0
+        ? Number(options.maxExposureUsdt)
+        : options.totalInvestment;
+      const exposureRatio = (currentInventoryMarketNotional + pendingNotional()) / configuredExposureCap;
       if (lastAnalysis) {
         const entryNotional = inventoryEntryNotional();
         const estimatedExitFee = currentInventoryMarketNotional * options.makerFeeRate;
@@ -600,6 +634,7 @@ class FullGridBacktester {
           rows,
           positionSide: activePositionSide,
           direction,
+          analysis: lastAnalysis,
         })
         : null;
       updateMutualOwnership(direction, evaluationTime);
@@ -639,7 +674,7 @@ class FullGridBacktester {
       metrics.maxInventoryNotional = Math.max(metrics.maxInventoryNotional, marketNotional);
       metrics.maxPendingBuyNotional = Math.max(metrics.maxPendingBuyNotional, pending);
       metrics.exposureSamples++;
-      if ((marketNotional + pending) / options.totalInvestment >= 0.9) metrics.exposureAbove90Samples++;
+      if ((marketNotional + pending) / configuredExposureCap >= 0.9) metrics.exposureAbove90Samples++;
 
       const unrealized = inventoryUnrealized(close);
       const equity = options.totalInvestment / options.leverage + metrics.cashPnl + unrealized;

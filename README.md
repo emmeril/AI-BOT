@@ -233,20 +233,31 @@ Trailing range hanya berlaku untuk auto range. Manual range tidak digeser oleh t
 - `GRID_PRICE_PRECISION_MAX_DEVIATION_PCT`: toleransi perubahan harga setelah dibulatkan mengikuti precision exchange.
 - `FUTURES_SELL_ENTRY_FLOOR_ENABLED`: futures saja, default `true`. Target SELL baru harus berada di atas entry rata-rata LONG Binance. Order SELL aktif yang turun di bawah entry rata-rata setelah BUY tambahan akan dibatalkan dan dibuat ulang pada siklus rekonsiliasi berikutnya.
 - `FUTURES_MUTUAL_EXCLUSION_ENABLED`: futures saja, default `false`. LONG dan SHORT boleh memiliki posisi bersamaan pada pair yang sama. Ubah ke `true` jika satu pair hanya boleh ditempati salah satu sisi. Exit kedua sisi tidak pernah diblokir.
-- `FUTURES_LONG_ENTRY_DIRECTION`: gate entry LONG berdasarkan arah Fibonacci terapan. Konfigurasi live memakai `BULLISH`; exit SELL tidak ikut diblokir.
-- `FUTURES_SHORT_ENTRY_DIRECTION`: gate entry SHORT berdasarkan arah Fibonacci terapan. Konfigurasi live memakai `BEARISH`; exit BUY tidak ikut diblokir.
+- `FUTURES_LONG_ENTRY_DIRECTION`: gate entry LONG berdasarkan arah Fibonacci terapan. Gunakan `ALWAYS` saat EMA trend menjadi gate entry; exit SELL tidak ikut diblokir.
+- `FUTURES_SHORT_ENTRY_DIRECTION`: gate entry SHORT berdasarkan arah Fibonacci terapan. Gunakan `ALWAYS` saat EMA trend menjadi gate entry; exit BUY tidak ikut diblokir.
 - `FUTURES_MUTUAL_ENTRY_LOCK_FILE`: prefix lock atomik lintas worker untuk mencegah race saat entry.
 - `FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS`: batas tunggu lock entry lintas worker. Jika timeout atau status sisi lawan gagal diverifikasi, entry diblokir.
-- `VOLUME_DELTA_ENTRY_FILTER_ENABLED`: aktifkan risk overlay Volume Delta untuk worker LONG. Profil scalping tervalidasi memakai `true`.
+- `VOLUME_DELTA_ENTRY_FILTER_ENABLED`: aktifkan risk overlay Volume Delta untuk worker LONG. Profil EMA Fibonacci memakai `false`.
 - `VOLUME_DELTA_TIMEFRAME`: timeframe candle mentah Volume Delta. Profil scalping memakai `5m`.
 - `VOLUME_DELTA_LOOKBACK_CANDLES`: jendela LONG. Profil scalping memakai `3`, setara 15 menit.
 - `VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT`: batas tekanan berlawanan LONG. Profil scalping tervalidasi memakai `10`.
-- `SHORT_VOLUME_DELTA_ENTRY_FILTER_ENABLED`: aktifkan risk overlay volume delta pada worker SHORT.
+- `SHORT_VOLUME_DELTA_ENTRY_FILTER_ENABLED`: aktifkan risk overlay Volume Delta pada worker SHORT. Profil EMA Fibonacci memakai `false`.
 - `SHORT_VOLUME_DELTA_ENTRY_FILTER_MODE`: `SHADOW` hanya mencatat keputusan, `LIVE` dapat menghentikan dan membatalkan order entry SHORT. Order BUY exit tidak pernah diblokir.
 - `SHORT_VOLUME_DELTA_TIMEFRAME`: timeframe candle mentah SHORT. Profil scalping memakai `5m`.
 - `SHORT_VOLUME_DELTA_LOOKBACK_CANDLES`: jendela SHORT. Profil scalping memakai `12`, setara satu jam.
 - `SHORT_VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT`: blok entry SHORT jika delta taker buy positif melampaui batas ini. Nilai tervalidasi `2.5`.
 - `SHORT_VOLUME_DELTA_FAIL_CLOSED`: default `false`; gangguan endpoint delta tidak menghentikan strategi utama.
+- `EMA_TREND_ENTRY_FILTER_ENABLED`: aktifkan gate EMA20/50 opsional untuk worker LONG. Profil direct Fibonacci memakai `false`, sehingga entry grid tidak menunggu sinyal EMA.
+- `EMA_TREND_ENTRY_FILTER_MODE`: `SHADOW` hanya mencatat keputusan; `LIVE` menahan dan membatalkan entry yang berlawanan. Exit tidak pernah diblokir.
+- `EMA_TREND_ENTRY_TIMEFRAME`: timeframe EMA dari direction analyzer. Profil tervalidasi memakai `5m` dan timeframe ini wajib ada di `FIBONACCI_DIRECTION_TIMEFRAMES`.
+- `EMA_TREND_ENTRY_FAIL_CLOSED`: jika analisis EMA tidak tersedia, `true` menahan entry baru.
+- Gunakan prefix `SHORT_` untuk konfigurasi gate EMA worker SHORT.
+- `PRICE_MOMENTUM_ENTRY_FILTER_ENABLED`: mengaktifkan ownership entry berbasis perubahan harga; LONG hanya memiliki entry saat momentum positif dan SHORT saat momentum negatif. Exit posisi yang sudah ada tidak diblokir.
+- `PRICE_MOMENTUM_ENTRY_FILTER_MODE`: `SHADOW` hanya mencatat, sedangkan `LIVE` menerapkan keputusan dan membatalkan pending entry dari sisi yang tidak searah.
+- `PRICE_MOMENTUM_TIMEFRAME` dan `PRICE_MOMENTUM_LOOKBACK_CANDLES`: profil tervalidasi memakai `5m` dan `144` candle, setara 12 jam.
+- `PRICE_MOMENTUM_DEADBAND_PCT`: zona netral di sekitar return nol. Profil backtest memakai `0`.
+- `PRICE_MOMENTUM_FAIL_CLOSED`: jika candle tidak tersedia, `true` menahan entry baru tanpa menyentuh exit.
+- Gunakan prefix `SHORT_` agar worker SHORT memakai profil momentum yang sama.
 - `BINANCE_SPOT_MAKER_FEE_RATE`: asumsi fee maker Binance Spot per sisi untuk prompt AI. Default `0.001` atau 0.1%; gunakan `0.00075` jika fee dibayar pakai BNB dengan diskon 25%, atau sesuaikan dengan tier VIP/pair akun.
 - `GRID_MIN_NET_PROFIT_PCT`: target profit bersih minimum per jarak grid setelah fee buy+sell. Default `0.05` atau 0.05%.
 

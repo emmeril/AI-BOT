@@ -38,6 +38,11 @@ const {
   VolumeDeltaAnalyzer,
   evaluateVolumeDeltaEntry,
 } = require('./src/volume-delta-analyzer');
+const { evaluateEmaTrendEntry } = require('./src/ema-trend-entry-filter');
+const {
+  PriceMomentumAnalyzer,
+  evaluatePriceMomentumEntry,
+} = require('./src/price-momentum-entry-filter');
 const futuresTelegramCommandPath = path.resolve(process.cwd(), 'futures-telegram-command.json');
 
 // Tracks, per async call chain, which symbols' locks are currently held by
@@ -148,6 +153,21 @@ const VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT = Math.max(
   0, Config.number('VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT', 5)
 );
 const VOLUME_DELTA_FAIL_CLOSED = Config.boolean('VOLUME_DELTA_FAIL_CLOSED', false);
+const EMA_TREND_ENTRY_FILTER_ENABLED = Config.boolean('EMA_TREND_ENTRY_FILTER_ENABLED', false);
+const EMA_TREND_ENTRY_FILTER_MODE = Config.get('EMA_TREND_ENTRY_FILTER_MODE', 'SHADOW').toUpperCase();
+const EMA_TREND_ENTRY_TIMEFRAME = Config.get('EMA_TREND_ENTRY_TIMEFRAME', '5m');
+const EMA_TREND_ENTRY_FAIL_CLOSED = Config.boolean('EMA_TREND_ENTRY_FAIL_CLOSED', true);
+const PRICE_MOMENTUM_ENTRY_FILTER_ENABLED = Config.boolean('PRICE_MOMENTUM_ENTRY_FILTER_ENABLED', false);
+const PRICE_MOMENTUM_ENTRY_FILTER_MODE = Config.get('PRICE_MOMENTUM_ENTRY_FILTER_MODE', 'SHADOW').toUpperCase();
+const PRICE_MOMENTUM_TIMEFRAME = Config.get('PRICE_MOMENTUM_TIMEFRAME', '5m');
+const PRICE_MOMENTUM_TIMEFRAME_MS = timeframeToMs(PRICE_MOMENTUM_TIMEFRAME);
+const PRICE_MOMENTUM_LOOKBACK_CANDLES = Math.max(
+  1, Math.floor(Config.number('PRICE_MOMENTUM_LOOKBACK_CANDLES', 144))
+);
+const PRICE_MOMENTUM_DEADBAND_PCT = Math.max(
+  0, Config.number('PRICE_MOMENTUM_DEADBAND_PCT', 0)
+);
+const PRICE_MOMENTUM_FAIL_CLOSED = Config.boolean('PRICE_MOMENTUM_FAIL_CLOSED', true);
 const INTERVAL_MINUTES = Config.number('INTERVAL_MINUTES', 1);
 const INTERVAL_MS = INTERVAL_MINUTES * MINUTE_MS;
 const FUTURES_USER_STREAM_ENABLED = Config.boolean('FUTURES_USER_STREAM_ENABLED', true);
@@ -647,6 +667,24 @@ function validateRuntimeConfiguration() {
   }
   requireInteger('VOLUME_DELTA_LOOKBACK_CANDLES', VOLUME_DELTA_LOOKBACK_CANDLES, 1);
   requireNonNegative('VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT', VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT);
+  if (!['SHADOW', 'LIVE'].includes(EMA_TREND_ENTRY_FILTER_MODE)) {
+    errors.push('EMA_TREND_ENTRY_FILTER_MODE must be SHADOW or LIVE');
+  }
+  if (EMA_TREND_ENTRY_FILTER_ENABLED && !FIBONACCI_DIRECTION_ANALYZER_ENABLED) {
+    errors.push('EMA_TREND_ENTRY_FILTER_ENABLED requires FIBONACCI_DIRECTION_ANALYZER_ENABLED=true');
+  }
+  if (EMA_TREND_ENTRY_FILTER_ENABLED &&
+      !FIBONACCI_DIRECTION_TIMEFRAMES.includes(EMA_TREND_ENTRY_TIMEFRAME)) {
+    errors.push('EMA_TREND_ENTRY_TIMEFRAME must be included in FIBONACCI_DIRECTION_TIMEFRAMES');
+  }
+  if (!['SHADOW', 'LIVE'].includes(PRICE_MOMENTUM_ENTRY_FILTER_MODE)) {
+    errors.push('PRICE_MOMENTUM_ENTRY_FILTER_MODE must be SHADOW or LIVE');
+  }
+  if (!(PRICE_MOMENTUM_TIMEFRAME_MS > 0)) {
+    errors.push('PRICE_MOMENTUM_TIMEFRAME must be a valid Binance candle timeframe');
+  }
+  requireInteger('PRICE_MOMENTUM_LOOKBACK_CANDLES', PRICE_MOMENTUM_LOOKBACK_CANDLES, 1);
+  requireNonNegative('PRICE_MOMENTUM_DEADBAND_PCT', PRICE_MOMENTUM_DEADBAND_PCT);
 
   const hasLower = GRID_LOWER_PRICE > 0;
   const hasUpper = GRID_UPPER_PRICE > 0;
@@ -1214,6 +1252,9 @@ class FuturesGridEngine {
     this.lastFibonacciDirectionLog = new Map();
     this.appliedFibonacciDirections = new Map();
     this.lastVolumeDeltaLog = new Map();
+    this.lastEmaTrendLog = new Map();
+    this.lastPriceMomentumLog = new Map();
+    this.latestFibonacciAnalyses = new Map();
     this.mutualExclusionEnabled = FUTURES_MUTUAL_EXCLUSION_ENABLED;
     this.mutualEntryMutex = new CrossProcessMutex(FUTURES_MUTUAL_ENTRY_LOCK_PATH, {
       timeoutMs: FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS,
@@ -1223,6 +1264,12 @@ class FuturesGridEngine {
       timeframe: VOLUME_DELTA_TIMEFRAME,
       timeframeMs: VOLUME_DELTA_TIMEFRAME_MS,
       lookbackCandles: VOLUME_DELTA_LOOKBACK_CANDLES,
+      candleCloseBufferMs: FIBONACCI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS,
+    });
+    this.priceMomentumAnalyzer = new PriceMomentumAnalyzer(this.exchange, {
+      enabled: PRICE_MOMENTUM_ENTRY_FILTER_ENABLED,
+      timeframe: PRICE_MOMENTUM_TIMEFRAME,
+      lookbackCandles: PRICE_MOMENTUM_LOOKBACK_CANDLES,
       candleCloseBufferMs: FIBONACCI_RANGE_ADVISOR_CANDLE_CLOSE_BUFFER_MS,
     });
     this.adaptiveSupervisorOutcomeJournal = new AdaptiveSupervisorOutcomeJournal({
@@ -1661,6 +1708,7 @@ class FuturesGridEngine {
         });
       }
       if (fibonacciDirection) {
+        this.latestFibonacciAnalyses.set(symbol, fibonacciDirection);
         const logKey = `${fibonacciDirection.generatedAt}:${appliedDirection}`;
         if (this.lastFibonacciDirectionLog.get(symbol) !== logKey) {
           console.log(
@@ -1672,6 +1720,8 @@ class FuturesGridEngine {
           );
           this.lastFibonacciDirectionLog.set(symbol, logKey);
         }
+      } else {
+        this.latestFibonacciAnalyses.delete(symbol);
       }
       if (ADAPTIVE_GRID_SUPERVISOR_ENABLED && fibonacciDirection) {
         await this.evaluateAdaptiveSupervisor(symbol, fibonacciDirection, currentPrice);
@@ -2700,6 +2750,126 @@ class FuturesGridEngine {
         (failure ? ` error=${failure.message}` : '')
       );
       this.lastVolumeDeltaLog.set(symbol, logKey);
+    }
+    return { ...decision, allow: effectiveAllow, analysis, failure };
+  }
+
+  async getEmaTrendEntryDecision(symbol) {
+    if (!EMA_TREND_ENTRY_FILTER_ENABLED) {
+      return { allow: true, available: false, disabled: true };
+    }
+    const analysis = this.latestFibonacciAnalyses.get(symbol);
+    const decision = evaluateEmaTrendEntry(analysis, POSITION_SIDE, {
+      timeframe: EMA_TREND_ENTRY_TIMEFRAME,
+      failClosed: EMA_TREND_ENTRY_FAIL_CLOSED,
+    });
+    const effectiveAllow = EMA_TREND_ENTRY_FILTER_MODE !== 'LIVE' || decision.allow;
+    const symState = this.state.getSymbol(symbol);
+    const previousSnapshot = symState.config.emaTrendEntryGuard;
+    const nextSnapshot = {
+      enabled: true,
+      mode: EMA_TREND_ENTRY_FILTER_MODE,
+      positionSide: POSITION_SIDE,
+      timeframe: EMA_TREND_ENTRY_TIMEFRAME,
+      failClosed: EMA_TREND_ENTRY_FAIL_CLOSED,
+      available: decision.available,
+      allow: effectiveAllow,
+      reason: decision.reason,
+      trend: decision.trend || null,
+      requiredTrend: decision.requiredTrend || (POSITION_SIDE === 'SHORT' ? 'BEARISH' : 'BULLISH'),
+      ema20: Number.isFinite(decision.ema20) ? decision.ema20 : null,
+      ema50: Number.isFinite(decision.ema50) ? decision.ema50 : null,
+    };
+    const snapshotChanged = !previousSnapshot || Object.entries(nextSnapshot)
+      .some(([key, value]) => previousSnapshot[key] !== value);
+    if (snapshotChanged) {
+      nextSnapshot.evaluatedAt = new Date().toISOString();
+      symState.config.emaTrendEntryGuard = nextSnapshot;
+      try {
+        await this.state.save();
+      } catch (error) {
+        if (previousSnapshot === undefined) delete symState.config.emaTrendEntryGuard;
+        else symState.config.emaTrendEntryGuard = previousSnapshot;
+        console.warn(`[EMA-TREND] ${symbol} could not persist dashboard snapshot: ${error.message}`);
+      }
+    }
+    const logKey = [analysis?.generatedAt || 'unavailable', decision.allow].join('|');
+    if (this.lastEmaTrendLog.get(symbol) !== logKey) {
+      console.log(
+        `[EMA-TREND] ${symbol} ${POSITION_SIDE} mode=${EMA_TREND_ENTRY_FILTER_MODE} ` +
+        `timeframe=${EMA_TREND_ENTRY_TIMEFRAME} trend=${decision.trend || 'unavailable'} ` +
+        `ema20=${roundNumber(decision.ema20, 8)} ema50=${roundNumber(decision.ema50, 8)} ` +
+        `action=${effectiveAllow ? 'allow' : 'block'}`
+      );
+      this.lastEmaTrendLog.set(symbol, logKey);
+    }
+    return { ...decision, allow: effectiveAllow, analysis };
+  }
+
+  async getPriceMomentumEntryDecision(symbol) {
+    if (!PRICE_MOMENTUM_ENTRY_FILTER_ENABLED) {
+      return { allow: true, available: false, disabled: true };
+    }
+    let analysis = null;
+    let failure = null;
+    try {
+      analysis = await this.priceMomentumAnalyzer.analyze(symbol);
+    } catch (error) {
+      failure = error;
+    }
+    const decision = evaluatePriceMomentumEntry(analysis, POSITION_SIDE, {
+      deadbandPct: PRICE_MOMENTUM_DEADBAND_PCT,
+      failClosed: PRICE_MOMENTUM_FAIL_CLOSED,
+    });
+    const effectiveAllow = PRICE_MOMENTUM_ENTRY_FILTER_MODE !== 'LIVE' || decision.allow;
+    const symState = this.state.getSymbol(symbol);
+    const previousSnapshot = symState.config.priceMomentumEntryGuard;
+    const nextSnapshot = {
+      enabled: true,
+      mode: PRICE_MOMENTUM_ENTRY_FILTER_MODE,
+      positionSide: POSITION_SIDE,
+      timeframe: PRICE_MOMENTUM_TIMEFRAME,
+      lookbackCandles: PRICE_MOMENTUM_LOOKBACK_CANDLES,
+      windowMinutes: Math.round(
+        PRICE_MOMENTUM_TIMEFRAME_MS * PRICE_MOMENTUM_LOOKBACK_CANDLES / 60_000
+      ),
+      deadbandPct: PRICE_MOMENTUM_DEADBAND_PCT,
+      failClosed: PRICE_MOMENTUM_FAIL_CLOSED,
+      available: decision.available,
+      allow: effectiveAllow,
+      reason: decision.reason,
+      direction: decision.direction || null,
+      requiredDirection: decision.requiredDirection || (POSITION_SIDE === 'SHORT' ? 'BEARISH' : 'BULLISH'),
+      returnRatio: Number.isFinite(decision.returnRatio) ? decision.returnRatio : null,
+      candleTimestamp: analysis?.timestamp || null,
+      error: failure?.message || null,
+    };
+    const snapshotChanged = !previousSnapshot || Object.entries(nextSnapshot)
+      .some(([key, value]) => previousSnapshot[key] !== value);
+    if (snapshotChanged) {
+      nextSnapshot.evaluatedAt = new Date().toISOString();
+      symState.config.priceMomentumEntryGuard = nextSnapshot;
+      try {
+        await this.state.save();
+      } catch (error) {
+        if (previousSnapshot === undefined) delete symState.config.priceMomentumEntryGuard;
+        else symState.config.priceMomentumEntryGuard = previousSnapshot;
+        console.warn(`[PRICE-MOMENTUM] ${symbol} could not persist dashboard snapshot: ${error.message}`);
+      }
+    }
+    const logKey = [analysis?.timestamp || 'unavailable', decision.allow, failure?.message || ''].join('|');
+    if (this.lastPriceMomentumLog.get(symbol) !== logKey) {
+      const returnPct = Number.isFinite(decision.returnRatio)
+        ? `${roundNumber(decision.returnRatio * 100, 3)}%`
+        : 'unavailable';
+      console.log(
+        `[PRICE-MOMENTUM] ${symbol} ${POSITION_SIDE} mode=${PRICE_MOMENTUM_ENTRY_FILTER_MODE} ` +
+        `window=${PRICE_MOMENTUM_LOOKBACK_CANDLES}x${PRICE_MOMENTUM_TIMEFRAME} ` +
+        `return=${returnPct} direction=${decision.direction || 'unavailable'} ` +
+        `action=${effectiveAllow ? 'allow' : 'block'}` +
+        (failure ? ` error=${failure.message}` : '')
+      );
+      this.lastPriceMomentumLog.set(symbol, logKey);
     }
     return { ...decision, allow: effectiveAllow, analysis, failure };
   }
@@ -4354,7 +4524,10 @@ class FuturesGridEngine {
 
     const directionEntryPreferred = this.isEntrySidePreferred(symbol);
     const volumeDeltaDecision = await this.getVolumeDeltaEntryDecision(symbol);
-    const entrySidePreferred = directionEntryPreferred && volumeDeltaDecision.allow;
+    const emaTrendDecision = await this.getEmaTrendEntryDecision(symbol);
+    const priceMomentumDecision = await this.getPriceMomentumEntryDecision(symbol);
+    const entrySidePreferred = directionEntryPreferred && volumeDeltaDecision.allow &&
+      emaTrendDecision.allow && priceMomentumDecision.allow;
     if (!directionEntryPreferred) {
       const direction = this.getAppliedFibonacciDirection(symbol);
       if (await this.cancelManagedEntryOrders(
@@ -4368,6 +4541,22 @@ class FuturesGridEngine {
       if (await this.cancelManagedEntryOrders(
         symbol, managedOrders,
         `opposing volume delta ${roundNumber(volumeDeltaDecision.deltaRatio * 100, 3)}%`
+      )) {
+        freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+        managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+      }
+    } else if (!emaTrendDecision.allow) {
+      if (await this.cancelManagedEntryOrders(
+        symbol, managedOrders,
+        `EMA trend ${emaTrendDecision.trend || 'unavailable'} rejected LONG`
+      )) {
+        freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+        managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+      }
+    } else if (!priceMomentumDecision.allow) {
+      if (await this.cancelManagedEntryOrders(
+        symbol, managedOrders,
+        `price momentum ${priceMomentumDecision.direction || 'unavailable'} rejected LONG`
       )) {
         freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
         managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
@@ -4581,7 +4770,10 @@ class FuturesGridEngine {
 
     const directionEntryPreferred = this.isEntrySidePreferred(symbol);
     const volumeDeltaDecision = await this.getVolumeDeltaEntryDecision(symbol);
-    const entrySidePreferred = directionEntryPreferred && volumeDeltaDecision.allow;
+    const emaTrendDecision = await this.getEmaTrendEntryDecision(symbol);
+    const priceMomentumDecision = await this.getPriceMomentumEntryDecision(symbol);
+    const entrySidePreferred = directionEntryPreferred && volumeDeltaDecision.allow &&
+      emaTrendDecision.allow && priceMomentumDecision.allow;
     if (!directionEntryPreferred) {
       const direction = this.getAppliedFibonacciDirection(symbol);
       if (await this.cancelManagedEntryOrders(
@@ -4595,6 +4787,22 @@ class FuturesGridEngine {
       if (await this.cancelManagedEntryOrders(
         symbol, managedOrders,
         `opposing volume delta ${roundNumber(volumeDeltaDecision.deltaRatio * 100, 3)}%`
+      )) {
+        freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+        managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+      }
+    } else if (!emaTrendDecision.allow) {
+      if (await this.cancelManagedEntryOrders(
+        symbol, managedOrders,
+        `EMA trend ${emaTrendDecision.trend || 'unavailable'} rejected SHORT`
+      )) {
+        freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+        managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+      }
+    } else if (!priceMomentumDecision.allow) {
+      if (await this.cancelManagedEntryOrders(
+        symbol, managedOrders,
+        `price momentum ${priceMomentumDecision.direction || 'unavailable'} rejected SHORT`
       )) {
         freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
         managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
@@ -5296,6 +5504,12 @@ Telegram Alerts: ${TELEGRAM_ENABLED ? 'ON' : 'OFF'}
 Telegram Command Processing: ${FUTURES_TELEGRAM_COMMAND_PROCESSING_ENABLED ? 'ON' : 'OFF'}
 Volume Delta Entry Guard: ${VOLUME_DELTA_ENTRY_FILTER_ENABLED
       ? `ON (${VOLUME_DELTA_ENTRY_FILTER_MODE}; ${VOLUME_DELTA_LOOKBACK_CANDLES}x${VOLUME_DELTA_TIMEFRAME}; opposition>${VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT}%; fail-${VOLUME_DELTA_FAIL_CLOSED ? 'closed' : 'open'})`
+      : 'OFF'}
+EMA Trend Entry Guard: ${EMA_TREND_ENTRY_FILTER_ENABLED
+      ? `ON (${EMA_TREND_ENTRY_FILTER_MODE}; EMA20/50 ${EMA_TREND_ENTRY_TIMEFRAME}; fail-${EMA_TREND_ENTRY_FAIL_CLOSED ? 'closed' : 'open'})`
+      : 'OFF'}
+Price Momentum Entry Guard: ${PRICE_MOMENTUM_ENTRY_FILTER_ENABLED
+      ? `ON (${PRICE_MOMENTUM_ENTRY_FILTER_MODE}; ${PRICE_MOMENTUM_LOOKBACK_CANDLES}x${PRICE_MOMENTUM_TIMEFRAME}; deadband=${PRICE_MOMENTUM_DEADBAND_PCT}%; fail-${PRICE_MOMENTUM_FAIL_CLOSED ? 'closed' : 'open'})`
       : 'OFF'}
 Grid Mode: ${GRID_MODE}
 Grid Count: ${GRID_COUNT}

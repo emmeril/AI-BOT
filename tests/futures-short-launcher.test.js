@@ -29,14 +29,20 @@ test('SHORT sends Telegram alerts without competing for command processing', () 
   assert.equal(environment.FUTURES_TELEGRAM_COMMAND_PROCESSING_ENABLED, 'false');
 });
 
-test('SHORT enables the validated volume-delta risk overlay', () => {
+test('SHORT uses the validated price-momentum ownership gate', () => {
   const environment = buildShortEnvironment({});
-  assert.equal(environment.VOLUME_DELTA_ENTRY_FILTER_ENABLED, 'true');
-  assert.equal(environment.VOLUME_DELTA_ENTRY_FILTER_MODE, 'LIVE');
-  assert.equal(environment.VOLUME_DELTA_TIMEFRAME, '5m');
-  assert.equal(environment.VOLUME_DELTA_LOOKBACK_CANDLES, '12');
-  assert.equal(environment.VOLUME_DELTA_OPPOSITION_THRESHOLD_PCT, '2.5');
-  assert.equal(environment.VOLUME_DELTA_FAIL_CLOSED, 'false');
+  assert.equal(environment.FUTURES_SHORT_ENTRY_DIRECTION, 'ALWAYS');
+  assert.equal(environment.VOLUME_DELTA_ENTRY_FILTER_ENABLED, 'false');
+  assert.equal(environment.EMA_TREND_ENTRY_FILTER_ENABLED, 'false');
+  assert.equal(environment.EMA_TREND_ENTRY_FILTER_MODE, 'LIVE');
+  assert.equal(environment.EMA_TREND_ENTRY_TIMEFRAME, '5m');
+  assert.equal(environment.EMA_TREND_ENTRY_FAIL_CLOSED, 'true');
+  assert.equal(environment.PRICE_MOMENTUM_ENTRY_FILTER_ENABLED, 'true');
+  assert.equal(environment.PRICE_MOMENTUM_ENTRY_FILTER_MODE, 'LIVE');
+  assert.equal(environment.PRICE_MOMENTUM_TIMEFRAME, '5m');
+  assert.equal(environment.PRICE_MOMENTUM_LOOKBACK_CANDLES, '144');
+  assert.equal(environment.PRICE_MOMENTUM_DEADBAND_PCT, '0');
+  assert.equal(environment.PRICE_MOMENTUM_FAIL_CLOSED, 'true');
 });
 
 test('SHORT keeps the nearest profitable Fibonacci exit target', () => {

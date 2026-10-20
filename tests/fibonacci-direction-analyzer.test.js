@@ -26,6 +26,8 @@ test('deterministic analyzer classifies higher-high/higher-low trend as bullish'
   assert.equal(result.direction, 'BULLISH');
   assert.ok(result.score >= 2);
   assert.ok(result.reasons.includes('HH_HL'));
+  assert.equal(result.structure, 'BULLISH');
+  assert.ok(Number.isFinite(result.adx14));
 });
 
 test('deterministic analyzer classifies lower-high/lower-low trend as bearish', () => {
@@ -35,6 +37,8 @@ test('deterministic analyzer classifies lower-high/lower-low trend as bearish', 
   assert.equal(result.direction, 'BEARISH');
   assert.ok(result.score <= -2);
   assert.ok(result.reasons.includes('LH_LL'));
+  assert.equal(result.structure, 'BEARISH');
+  assert.ok(Number.isFinite(result.adx14));
 });
 
 test('higher timeframes receive more weight in aggregate direction', () => {
