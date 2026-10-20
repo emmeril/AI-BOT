@@ -318,7 +318,7 @@
     text('position-node-title', state.positionSide);
     text('exit-node-title', `Exit ${exitSide}`);
     setNode('market', 'accent', String(data.mode || 'LIVE').toUpperCase(), `${data.market?.priceText || price(data.market?.price)} ${quote()}`, `${signed(data.market?.changePercent, 2)}% dalam 24 jam`);
-    setNode('fibonacci', fibonacciAvailable ? 'positive' : 'accent', fibonacciAvailable ? 'SIAP' : 'MENUNGGU', fibonacciAvailable ? `${price(range.lower)} – ${price(range.upper)}` : 'Range belum tersedia', 'Level grid final');
+    setNode('fibonacci', fibonacciAvailable ? 'positive' : 'accent', fibonacciAvailable ? 'SIAP' : 'MENUNGGU', fibonacciAvailable ? `${price(range.lower)}–${price(range.upper)}` : 'Range belum tersedia', 'Level grid final');
     setNode('supervisor', gate.tone, gate.status, signal.value, signal.reason);
     setNode('buy', entryView.tone, entryView.status, `${money(entryValue, 2)} ${quote()}`, entryView.meta);
     setNode('position', position ? (num(data.profit?.unrealizedPnl) >= 0 ? 'positive' : 'negative') : 'accent', position ? `${state.positionSide} AKTIF` : 'TIDAK ADA POSISI', position ? compact(position.contracts) : '0', `PnL berjalan ${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`);

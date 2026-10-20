@@ -28,6 +28,8 @@ test('dashboard pipeline shows only the active deterministic execution flow', ()
   assert.match(script, /setFlowEdge\('supervisor', 'buy', entryCount > 0/);
   assert.match(script, /setFlowEdge\('position', 'sell', exitNeedsAttention/);
   assert.match(css, /\.flow-grid\{[^}]*grid-template-columns:repeat\(6/);
+  assert.match(css, /\.node-fibonacci \.node-value\{[^}]*white-space:nowrap;overflow-wrap:normal/);
+  assert.match(script, /`\$\{price\(range\.lower\)\}–\$\{price\(range\.upper\)\}`/);
 });
 
 test('futures dashboard combines LONG and SHORT with accessible side filters', () => {
