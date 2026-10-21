@@ -65,6 +65,12 @@ test('futures dashboard combines LONG and SHORT with accessible side filters', (
   assert.match(html, /Momentum 12J/);
   assert.doesNotMatch(script, /function volumeDeltaView\(volumeDelta\)/);
   assert.match(script, /function priceMomentumView\(momentum\)/);
+  assert.match(script, /function reversalInventoryView\(reversal\)/);
+  assert.match(script, /\['Kelola reversal', reversal\.management\]/);
+  assert.match(script, /\['Rescue', reversal\.rescue\]/);
+  assert.match(script, /Dikelola langsung/);
+  assert.match(script, /Menunggu kuota \$\{state\.positionSide\}/);
+  assert.doesNotMatch(script, /Jatah rescue posisi ini sudah digunakan/);
   assert.match(script, /function entryGateView\(momentum\)/);
   assert.doesNotMatch(script, /function primaryEntrySignal/);
   assert.doesNotMatch(script, /Volume Delta|EMA Trend|REPORT_ONLY|REPORT ONLY/);

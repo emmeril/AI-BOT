@@ -192,6 +192,11 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
           candleTimestamp: 30, evaluatedAt: '2026-10-17T08:05:00.000Z', error: null,
         } },
         orders: { shortEntry: { levelIndex: 2 } },
+        reversalInventory: {
+          initializedAt: '2026-10-20T18:37:00.775Z', lastSignal: 'OPPOSING',
+          mode: 'RESCUE', grandfathered: false, rescueUsed: true,
+          rescueFilled: true, rescueNotional: 23.1,
+        },
         lastBuyByLevel: { 2: { totalCostQuote: 8, totalFeeQuote: 0.05 } },
         realizedGridProfit: 1.5,
         realizedExitProfit: 0.5,
@@ -262,6 +267,9 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
   assert.equal(snapshot.intelligence.priceMomentum.returnRatio, -0.0125);
   assert.equal(snapshot.intelligence.priceMomentum.windowMinutes, 720);
   assert.equal(snapshot.intelligence.emaTrend.enabled, false);
+  assert.equal(snapshot.intelligence.reversalInventory.mode, 'RESCUE');
+  assert.equal(snapshot.intelligence.reversalInventory.grandfathered, false);
+  assert.equal(snapshot.intelligence.reversalInventory.rescueStatus, 'FILLED');
   assert.equal(snapshot.exposureAllocation.enabled, true);
   assert.equal(snapshot.exposureAllocation.walletBalance, 100);
   assert.equal(snapshot.exposureAllocation.sidePct, 45);
@@ -358,6 +366,76 @@ test('futures decision snapshot exposes deterministic flow and SELL coverage wit
     if (previous.sideCap === undefined) delete process.env.FUTURES_MAX_TOTAL_EXPOSURE_USDT; else process.env.FUTURES_MAX_TOTAL_EXPOSURE_USDT = previous.sideCap;
     if (previous.shortSymbolCap === undefined) delete process.env.SHORT_FUTURES_MAX_SYMBOL_EXPOSURE_USDT; else process.env.SHORT_FUTURES_MAX_SYMBOL_EXPOSURE_USDT = previous.shortSymbolCap;
     if (previous.shortSideCap === undefined) delete process.env.SHORT_FUTURES_MAX_TOTAL_EXPOSURE_USDT; else process.env.SHORT_FUTURES_MAX_TOTAL_EXPOSURE_USDT = previous.shortSideCap;
+  }
+});
+
+test('futures dashboard exposes managed reversal and pending rescue per side', () => {
+  const previous = {
+    longEnabled: process.env.REVERSAL_INVENTORY_ENABLED,
+    longExisting: process.env.REVERSAL_APPLY_TO_EXISTING_POSITIONS,
+    shortEnabled: process.env.SHORT_REVERSAL_INVENTORY_ENABLED,
+    shortExisting: process.env.SHORT_REVERSAL_APPLY_TO_EXISTING_POSITIONS,
+  };
+  process.env.REVERSAL_INVENTORY_ENABLED = 'true';
+  process.env.REVERSAL_APPLY_TO_EXISTING_POSITIONS = 'true';
+  process.env.SHORT_REVERSAL_INVENTORY_ENABLED = 'true';
+  process.env.SHORT_REVERSAL_APPLY_TO_EXISTING_POSITIONS = 'true';
+  try {
+    const engine = {};
+    const long = decisionSnapshot(engine, 'TEST/USDT:USDT', {
+      config: {}, orders: {}, lastBuyByLevel: {},
+      reversalInventory: { initializedAt: '2026-10-21T00:00:00.000Z', mode: 'MONITORING' },
+    }, [], { contracts: 1 }, { positionSide: 'LONG' });
+    assert.equal(long.reversalInventory.enabled, true);
+    assert.equal(long.reversalInventory.applyToExisting, true);
+    assert.equal(long.reversalInventory.mode, 'MONITORING');
+    assert.equal(long.reversalInventory.rescueStatus, 'READY');
+
+    const short = decisionSnapshot(engine, 'TEST/USDT:USDT', {
+      config: {},
+      orders: { rescue: { kind: 'REVERSAL_RESCUE' } },
+      lastBuyByLevel: {},
+      reversalInventory: {
+        initializedAt: '2026-10-21T00:00:00.000Z', mode: 'RESCUE',
+        grandfathered: false, rescueUsed: true, rescueNotional: 20,
+      },
+    }, [{ id: 'rescue', side: 'sell', price: 2, amount: 10, remaining: 10 }],
+    { contracts: 5 }, { positionSide: 'SHORT' });
+    assert.equal(short.reversalInventory.enabled, true);
+    assert.equal(short.reversalInventory.applyToExisting, true);
+    assert.equal(short.reversalInventory.mode, 'RESCUE');
+    assert.equal(short.reversalInventory.rescueStatus, 'PENDING');
+    assert.deepEqual(short.reversalInventory.rescueOrder, {
+      side: 'sell', price: 2, amount: 10, remaining: 10,
+    });
+
+    const waiting = decisionSnapshot(engine, 'TEST/USDT:USDT', {
+      config: {}, orders: {}, lastBuyByLevel: {},
+      reversalInventory: {
+        initializedAt: '2026-10-21T00:00:00.000Z', mode: 'RESCUE',
+        rescueWaitReason: 'SIDE_BUDGET_EXHAUSTED',
+      },
+    }, [], { contracts: 5 }, { positionSide: 'SHORT' });
+    assert.equal(waiting.reversalInventory.rescueStatus, 'WAITING_BUDGET');
+
+    const belowMinimum = decisionSnapshot(engine, 'TEST/USDT:USDT', {
+      config: {}, orders: {}, lastBuyByLevel: {},
+      reversalInventory: {
+        initializedAt: '2026-10-21T00:00:00.000Z', mode: 'RESCUE',
+        rescueWaitReason: 'BELOW_MINIMUM_ORDER',
+      },
+    }, [], { contracts: 5 }, { positionSide: 'SHORT' });
+    assert.equal(belowMinimum.reversalInventory.rescueStatus, 'WAITING_MINIMUM');
+  } finally {
+    for (const [key, value] of Object.entries({
+      REVERSAL_INVENTORY_ENABLED: previous.longEnabled,
+      REVERSAL_APPLY_TO_EXISTING_POSITIONS: previous.longExisting,
+      SHORT_REVERSAL_INVENTORY_ENABLED: previous.shortEnabled,
+      SHORT_REVERSAL_APPLY_TO_EXISTING_POSITIONS: previous.shortExisting,
+    })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 

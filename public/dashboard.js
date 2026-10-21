@@ -135,6 +135,56 @@
     };
   }
 
+  function reversalInventoryView(reversal) {
+    if (!reversal.enabled) {
+      return {
+        label: 'REVERSAL MATI',
+        management: 'Tidak aktif',
+        rescue: 'Tidak aktif',
+        summary: 'Pengelolaan reversal tidak aktif.',
+      };
+    }
+    const labels = {
+      MONITORING: 'MONITORING',
+      RESCUE: 'RESCUE',
+      PROFIT_BANK: 'PROFIT BANK',
+      GRANDFATHERED: 'POSISI LAMA',
+    };
+    const management = reversal.grandfathered
+      ? 'Menunggu transisi arah'
+      : reversal.applyToExisting
+        ? 'Dikelola langsung'
+        : 'Dikelola setelah transisi';
+    let rescue = 'Siap saat syarat terpenuhi';
+    let summary = 'Posisi dipantau untuk reversal.';
+    if (reversal.rescueStatus === 'FILLED') {
+      rescue = 'Sudah terisi';
+      summary = 'Rescue sudah terisi dan posisi tetap dipantau.';
+    } else if (reversal.rescueStatus === 'PENDING') {
+      rescue = reversal.rescueOrder?.price > 0
+        ? `Menunggu di ${price(reversal.rescueOrder.price)} ${quote()}`
+        : 'Menunggu terisi';
+      summary = 'Order rescue sedang aktif.';
+    } else if (reversal.rescueStatus === 'WAITING_BUDGET') {
+      rescue = `Menunggu kuota ${state.positionSide}`;
+      summary = `Kuota rescue ${state.positionSide} sedang digunakan pair lain.`;
+    } else if (reversal.rescueStatus === 'WAITING_MINIMUM') {
+      rescue = 'Menunggu ukuran minimum';
+      summary = 'Kuota rescue belum cukup untuk memenuhi minimum order Binance.';
+    } else if (reversal.rescueStatus === 'USED') {
+      rescue = 'Menunggu sinkronisasi';
+      summary = 'Order rescue lama tidak aktif dan jatahnya sedang dipulihkan.';
+    } else if (reversal.grandfathered) {
+      summary = 'Posisi lama menunggu transisi arah sebelum rescue aktif.';
+    }
+    return {
+      label: labels[reversal.mode] || String(reversal.mode || 'MONITORING').replaceAll('_', ' '),
+      management,
+      rescue,
+      summary,
+    };
+  }
+
   function entryGateView(momentum) {
     const entrySide = isShort() ? 'SELL' : 'BUY';
     if (momentum.enabled === undefined) {
@@ -296,6 +346,7 @@
     byId('flow-map').dataset.running = String(Boolean(data.running));
     const execution = intel().execution || {};
     const momentum = intel().priceMomentum || {};
+    const reversal = reversalInventoryView(intel().reversalInventory || {});
     const signal = priceMomentumView(momentum);
     const range = data.range || {};
     const position = data.futures?.position;
@@ -321,7 +372,7 @@
     setNode('fibonacci', fibonacciAvailable ? 'positive' : 'accent', fibonacciAvailable ? 'SIAP' : 'MENUNGGU', fibonacciAvailable ? `${price(range.lower)}–${price(range.upper)}` : 'Range belum tersedia', 'Level grid final');
     setNode('supervisor', gate.tone, gate.status, signal.value, signal.reason);
     setNode('buy', entryView.tone, entryView.status, `${money(entryValue, 2)} ${quote()}`, entryView.meta);
-    setNode('position', position ? (num(data.profit?.unrealizedPnl) >= 0 ? 'positive' : 'negative') : 'accent', position ? `${state.positionSide} AKTIF` : 'TIDAK ADA POSISI', position ? compact(position.contracts) : '0', `PnL berjalan ${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`);
+    setNode('position', position ? (num(data.profit?.unrealizedPnl) >= 0 ? 'positive' : 'negative') : 'accent', position ? `${state.positionSide} AKTIF` : 'TIDAK ADA POSISI', position ? compact(position.contracts) : '0', position ? `${reversal.label} · PnL ${signed(data.profit?.unrealizedPnl, 4)} ${quote()}` : 'Reversal menunggu posisi');
     setNode('sell', coverage !== null && coverage !== undefined && coverage < 99.999 ? 'negative' : 'positive', `${exitCount} ORDER`, coverage == null ? 'Coverage N/A' : `Coverage ${percent(coverage, 0)}`, execution.uncovered > 0 ? `${compact(execution.uncovered)} kontrak belum tertutup` : 'Tidak ada posisi tanpa exit');
     setFlowNodeState('market', marketAvailable ? 'active' : 'waiting');
     setFlowNodeState('fibonacci', fibonacciAvailable ? 'active' : 'waiting');
@@ -342,6 +393,7 @@
     const adaptive = intel().adaptive || {};
     const execution = intel().execution || {};
     const momentum = intel().priceMomentum || {};
+    const reversal = reversalInventoryView(intel().reversalInventory || {});
     const momentumView = priceMomentumView(momentum);
     const gate = entryGateView(momentum);
     const position = data.futures?.position;
@@ -373,9 +425,9 @@
         details: [['Order aktif', entryCount], ['Nilai pending', `${money(entryValue, 4)} ${quote()}`], ['Jumlah level', num(execution.gridCount) || 'N/A'], ['Exposure pair', `${money(adaptive.allocatedInvestment, 4)} ${quote()}`], ['Cap pair', adaptive.symbolExposureCap > 0 ? `${money(adaptive.symbolExposureCap, 2)} ${quote()}` : 'N/A'], ['Sisi entry', entrySide]],
       },
       position: {
-        title: `Posisi ${state.positionSide}`, status: position ? 'AKTIF' : 'KOSONG', summary: position ? `Posisi ${state.positionSide} sedang terbuka.` : `Tidak ada posisi ${state.positionSide}.`,
-        tags: position ? [`${data.futures?.leverage || 0}x`] : [],
-        details: [['Kontrak', position ? compact(position.contracts) : '0'], ['Entry', position ? price(position.entryPrice) : 'N/A'], ['Mark', position ? price(position.markPrice) : 'N/A'], ['Likuidasi', position?.liquidationPrice > 0 ? price(position.liquidationPrice) : 'N/A'], ['PnL berjalan', `${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`]],
+        title: `Posisi ${state.positionSide}`, status: position ? 'AKTIF' : 'KOSONG', summary: position ? reversal.summary : `Tidak ada posisi ${state.positionSide}.`,
+        tags: position ? [`${data.futures?.leverage || 0}x`, reversal.label] : [],
+        details: [['Kontrak', position ? compact(position.contracts) : '0'], ['Entry', position ? price(position.entryPrice) : 'N/A'], ['Mark', position ? price(position.markPrice) : 'N/A'], ['Likuidasi', position?.liquidationPrice > 0 ? price(position.liquidationPrice) : 'N/A'], ['PnL berjalan', `${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`], ['Kelola reversal', reversal.management], ['Rescue', reversal.rescue]],
       },
       sell: {
         title: `Exit ${exitSide}`, status: !position ? 'TIDAK PERLU' : execution.uncovered > 0 ? 'PERLU CEK' : 'TERLINDUNGI',

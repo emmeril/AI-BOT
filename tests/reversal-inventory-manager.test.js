@@ -108,6 +108,7 @@ function reversalEngine(symState) {
   };
   engine.sendAlert = async () => {};
   engine.getMinCost = () => 5;
+  engine.getMinAmount = () => 0;
   engine.getQuoteAsset = () => 'USDT';
   return engine;
 }
@@ -150,7 +151,9 @@ test('an opposing transition places only one wallet-sized rescue', async () => {
   const placements = [];
   engine.placeReversalLimitOrder = async (...args) => {
     placements.push(args);
-    return { id: 'rescue-1', amount: args[4], price: args[3] };
+    const order = { id: 'rescue-1', amount: args[4], price: args[3] };
+    symState.orders[order.id] = { ...order, kind: 'REVERSAL_RESCUE' };
+    return order;
   };
   const input = {
     symbol: 'TEST/USDT:USDT',
@@ -171,7 +174,106 @@ test('an opposing transition places only one wallet-sized rescue', async () => {
   assert.equal(placements[0][3], 100);
   assert.equal(placements[0][5], 'REVERSAL_RESCUE');
   assert.ok(Math.abs(placements[0][4] - 0.25) < 1e-12);
-  assert.equal(symState.reversalInventory.rescueUsed, true);
+  assert.equal(symState.reversalInventory.rescueUsed, false);
+  assert.equal(symState.reversalInventory.rescueFilled, false);
+});
+
+test('an unfilled canceled rescue restores its slot and may be placed again', async () => {
+  const symState = {
+    orders: {},
+    lastBuyByLevel: {},
+    reversalInventory: {
+      initializedAt: '2026-10-20T00:00:00.000Z',
+      opposingSince: '2026-10-21T00:00:00.000Z',
+      mode: 'RESCUE', grandfathered: false,
+      rescueUsed: true, rescueFilled: false, rescueNotional: 20,
+    },
+  };
+  const engine = reversalEngine(symState);
+  let placements = 0;
+  engine.placeReversalLimitOrder = async (...args) => {
+    placements++;
+    const order = { id: 'rescue-retry', amount: args[4], price: args[3] };
+    symState.orders[order.id] = { ...order, kind: 'REVERSAL_RESCUE' };
+    return order;
+  };
+
+  await engine.manageReversalInventory({
+    symbol: 'TEST/USDT:USDT', symState,
+    priceMomentumDecision: { available: true, direction: 'BEARISH' },
+    currentPrice: 102, levels: [95, 100, 105],
+    balance: { free: { USDT: 10 }, total: { USDT: 100 } },
+    positions: [{ symbol: 'TEST/USDT:USDT', side: 'long', contracts: 1, unrealizedPnl: -2 }],
+    managedOrders: [], now: Date.parse('2026-10-21T00:05:00.000Z'),
+  });
+
+  assert.equal(placements, 1);
+  assert.equal(symState.reversalInventory.rescueUsed, false);
+  assert.equal(symState.reversalInventory.rescueFilled, false);
+  assert.equal(symState.reversalInventory.rescueOrderId, 'rescue-retry');
+  assert.ok(symState.reversalInventory.lastRescueResetAt);
+});
+
+test('an exhausted side rescue pool waits without placing a dust order', async () => {
+  const symState = {
+    orders: {}, lastBuyByLevel: {},
+    reversalInventory: {
+      initializedAt: '2026-10-20T00:00:00.000Z',
+      opposingSince: '2026-10-21T00:00:00.000Z',
+      mode: 'RESCUE', grandfathered: false, rescueUsed: false,
+    },
+  };
+  const engine = reversalEngine(symState);
+  engine.state.data = { symbols: {
+    TEST: symState,
+    OTHER: { reversalInventory: { rescueFilled: true, rescueNotional: 25 } },
+  } };
+  let placements = 0;
+  engine.placeReversalLimitOrder = async () => { placements++; };
+
+  await engine.manageReversalInventory({
+    symbol: 'TEST', symState,
+    priceMomentumDecision: { available: true, direction: 'BEARISH' },
+    currentPrice: 102, levels: [95, 100, 105],
+    balance: { free: { USDT: 10 }, total: { USDT: 100 } },
+    positions: [{ symbol: 'TEST', side: 'long', contracts: 1, unrealizedPnl: -2 }],
+    managedOrders: [], now: Date.parse('2026-10-21T00:05:00.000Z'),
+  });
+
+  assert.equal(placements, 0);
+  assert.equal(symState.reversalInventory.rescueWaitReason, 'SIDE_BUDGET_EXHAUSTED');
+});
+
+test('a residual side budget below exchange minimum waits without placing an order', async () => {
+  const symState = {
+    orders: {}, lastBuyByLevel: {},
+    reversalInventory: {
+      initializedAt: '2026-10-20T00:00:00.000Z',
+      opposingSince: '2026-10-21T00:00:00.000Z',
+      mode: 'RESCUE', grandfathered: false, rescueUsed: false,
+    },
+  };
+  const engine = reversalEngine(symState);
+  engine.getMinCost = () => 0;
+  engine.getMinAmount = () => 1;
+  engine.state.data = { symbols: {
+    TEST: symState,
+    OTHER: { reversalInventory: { rescueFilled: true, rescueNotional: 24.95 } },
+  } };
+  let placements = 0;
+  engine.placeReversalLimitOrder = async () => { placements++; };
+
+  await engine.manageReversalInventory({
+    symbol: 'TEST', symState,
+    priceMomentumDecision: { available: true, direction: 'BEARISH' },
+    currentPrice: 102, levels: [95, 100, 105],
+    balance: { free: { USDT: 10 }, total: { USDT: 100 } },
+    positions: [{ symbol: 'TEST', side: 'long', contracts: 1, unrealizedPnl: -2 }],
+    managedOrders: [], now: Date.parse('2026-10-21T00:05:00.000Z'),
+  });
+
+  assert.equal(placements, 0);
+  assert.equal(symState.reversalInventory.rescueWaitReason, 'SIDE_BUDGET_EXHAUSTED');
 });
 
 test('rescue budget is pooled across all pairs on the same worker side', () => {
@@ -207,11 +309,11 @@ test('stale opposing inventory places a profit-funded partial Fibonacci exit', a
   };
   const engine = reversalEngine(symState);
   let cancelled = false;
-  let placement;
+  const placements = [];
   engine.cancelReversalOrder = async () => false;
   engine.cancelOrdersForProfitBankExit = async () => { cancelled = true; };
   engine.placeReversalLimitOrder = async (...args) => {
-    placement = args;
+    placements.push(args);
     return { id: 'bank-1', amount: args[4], price: args[3] };
   };
   engine.exchange = { amountToPrecision: (_symbol, amount) => amount.toFixed(4) };
@@ -228,8 +330,10 @@ test('stale opposing inventory places a profit-funded partial Fibonacci exit', a
     now: Date.parse('2026-10-21T01:00:00.000Z'),
   });
 
+  const placement = placements[0];
   assert.equal(cancelled, true);
   assert.equal(result.exclusive, true);
+  assert.equal(placements.length, 1);
   assert.equal(placement[2], 2);
   assert.equal(placement[3], 105);
   assert.equal(placement[5], 'REVERSAL_BANK_EXIT');

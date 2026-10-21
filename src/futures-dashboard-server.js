@@ -284,6 +284,62 @@ function priceMomentumFromState(symState, positionSide) {
   };
 }
 
+function reversalInventoryFromState(symState, orders, positionSide) {
+  const side = String(positionSide || 'LONG').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+  const prefix = side === 'SHORT' ? 'SHORT_' : '';
+  const persisted = symState?.reversalInventory || {};
+  const enabled = booleanValue(
+    process.env[`${prefix}REVERSAL_INVENTORY_ENABLED`],
+    Boolean(persisted.initializedAt)
+  );
+  const applyToExisting = booleanValue(
+    process.env[`${prefix}REVERSAL_APPLY_TO_EXISTING_POSITIONS`],
+    false
+  );
+  const rescueStateOrder = Object.entries(symState?.orders || {})
+    .find(([, order]) => order?.kind === 'REVERSAL_RESCUE');
+  const rescueOrder = rescueStateOrder
+    ? orders.find(order => String(order.id) === String(rescueStateOrder[0])) || null
+    : null;
+  const rescueFilled = Boolean(persisted.rescueFilled);
+  const rescueUsed = Boolean(persisted.rescueUsed);
+  const rescueWaitReason = persisted.rescueWaitReason || null;
+  const rescueStatus = !enabled
+    ? 'DISABLED'
+    : rescueFilled
+      ? 'FILLED'
+      : rescueOrder
+        ? 'PENDING'
+        : rescueWaitReason === 'SIDE_BUDGET_EXHAUSTED'
+          ? 'WAITING_BUDGET'
+          : rescueWaitReason === 'BELOW_MINIMUM_ORDER'
+            ? 'WAITING_MINIMUM'
+            : rescueUsed
+              ? 'USED'
+              : 'READY';
+
+  return {
+    enabled,
+    positionSide: side,
+    mode: enabled ? String(persisted.mode || 'MONITORING').toUpperCase() : 'DISABLED',
+    applyToExisting,
+    grandfathered: enabled && Boolean(persisted.grandfathered),
+    rescueUsed,
+    rescueFilled,
+    rescueStatus,
+    rescueWaitReason,
+    rescueNotional: numberOrZero(persisted.rescueNotional),
+    rescuePlacedAt: persisted.rescuePlacedAt || null,
+    opposingSince: persisted.opposingSince || null,
+    rescueOrder: rescueOrder ? {
+      side: rescueOrder.side,
+      price: numberOrZero(rescueOrder.price),
+      amount: numberOrZero(rescueOrder.amount),
+      remaining: numberOrZero(rescueOrder.remaining),
+    } : null,
+  };
+}
+
 function decisionSnapshot(engine, symbol, symState, orders, position, options = {}) {
   const positionSide = String(options.positionSide || 'LONG').toUpperCase();
   const entrySide = positionSide === 'SHORT' ? 'sell' : 'buy';
@@ -348,6 +404,7 @@ function decisionSnapshot(engine, symbol, symState, orders, position, options = 
   const volumeDelta = volumeDeltaFromState(symState, positionSide);
   const emaTrend = emaTrendFromState(symState, positionSide);
   const priceMomentum = priceMomentumFromState(symState, positionSide);
+  const reversalInventory = reversalInventoryFromState(symState, orders, positionSide);
 
   return {
     fibonacci: {
@@ -408,6 +465,7 @@ function decisionSnapshot(engine, symbol, symState, orders, position, options = 
     volumeDelta,
     emaTrend,
     priceMomentum,
+    reversalInventory,
     execution: {
       gridCount: numberOrZero(symState?.config?.count || process.env.GRID_COUNT),
       buyCount: orders.filter(order => order.side === 'buy').length,
