@@ -4,6 +4,7 @@
   const POSITION_SIDE = 'LONG';
   const state = { data: null, activeNode: 'supervisor', timer: null, controller: null, requestId: 0, loading: true, refreshSpinTimer: null, flowLayoutFrame: null, motionPreference: 'on' };
   const MOTION_STORAGE_KEY = 'grid-flow-motion';
+  const SYMBOL_STORAGE_KEY = 'grid-flow-futures-symbol';
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   const FLOW_EDGES = [
     ['market', 'fibonacci'], ['fibonacci', 'supervisor'],
@@ -100,6 +101,15 @@
       const value = localStorage.getItem(MOTION_STORAGE_KEY);
       return ['on', 'system', 'off'].includes(value) ? value : 'on';
     } catch { return 'on'; }
+  }
+  function savedSelectedSymbol() {
+    try { return localStorage.getItem(SYMBOL_STORAGE_KEY) || ''; } catch { return ''; }
+  }
+  function persistSelectedSymbol(symbol) {
+    try {
+      if (symbol) localStorage.setItem(SYMBOL_STORAGE_KEY, symbol);
+      else localStorage.removeItem(SYMBOL_STORAGE_KEY);
+    } catch {}
   }
   function applyMotionPreference(value, { persist = false } = {}) {
     const preference = ['on', 'system', 'off'].includes(value) ? value : 'on';
@@ -265,45 +275,66 @@
     return { label: 'Menunggu', tone: '' };
   }
 
+  function allocationPairCard(symbol, budget) {
+    const article = document.createElement('article');
+    article.className = 'allocation-pair';
+    article.setAttribute('aria-label', `Alokasi LONG ${symbol}`);
+
+    const head = document.createElement('div'); head.className = 'allocation-pair-head';
+    const identity = document.createElement('div');
+    const indexLabel = document.createElement('span'); indexLabel.textContent = 'PAIR TERPILIH';
+    const title = document.createElement('strong'); title.textContent = symbol;
+    identity.append(indexLabel, title);
+    const status = document.createElement('span'); status.className = `allocation-state ${budget.status.tone}`.trim(); status.textContent = budget.status.label;
+    head.append(identity, status);
+
+    const values = document.createElement('dl'); values.className = 'allocation-pair-budget';
+    for (const [label, share, cap] of [
+      ['Grid LONG', budget.gridPct, budget.gridCap],
+      ['Rescue', budget.rescuePct, budget.rescueCap],
+    ]) {
+      const row = document.createElement('div');
+      const term = document.createElement('dt'); term.textContent = label;
+      const description = document.createElement('dd');
+      const percentValue = document.createElement('strong'); percentValue.textContent = percent(share, 2);
+      const capValue = document.createElement('small'); capValue.textContent = cap > 0 ? `Cap ${money(cap, 2)} ${quote()}` : 'Tidak dicadangkan';
+      description.append(percentValue, capValue); row.append(term, description); values.append(row);
+    }
+    article.append(head, values);
+    return article;
+  }
+
   function renderAllocation() {
     const allocation = state.data.exposureAllocation || {};
     const longPct = clamp(num(allocation.longPct ?? allocation.LONG?.sidePct), 0, 100);
-    const rescuePct = clamp(num(allocation.rescuePct ?? allocation.rescue?.totalPct), 0, 100);
     const bufferPct = clamp(num(allocation.bufferPct), 0, 100);
     const longBudget = allocation.LONG || {};
     const longRescue = allocation.rescue?.LONG || {};
-    const track = byId('allocation-track');
-    const segments = track.querySelectorAll('span');
-    segments[0].style.width = `${longPct}%`;
-    segments[1].style.width = `${rescuePct}%`;
-    segments[2].style.width = `${bufferPct}%`;
-    track.setAttribute(
-      'aria-label',
-      `Alokasi entry LONG ${money(longPct, 0)} persen, rescue LONG ${money(rescuePct, 0)} persen, ` +
-      `buffer ${money(bufferPct, 1)} persen`
-    );
+    const pairCount = Math.max(0, Math.trunc(num(longBudget.pairCount)));
+    const gridPerPairPct = pairCount > 0 ? longPct / pairCount : 0;
+    const rescuePerPairPct = pairCount > 0 ? longRescue.marginPct / pairCount : 0;
     text('allocation-mode', allocation.enabled ? 'LONG ONLY' : 'NONAKTIF');
-    text('allocation-long-pct', `ENTRY LONG ${percent(longPct, 0)}`);
-    text('allocation-rescue-pct', `RESCUE ${percent(rescuePct, 0)}`);
-    text('allocation-buffer-pct', `BUFFER ${percent(bufferPct, 0)}`);
+    text('allocation-buffer-pct', percent(bufferPct, 0));
+    text('allocation-copy', pairCount > 0
+      ? `Pair terpilih mendapat ${percent(gridPerPairPct, 2)} margin grid + ${percent(rescuePerPairPct, 2)} margin rescue. Pembagian dihitung dari ${pairCount} pair; cap USDT sudah termasuk leverage.`
+      : 'Menunggu pair dan pembagian modal.');
     text('allocation-wallet', `${money(allocation.walletBalance, 2)} ${quote()}`);
     text('allocation-leverage', `${money(allocation.leverage, 0)}x`);
-    text('allocation-pair-count', longBudget.pairCount > 0 ? `${money(longBudget.pairCount, 0)} pair` : 'N/A');
-    text('allocation-long-rescue', longRescue.active
-      ? `${percent(longRescue.marginPct, 0)} margin · ${money(longRescue.symbolCap, 2)} ${quote()}`
-      : 'Tidak dicadangkan');
+    text('allocation-pair-count', pairCount > 0 ? `${pairCount} pair` : 'N/A');
     const view = allocationStatusView(longBudget);
-    const status = byId('long-allocation-status');
-    status.className = `allocation-state ${view.tone}`.trim();
-    text('long-allocation-status', view.label);
-    text('long-allocation-cap', longBudget.available
-      ? longBudget.entryGridEnabled === false
-        ? `Entry 0 ${quote()}`
-        : `Cap entry ${money(longBudget.sideCap, 2)} ${quote()}`
-      : 'Cap aktif N/A');
-    text('long-allocation-meta', longBudget.available
-      ? `Exposure ${money(longBudget.currentExposure, 2)} · ${money(longBudget.symbolCap, 2)} ${quote()} per pair`
-      : 'Data belum tersedia');
+    const list = byId('allocation-pair-list');
+    list.replaceChildren();
+    const symbol = state.data.selectedSymbol;
+    if (!symbol) {
+      const empty = document.createElement('div'); empty.className = 'allocation-empty'; empty.textContent = 'Belum ada pair LONG yang dipilih.'; list.append(empty); return;
+    }
+    list.append(allocationPairCard(symbol, {
+      status: view,
+      gridPct: gridPerPairPct,
+      gridCap: longBudget.entryGridEnabled === false ? 0 : num(longBudget.symbolCap),
+      rescuePct: longRescue.active ? rescuePerPairPct : 0,
+      rescueCap: longRescue.active ? num(longRescue.symbolCap) : 0,
+    }));
   }
 
   function renderOverview() {
@@ -549,14 +580,14 @@
       const response = await fetch(`/api/dashboard?${query.toString()}`, { signal: state.controller.signal, cache: 'no-store' });
       if (response.status === 401) { window.location.assign('/login'); return; }
       if (!response.ok) throw new Error('Binance atau bot belum memberikan snapshot dashboard.');
-      const data = await response.json(); if (requestId !== state.requestId) return; state.data = data; renderSymbols(data.symbols || [], data.selectedSymbol); setLoading(false); render(); state.timer = setTimeout(() => load(), Math.max(2, num(data.refreshSeconds) || 5) * 1000);
+      const data = await response.json(); if (requestId !== state.requestId) return; state.data = data; renderSymbols(data.symbols || [], data.selectedSymbol); persistSelectedSymbol(data.selectedSymbol); setLoading(false); render(); state.timer = setTimeout(() => load(), Math.max(2, num(data.refreshSeconds) || 5) * 1000);
     } catch (error) {
       if (error.name === 'AbortError') return; setLoading(false); text('error-text', error.message || 'Data dashboard tidak tersedia.'); byId('error-notice').hidden = false; text('status-text', 'Offline · mencoba lagi'); byId('status-mark').dataset.state = 'error'; state.timer = setTimeout(() => load(), 5000);
     }
   }
   function bindEvents() {
     document.querySelectorAll('.flow-node').forEach(node => node.addEventListener('click', () => { state.activeNode = node.dataset.node; if (state.data) renderInspector(); }));
-    byId('symbol-select').addEventListener('change', event => load({ symbol: event.target.value, announced: true })); byId('refresh-button').addEventListener('click', () => { spinRefreshButton(); load({ announced: true }); }); byId('retry-button').addEventListener('click', () => load({ announced: true }));
+    byId('symbol-select').addEventListener('change', event => { persistSelectedSymbol(event.target.value); load({ symbol: event.target.value, announced: true }); }); byId('refresh-button').addEventListener('click', () => { spinRefreshButton(); load({ announced: true }); }); byId('retry-button').addEventListener('click', () => load({ announced: true }));
     byId('motion-select').addEventListener('change', event => applyMotionPreference(event.target.value, { persist: true }));
     reducedMotion.addEventListener?.('change', () => { if (state.motionPreference === 'system') applyMotionPreference('system'); });
     let resizeTimer; window.addEventListener('resize', () => { queueFlowLayout(); clearTimeout(resizeTimer); resizeTimer = setTimeout(drawChart, 100); });
@@ -568,5 +599,5 @@
     document.fonts?.ready.then(queueFlowLayout);
     queueFlowLayout();
   }
-  applyMotionPreference(savedMotionPreference()); bindEvents(); load();
+  applyMotionPreference(savedMotionPreference()); bindEvents(); load({ symbol: savedSelectedSymbol() });
 })();

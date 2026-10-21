@@ -8,15 +8,14 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/fontawesome/css/fontawesome.min.css?v=7.3.1">
   <link rel="stylesheet" href="/fontawesome/css/solid.min.css?v=7.3.1">
-  <link rel="stylesheet" href="/dashboard.css?v=20261021.2">
-  <script defer src="/dashboard.js?v=20261021.2"></script>
+  <link rel="stylesheet" href="/dashboard.css?v=20261021.7">
+  <script defer src="/dashboard.js?v=20261021.7"></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Lewati ke dashboard</a>
   <div class="app-shell" id="app" aria-busy="true">
     <header class="topbar">
       <div class="brand"><div class="brand-mark" aria-hidden="true">GF</div><div><p class="brand-kicker" id="source-label">Binance</p><h1>Grid Flow Control</h1></div></div>
-      <div class="position-mode" aria-label="Mode posisi LONG only"><span>LONG ONLY</span><small>BUY → SELL</small></div>
       <div class="top-actions">
         <label class="sr-only" for="symbol-select">Pilih pair</label>
         <select class="pair-select mono" id="symbol-select" aria-label="Pilih pair trading"></select>
@@ -39,21 +38,15 @@
       </section>
 
       <section class="panel allocation-panel" aria-labelledby="allocation-title">
-        <div class="panel-head allocation-head"><div><p class="eyebrow">Alokasi</p><h2 class="panel-title" id="allocation-title">Entry LONG / Rescue / Buffer</h2><p class="panel-copy">Modal LONG dibagi otomatis ke semua pair aktif berdasarkan saldo dan leverage.</p></div><span class="status-code" id="allocation-mode">Menunggu</span></div>
+        <div class="panel-head allocation-head"><div><p class="eyebrow">Alokasi</p><h2 class="panel-title" id="allocation-title">Modal LONG pair terpilih</h2><p class="panel-copy" id="allocation-copy">Menunggu pair dan pembagian modal.</p></div><span class="status-code" id="allocation-mode">Menunggu</span></div>
         <div class="allocation-body">
-          <div class="allocation-plan">
-            <div class="allocation-ratios" aria-hidden="true"><span id="allocation-long-pct">ENTRY LONG N/A</span><span id="allocation-rescue-pct">RESCUE N/A</span><span id="allocation-buffer-pct">BUFFER N/A</span></div>
-            <div class="allocation-track" id="allocation-track" role="img" aria-label="Komposisi alokasi LONG belum tersedia"><span class="allocation-long"></span><span class="allocation-rescue"></span><span class="allocation-buffer"></span></div>
-          </div>
-          <div class="allocation-sides">
-            <article class="allocation-side"><div><strong class="positive">LONG</strong><span class="allocation-state" id="long-allocation-status">Menunggu</span></div><p id="long-allocation-cap">Cap aktif N/A</p><small id="long-allocation-meta">Target dan evaluasi belum tersedia</small></article>
-          </div>
           <dl class="allocation-meta">
             <div><dt>Saldo</dt><dd id="allocation-wallet">N/A</dd></div>
             <div><dt>Leverage</dt><dd id="allocation-leverage">N/A</dd></div>
-            <div><dt>Pair aktif</dt><dd id="allocation-pair-count">N/A</dd></div>
-            <div><dt>Rescue LONG / pair</dt><dd id="allocation-long-rescue">N/A</dd></div>
+            <div><dt>Total pair</dt><dd id="allocation-pair-count">N/A</dd></div>
+            <div><dt>Sisa margin</dt><dd id="allocation-buffer-pct">N/A</dd></div>
           </dl>
+          <div class="allocation-pair-list" id="allocation-pair-list" aria-live="polite"><div class="allocation-empty">Memuat alokasi pair terpilih.</div></div>
         </div>
       </section>
 
