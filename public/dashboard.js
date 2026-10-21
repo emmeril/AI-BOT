@@ -1,7 +1,8 @@
 (() => {
   'use strict';
 
-  const state = { data: null, positionSide: 'LONG', activeNode: 'supervisor', timer: null, controller: null, requestId: 0, loading: true, refreshSpinTimer: null, flowLayoutFrame: null, motionPreference: 'on' };
+  const POSITION_SIDE = 'LONG';
+  const state = { data: null, activeNode: 'supervisor', timer: null, controller: null, requestId: 0, loading: true, refreshSpinTimer: null, flowLayoutFrame: null, motionPreference: 'on' };
   const MOTION_STORAGE_KEY = 'grid-flow-motion';
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   const FLOW_EDGES = [
@@ -14,7 +15,6 @@
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
   const intel = () => state.data?.intelligence || {};
   const quote = () => state.data?.profit?.quoteAsset || 'USDT';
-  const isShort = () => state.positionSide === 'SHORT';
 
   function text(id, value) { const element = byId(id); if (element) element.textContent = value; }
   function money(value, digits = 4) {
@@ -110,7 +110,7 @@
     if (persist) { try { localStorage.setItem(MOTION_STORAGE_KEY, preference); } catch {} }
   }
   function priceMomentumView(momentum) {
-    const side = String(momentum.positionSide || state.positionSide).toUpperCase();
+    const side = String(momentum.positionSide || POSITION_SIDE).toUpperCase();
     const windowHours = num(momentum.windowMinutes) / 60;
     const label = windowHours > 0 ? `Momentum ${money(windowHours, 0)}J` : 'Momentum';
     if (!momentum.enabled) return { label, status: 'MENUNGGU', tone: '', value: 'Belum aktif', reason: 'Data strategi belum tersedia.' };
@@ -189,7 +189,7 @@
   }
 
   function entryGateView(momentum) {
-    const entrySide = isShort() ? 'SELL' : 'BUY';
+    const entrySide = 'BUY';
     if (momentum.enabled === undefined) {
       return {
         allowed: false, available: false, blocked: false, entrySide,
@@ -244,29 +244,13 @@
     };
   }
 
-  function renderPositionTabs() {
-    document.querySelectorAll('.position-tab').forEach(tab => {
-      const selected = tab.dataset.positionSide === state.positionSide;
-      tab.setAttribute('aria-selected', String(selected));
-      tab.tabIndex = selected ? 0 : -1;
-    });
-    byId('position-detail').setAttribute('aria-labelledby', `${state.positionSide.toLowerCase()}-tab`);
-  }
-
   function renderComparison() {
     const comparison = state.data.comparison || {};
-    const combined = comparison.combined || {};
-    text('combined-exposure', `${money(combined.exposure, 2)} ${quote()}`);
-    text('combined-pnl', `${signed(combined.strategyPnl, 4)} ${quote()}`);
-    pnlTone(byId('combined-pnl'), combined.strategyPnl);
-    for (const side of ['LONG', 'SHORT']) {
-      const metrics = comparison[side] || {};
-      const prefix = side.toLowerCase();
-      text(`${prefix}-exposure`, metrics.available ? `${money(metrics.exposure, 2)} ${quote()}` : 'Tidak dikelola');
-      text(`${prefix}-pnl`, metrics.available ? `${signed(metrics.strategyPnl, 4)} ${quote()}` : 'N/A');
-      text(`${prefix}-runtime`, !metrics.available ? 'Pair tidak aktif' : metrics.running ? 'Bot online' : 'Bot offline');
-      pnlTone(byId(`${prefix}-pnl`), metrics.available ? metrics.strategyPnl : null);
-    }
+    const metrics = comparison.LONG || {};
+    text('long-exposure', metrics.available ? `${money(metrics.exposure, 2)} ${quote()}` : 'Tidak dikelola');
+    text('long-pnl', metrics.available ? `${signed(metrics.strategyPnl, 4)} ${quote()}` : 'N/A');
+    text('long-runtime', !metrics.available ? 'Pair tidak aktif' : metrics.running ? 'Bot online' : 'Bot offline');
+    pnlTone(byId('long-pnl'), metrics.available ? metrics.strategyPnl : null);
   }
 
   function allocationStatusView(budget) {
@@ -284,53 +268,42 @@
   function renderAllocation() {
     const allocation = state.data.exposureAllocation || {};
     const longPct = clamp(num(allocation.longPct ?? allocation.LONG?.sidePct), 0, 100);
-    const shortPct = clamp(num(allocation.shortPct ?? allocation.SHORT?.sidePct), 0, 100);
-    const legacyPct = clamp(num(allocation.legacyPct), 0, 100);
     const rescuePct = clamp(num(allocation.rescuePct ?? allocation.rescue?.totalPct), 0, 100);
     const bufferPct = clamp(num(allocation.bufferPct), 0, 100);
+    const longBudget = allocation.LONG || {};
+    const longRescue = allocation.rescue?.LONG || {};
     const track = byId('allocation-track');
     const segments = track.querySelectorAll('span');
     segments[0].style.width = `${longPct}%`;
-    segments[1].style.width = `${legacyPct}%`;
-    segments[2].style.width = `${rescuePct}%`;
-    segments[3].style.width = `${bufferPct}%`;
+    segments[1].style.width = `${rescuePct}%`;
+    segments[2].style.width = `${bufferPct}%`;
     track.setAttribute(
       'aria-label',
-      `Alokasi entry LONG ${money(longPct, 0)} persen, entry SHORT ${money(shortPct, 0)} persen, ` +
-      `posisi lama ${money(legacyPct, 1)} persen, rescue ${money(rescuePct, 0)} persen, ` +
+      `Alokasi entry LONG ${money(longPct, 0)} persen, rescue LONG ${money(rescuePct, 0)} persen, ` +
       `buffer ${money(bufferPct, 1)} persen`
     );
-    const longOnly = allocation.LONG?.entryGridEnabled !== false && allocation.SHORT?.entryGridEnabled === false;
-    text('allocation-mode', allocation.enabled ? (longOnly ? 'LONG ONLY' : 'AKTIF') : 'NONAKTIF');
-    text('allocation-long-pct', `LONG ${percent(longPct, 0)}`);
-    text('allocation-short-pct', `SHORT LAMA ${percent(legacyPct, 1)}`);
+    text('allocation-mode', allocation.enabled ? 'LONG ONLY' : 'NONAKTIF');
+    text('allocation-long-pct', `ENTRY LONG ${percent(longPct, 0)}`);
     text('allocation-rescue-pct', `RESCUE ${percent(rescuePct, 0)}`);
     text('allocation-buffer-pct', `BUFFER ${percent(bufferPct, 0)}`);
     text('allocation-wallet', `${money(allocation.walletBalance, 2)} ${quote()}`);
     text('allocation-leverage', `${money(allocation.leverage, 0)}x`);
-    for (const side of ['LONG', 'SHORT']) {
-      const rescue = allocation.rescue?.[side] || {};
-      const value = rescue.active
-        ? `${percent(rescue.marginPct, 0)} margin · ${money(rescue.symbolCap, 2)} ${quote()}`
-        : 'Tidak dicadangkan';
-      text(`allocation-${side.toLowerCase()}-rescue`, value);
-    }
-    for (const side of ['LONG', 'SHORT']) {
-      const budget = allocation[side] || {};
-      const prefix = side.toLowerCase();
-      const view = allocationStatusView(budget);
-      const status = byId(`${prefix}-allocation-status`);
-      status.className = `allocation-state ${view.tone}`.trim();
-      text(`${prefix}-allocation-status`, view.label);
-      text(`${prefix}-allocation-cap`, budget.available
-        ? budget.entryGridEnabled === false
-          ? `Entry 0 ${quote()}`
-          : `Cap entry ${money(budget.sideCap, 2)} ${quote()}`
-        : 'Cap aktif N/A');
-      text(`${prefix}-allocation-meta`, budget.available
-        ? `Exposure ${money(budget.currentExposure, 2)} · target ${money(budget.targetSideCap, 2)} ${quote()}`
-        : 'Data belum tersedia');
-    }
+    text('allocation-pair-count', longBudget.pairCount > 0 ? `${money(longBudget.pairCount, 0)} pair` : 'N/A');
+    text('allocation-long-rescue', longRescue.active
+      ? `${percent(longRescue.marginPct, 0)} margin · ${money(longRescue.symbolCap, 2)} ${quote()}`
+      : 'Tidak dicadangkan');
+    const view = allocationStatusView(longBudget);
+    const status = byId('long-allocation-status');
+    status.className = `allocation-state ${view.tone}`.trim();
+    text('long-allocation-status', view.label);
+    text('long-allocation-cap', longBudget.available
+      ? longBudget.entryGridEnabled === false
+        ? `Entry 0 ${quote()}`
+        : `Cap entry ${money(longBudget.sideCap, 2)} ${quote()}`
+      : 'Cap aktif N/A');
+    text('long-allocation-meta', longBudget.available
+      ? `Exposure ${money(longBudget.currentExposure, 2)} · ${money(longBudget.symbolCap, 2)} ${quote()} per pair`
+      : 'Data belum tersedia');
   }
 
   function renderOverview() {
@@ -340,7 +313,7 @@
     const signal = priceMomentumView(momentum);
     const gate = entryGateView(momentum);
     text('source-label', data.source || 'Binance');
-    text('overview-title', `${data.selectedSymbol || 'Pair belum dipilih'} · ${state.positionSide}`);
+    text('overview-title', `${data.selectedSymbol || 'Pair belum dipilih'} · ${POSITION_SIDE}`);
     text('overview-copy', gate.summary);
     text('market-price', `${data.market?.priceText || price(data.market?.price)} ${quote()}`);
     text('market-change', `24 jam: ${signed(data.market?.changePercent, 2)}%`);
@@ -353,7 +326,7 @@
     text('exposure-note', adaptive.investmentCap > 0
       ? `${money(adaptive.allocatedInvestment, 2)} / ${money(adaptive.investmentCap, 2)} ${quote()}`
       : 'Batas exposure belum tersedia');
-    text('pnl-label', `PnL ${data.selectedSymbol || 'pair'} ${state.positionSide}`);
+    text('pnl-label', `PnL ${data.selectedSymbol || 'pair'} ${POSITION_SIDE}`);
     text('net-pnl', `${signed(data.profit?.net, 4)} ${quote()}`);
     pnlTone(byId('net-pnl'), data.profit?.net);
   }
@@ -368,8 +341,8 @@
     const range = data.range || {};
     const position = data.futures?.position;
     const coverage = execution.exitCoveragePct ?? execution.sellCoveragePct;
-    const entrySide = isShort() ? 'SELL' : 'BUY';
-    const exitSide = isShort() ? 'BUY' : 'SELL';
+    const entrySide = 'BUY';
+    const exitSide = 'SELL';
     const entryCount = num(execution.entryCount ?? data.orders?.[`${entrySide.toLowerCase()}Count`]);
     const exitCount = num(execution.exitCount ?? data.orders?.[`${exitSide.toLowerCase()}Count`]);
     const entryValue = num(data.orders?.[`${entrySide.toLowerCase()}Value`]);
@@ -381,15 +354,15 @@
     const exitAvailable = Boolean(positionAvailable && !exitNeedsAttention && coverage !== null && coverage !== undefined && num(coverage) >= 99.999);
     const entryView = entryOrderView(gate, entryCount, entrySide);
     text('flow-title', `Harga ke exit ${exitSide}`);
-    text('supervisor-node-title', `Entry ${state.positionSide}`);
+    text('supervisor-node-title', `Entry ${POSITION_SIDE}`);
     text('entry-node-title', `Grid ${entrySide}`);
-    text('position-node-title', state.positionSide);
+    text('position-node-title', POSITION_SIDE);
     text('exit-node-title', `Exit ${exitSide}`);
     setNode('market', 'accent', String(data.mode || 'LIVE').toUpperCase(), `${data.market?.priceText || price(data.market?.price)} ${quote()}`, `${signed(data.market?.changePercent, 2)}% dalam 24 jam`);
     setNode('fibonacci', fibonacciAvailable ? 'positive' : 'accent', fibonacciAvailable ? 'SIAP' : 'MENUNGGU', fibonacciAvailable ? `${price(range.lower)}–${price(range.upper)}` : 'Range belum tersedia', 'Level grid final');
     setNode('supervisor', gate.tone, gate.status, signal.value, signal.reason);
     setNode('buy', entryView.tone, entryView.status, `${money(entryValue, 2)} ${quote()}`, entryView.meta);
-    setNode('position', position ? (num(data.profit?.unrealizedPnl) >= 0 ? 'positive' : 'negative') : 'accent', position ? `${state.positionSide} AKTIF` : 'TIDAK ADA POSISI', position ? compact(position.contracts) : '0', position ? `${reversal.label} · PnL ${signed(data.profit?.unrealizedPnl, 4)} ${quote()}` : 'Reversal menunggu posisi');
+    setNode('position', position ? (num(data.profit?.unrealizedPnl) >= 0 ? 'positive' : 'negative') : 'accent', position ? `${POSITION_SIDE} AKTIF` : 'TIDAK ADA POSISI', position ? compact(position.contracts) : '0', position ? `${reversal.label} · PnL ${signed(data.profit?.unrealizedPnl, 4)} ${quote()}` : 'Reversal menunggu posisi');
     setNode('sell', coverage !== null && coverage !== undefined && coverage < 99.999 ? 'negative' : 'positive', `${exitCount} ORDER`, coverage == null ? 'Coverage N/A' : `Coverage ${percent(coverage, 0)}`, execution.uncovered > 0 ? `${compact(execution.uncovered)} kontrak belum tertutup` : 'Tidak ada posisi tanpa exit');
     setFlowNodeState('market', marketAvailable ? 'active' : 'waiting');
     setFlowNodeState('fibonacci', fibonacciAvailable ? 'active' : 'waiting');
@@ -414,8 +387,8 @@
     const momentumView = priceMomentumView(momentum);
     const gate = entryGateView(momentum);
     const position = data.futures?.position;
-    const entrySide = isShort() ? 'SELL' : 'BUY';
-    const exitSide = isShort() ? 'BUY' : 'SELL';
+    const entrySide = 'BUY';
+    const exitSide = 'SELL';
     const entryCount = num(execution.entryCount ?? data.orders?.[`${entrySide.toLowerCase()}Count`]);
     const exitCount = num(execution.exitCount ?? data.orders?.[`${exitSide.toLowerCase()}Count`]);
     const entryValue = num(data.orders?.[`${entrySide.toLowerCase()}Value`]);
@@ -433,7 +406,7 @@
         details: [['Batas bawah', rangeReady ? `${price(data.range.lower)} ${quote()}` : 'N/A'], ['Batas atas', rangeReady ? `${price(data.range.upper)} ${quote()}` : 'N/A']],
       },
       supervisor: {
-        title: `Entry ${state.positionSide}`, status: gate.status, summary: gate.summary,
+        title: `Entry ${POSITION_SIDE}`, status: gate.status, summary: gate.summary,
         tags: momentum.available ? [momentumView.value] : [],
         details: [['Momentum 12J', momentumView.value], ['Arah', momentum.direction || 'N/A'], ['Candle', momentum.enabled ? time(momentum.candleTimestamp) : 'N/A'], ['Keputusan', gate.status]],
       },
@@ -442,7 +415,7 @@
         details: [['Order aktif', entryCount], ['Nilai pending', `${money(entryValue, 4)} ${quote()}`], ['Jumlah level', num(execution.gridCount) || 'N/A'], ['Exposure pair', `${money(adaptive.allocatedInvestment, 4)} ${quote()}`], ['Cap pair', adaptive.symbolExposureCap > 0 ? `${money(adaptive.symbolExposureCap, 2)} ${quote()}` : 'N/A'], ['Sisi entry', entrySide]],
       },
       position: {
-        title: `Posisi ${state.positionSide}`, status: position ? 'AKTIF' : 'KOSONG', summary: position ? reversal.summary : `Tidak ada posisi ${state.positionSide}.`,
+        title: `Posisi ${POSITION_SIDE}`, status: position ? 'AKTIF' : 'KOSONG', summary: position ? reversal.summary : `Tidak ada posisi ${POSITION_SIDE}.`,
         tags: position ? [`${data.futures?.leverage || 0}x`, reversal.label] : [],
         details: [['Kontrak', position ? compact(position.contracts) : '0'], ['Entry', position ? price(position.entryPrice) : 'N/A'], ['Mark', position ? price(position.markPrice) : 'N/A'], ['Likuidasi', position?.liquidationPrice > 0 ? price(position.liquidationPrice) : 'N/A'], ['PnL berjalan', `${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`], ['Kelola reversal', reversal.management], ['Rescue', reversal.rescue]],
       },
@@ -474,8 +447,8 @@
   }
   function renderLedger() {
     const profit = state.data.profit || {};
-    text('ledger-title', `${state.data.selectedSymbol || 'Pair'} · ${state.positionSide}`);
-    text('grid-profit-label', `Profit grid ${state.positionSide}`);
+    text('ledger-title', `${state.data.selectedSymbol || 'Pair'} · ${POSITION_SIDE}`);
+    text('grid-profit-label', `Profit grid ${POSITION_SIDE}`);
     for (const [id, value] of [['realized-pnl', profit.realized], ['funding-pnl', profit.accounting?.ready ? profit.funding : null], ['unrealized-pnl', profit.unrealizedPnl], ['grid-profit', profit.gridPairProfit], ['ledger-net', profit.net]]) { text(id, `${signed(value, 4)} ${quote()}`); pnlTone(byId(id), value); }
     text('fees-value', `${money(profit.fees, 4)} ${quote()}`);
   }
@@ -499,7 +472,7 @@
   function renderOrders() {
     const orders = state.data.orders?.active || [];
     text('buy-count', `BUY ${num(state.data.orders?.buyCount)}`); text('sell-count', `SELL ${num(state.data.orders?.sellCount)}`);
-    text('orders-copy', `Order grid ${state.positionSide} yang aktif.`);
+    text('orders-copy', `Order grid ${POSITION_SIDE} yang aktif.`);
     const body = byId('orders-body'); const cards = byId('order-cards'); body.replaceChildren(); cards.replaceChildren();
     if (!orders.length) {
       const row = document.createElement('tr'); row.className = 'empty-row'; const cell = document.createElement('td'); cell.colSpan = 7; cell.textContent = state.loading ? 'Mengambil order aktif dari Binance.' : 'Tidak ada order grid aktif untuk pair ini.'; row.append(cell); body.append(row);
@@ -536,10 +509,10 @@
   }
   function renderChartMeta() { const range = state.data.range || {}; text('range-copy', range.lower > 0 && range.upper > 0 ? `Grid ${range.lowerText || price(range.lower)} sampai ${range.upperText || price(range.upper)} ${quote()}` : 'Range grid belum tersedia untuk pair ini.'); text('timeframe-label', state.data.market?.timeframe || 'N/A'); requestAnimationFrame(drawChart); }
   function renderRuntime() {
-    const data = state.data; text('status-text', state.loading ? 'Memperbarui' : !data.running ? `${state.positionSide} · Bot offline` : data.tradingEnabled ? `${state.positionSide} · Trading aktif` : `${state.positionSide} · Order dijeda`); byId('status-mark').dataset.state = state.loading ? '' : data.tradingEnabled ? 'active' : data.running ? 'paused' : 'error';
+    const data = state.data; text('status-text', state.loading ? 'Memperbarui' : !data.running ? `${POSITION_SIDE} · Bot offline` : data.tradingEnabled ? `${POSITION_SIDE} · Trading aktif` : `${POSITION_SIDE} · Order dijeda`); byId('status-mark').dataset.state = state.loading ? '' : data.tradingEnabled ? 'active' : data.running ? 'paused' : 'error';
     text('updated-at', `Diperbarui ${time(data.generatedAt)}`); text('runtime-label', `${String(data.mode || '').toUpperCase()} · ${data.source || 'Binance'} · refresh ${num(data.refreshSeconds) || 5} detik`); byId('logout-form').hidden = !data.dashboardAuthEnabled;
   }
-  function render() { renderPositionTabs(); renderComparison(); renderAllocation(); renderOverview(); renderFlow(); renderInspector(); renderLedger(); renderRisk(); renderOrders(); renderChartMeta(); renderRuntime(); }
+  function render() { renderComparison(); renderAllocation(); renderOverview(); renderFlow(); renderInspector(); renderLedger(); renderRisk(); renderOrders(); renderChartMeta(); renderRuntime(); }
   function renderSymbols(symbols, selected) {
     const select = byId('symbol-select'); const current = [...select.options].map(option => option.value);
     if (JSON.stringify(current) !== JSON.stringify(symbols)) { select.replaceChildren(); for (const symbol of symbols) { const option = document.createElement('option'); option.value = symbol; option.textContent = symbol; select.append(option); } }
@@ -571,13 +544,12 @@
     const initial = !state.data; const announced = Boolean(options.announced); const requestId = ++state.requestId; state.controller?.abort(); state.controller = new AbortController(); setLoading(true, initial, announced); byId('error-notice').hidden = true; clearTimeout(state.timer);
     try {
       const selected = options.symbol ?? byId('symbol-select').value;
-      const positionSide = options.positionSide || state.positionSide;
-      const query = new URLSearchParams({ positionSide });
+      const query = new URLSearchParams({ positionSide: POSITION_SIDE });
       if (selected) query.set('symbol', selected);
       const response = await fetch(`/api/dashboard?${query.toString()}`, { signal: state.controller.signal, cache: 'no-store' });
       if (response.status === 401) { window.location.assign('/login'); return; }
       if (!response.ok) throw new Error('Binance atau bot belum memberikan snapshot dashboard.');
-      const data = await response.json(); if (requestId !== state.requestId) return; state.data = data; state.positionSide = data.selectedPositionSide || positionSide; renderSymbols(data.symbols || [], data.selectedSymbol); setLoading(false); render(); state.timer = setTimeout(() => load(), Math.max(2, num(data.refreshSeconds) || 5) * 1000);
+      const data = await response.json(); if (requestId !== state.requestId) return; state.data = data; renderSymbols(data.symbols || [], data.selectedSymbol); setLoading(false); render(); state.timer = setTimeout(() => load(), Math.max(2, num(data.refreshSeconds) || 5) * 1000);
     } catch (error) {
       if (error.name === 'AbortError') return; setLoading(false); text('error-text', error.message || 'Data dashboard tidak tersedia.'); byId('error-notice').hidden = false; text('status-text', 'Offline · mencoba lagi'); byId('status-mark').dataset.state = 'error'; state.timer = setTimeout(() => load(), 5000);
     }
@@ -586,25 +558,6 @@
     document.querySelectorAll('.flow-node').forEach(node => node.addEventListener('click', () => { state.activeNode = node.dataset.node; if (state.data) renderInspector(); }));
     byId('symbol-select').addEventListener('change', event => load({ symbol: event.target.value, announced: true })); byId('refresh-button').addEventListener('click', () => { spinRefreshButton(); load({ announced: true }); }); byId('retry-button').addEventListener('click', () => load({ announced: true }));
     byId('motion-select').addEventListener('change', event => applyMotionPreference(event.target.value, { persist: true }));
-    document.querySelectorAll('.position-tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        const positionSide = tab.dataset.positionSide;
-        if (positionSide === state.positionSide) return;
-        state.positionSide = positionSide;
-        state.activeNode = 'supervisor';
-        renderPositionTabs();
-        load({ positionSide, announced: true });
-      });
-      tab.addEventListener('keydown', event => {
-        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-        event.preventDefault();
-        const tabs = [...document.querySelectorAll('.position-tab')];
-        const current = tabs.indexOf(event.currentTarget);
-        const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : event.key === 'ArrowRight' ? (current + 1) % tabs.length : (current - 1 + tabs.length) % tabs.length;
-        tabs[next].focus();
-        tabs[next].click();
-      });
-    });
     reducedMotion.addEventListener?.('change', () => { if (state.motionPreference === 'system') applyMotionPreference('system'); });
     let resizeTimer; window.addEventListener('resize', () => { queueFlowLayout(); clearTimeout(resizeTimer); resizeTimer = setTimeout(drawChart, 100); });
     if ('ResizeObserver' in window) {

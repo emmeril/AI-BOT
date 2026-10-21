@@ -32,29 +32,29 @@ test('dashboard pipeline shows only the active deterministic execution flow', ()
   assert.match(script, /`\$\{price\(range\.lower\)\}–\$\{price\(range\.upper\)\}`/);
 });
 
-test('futures dashboard combines LONG and SHORT with accessible side filters', () => {
+test('futures dashboard presents a single LONG-only operating surface', () => {
   const html = publicFile('dashboard.html');
   const css = publicFile('dashboard.css');
   const script = publicFile('dashboard.js');
 
-  assert.match(html, /role="tablist" aria-label="Filter sisi posisi"/);
-  assert.match(html, /data-position-side="LONG"/);
-  assert.match(html, /data-position-side="SHORT"/);
-  assert.match(html, /<span>LONG<\/span><small>BUY → SELL<\/small>/);
-  assert.match(html, /<span>SHORT<\/span><small>SELL → BUY<\/small>/);
-  assert.match(html, /<header class="topbar">[\s\S]*<nav class="position-tabs"[\s\S]*<div class="top-actions">/);
-  assert.match(css, /\.position-tabs\{[^}]*justify-self:center;[^}]*width:min\(100%,220px\);height:44px;margin:0/);
-  assert.match(css, /\.position-tab\{[^}]*flex-direction:column;align-items:center;justify-content:center/);
-  assert.match(html, /id="combined-exposure"/);
+  assert.match(html, /class="position-mode" aria-label="Mode posisi LONG only"/);
+  assert.match(html, /<span>LONG ONLY<\/span><small>BUY → SELL<\/small>/);
+  assert.match(html, /<header class="topbar">[\s\S]*<div class="position-mode"[\s\S]*<div class="top-actions">/);
+  assert.match(css, /\.position-mode\{[^}]*justify-self:center;[^}]*width:min\(100%,220px\);height:44px/);
+  assert.doesNotMatch(html, /role="tablist"|data-position-side|LONG vs SHORT|SHORT LAMA|Rescue SHORT/);
+  assert.doesNotMatch(css, /\.position-tabs|\.position-tab|\.short-summary|\.allocation-short/);
+  assert.match(html, /id="long-exposure"/);
   assert.match(html, /id="allocation-track"/);
   assert.match(html, /id="long-allocation-status"/);
-  assert.match(html, /id="short-allocation-status"/);
+  assert.match(html, /id="allocation-pair-count"/);
+  assert.match(html, /id="allocation-long-rescue"/);
   assert.match(html, /id="long-pnl"/);
-  assert.match(html, /id="short-pnl"/);
+  assert.doesNotMatch(html, /id="short-allocation-status"|id="short-pnl"|id="short-exposure"/);
   assert.match(css, /\.comparison-board\{/);
   assert.match(css, /@media\(max-width:620px\).*\.comparison-board\{grid-template-columns:1fr\}/s);
-  assert.match(script, /new URLSearchParams\(\{ positionSide \}\)/);
-  assert.match(script, /\['ArrowLeft', 'ArrowRight', 'Home', 'End'\]/);
+  assert.match(script, /const POSITION_SIDE = 'LONG'/);
+  assert.match(script, /new URLSearchParams\(\{ positionSide: POSITION_SIDE \}\)/);
+  assert.doesNotMatch(script, /position-tab|isShort|ArrowLeft|ArrowRight/);
   assert.match(script, /function renderComparison\(\)/);
   assert.match(script, /function renderAllocation\(\)/);
   assert.match(script, /Menunggu sisi kosong/);
