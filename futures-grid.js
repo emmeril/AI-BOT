@@ -49,6 +49,7 @@ const {
   nearestAdverseLevel,
   nearestFavorableLevel,
   realizedProfitBank,
+  rescueBudgetPerPair,
   reversalAgeHours,
   trackedInventorySummary,
 } = require('./src/reversal-inventory-manager');
@@ -3432,16 +3433,6 @@ class FuturesGridEngine {
     }
   }
 
-  getUsedReversalRescueNotional(excludedSymbol) {
-    return Object.entries(this.state?.data?.symbols || {}).reduce((total, [symbol, state]) => {
-      const hasPendingRescue = Object.values(state?.orders || {})
-        .some(order => order?.kind === 'REVERSAL_RESCUE');
-      const consumesPool = state?.reversalInventory?.rescueFilled === true || hasPendingRescue;
-      if (symbol === excludedSymbol || !consumesPool) return total;
-      return total + Math.max(0, Number(state.reversalInventory.rescueNotional) || 0);
-    }, 0);
-  }
-
   async manageReversalInventory({
     symbol,
     symState,
@@ -3554,28 +3545,28 @@ class FuturesGridEngine {
       const target = nearestAdverseLevel(levels, currentPrice, POSITION_SIDE);
       const wallet = walletBalanceUsdt(balance);
       const freeMargin = this.getQuoteFree(balance, symbol);
-      const sideRescueBudget = wallet * REVERSAL_RESCUE_MARGIN_PCT / 100 * LEVERAGE;
-      const usedRescueNotional = this.getUsedReversalRescueNotional(symbol);
-      const rawRemainingRescueBudget = sideRescueBudget - usedRescueNotional;
-      const budgetTolerance = Math.max(1e-8, sideRescueBudget * 1e-9);
-      const remainingRescueBudget = rawRemainingRescueBudget > budgetTolerance
-        ? rawRemainingRescueBudget
-        : 0;
+      const pairRescueBudget = rescueBudgetPerPair({
+        walletBalance: wallet,
+        marginPct: REVERSAL_RESCUE_MARGIN_PCT,
+        leverage: LEVERAGE,
+        pairCount: SYMBOLS.length,
+      });
+      const budgetTolerance = Math.max(1e-8, pairRescueBudget * 1e-9);
       const rescueNotional = Math.min(
-        remainingRescueBudget,
+        pairRescueBudget,
         freeMargin * LEVERAGE
       );
+      reversal.rescueBudgetNotional = pairRescueBudget;
+      reversal.rescuePairCount = SYMBOLS.length;
       const minimumRescueNotional = target
         ? Math.max(this.getMinCost(symbol), this.getMinAmount(symbol) * target.price)
         : 0;
       reversal.rescueWaitReason = !target
         ? 'NO_ADVERSE_LEVEL'
-        : remainingRescueBudget <= 0
-          ? 'SIDE_BUDGET_EXHAUSTED'
+        : pairRescueBudget <= 0
+          ? 'PAIR_BUDGET_UNAVAILABLE'
           : minimumRescueNotional > 0 && rescueNotional < minimumRescueNotional - budgetTolerance
-            ? usedRescueNotional > 0
-              ? 'SIDE_BUDGET_EXHAUSTED'
-              : 'BELOW_MINIMUM_ORDER'
+            ? 'BELOW_MINIMUM_ORDER'
             : rescueNotional <= 0
               ? 'FREE_MARGIN_UNAVAILABLE'
               : null;
@@ -5993,7 +5984,7 @@ Price Momentum Entry Guard: ${PRICE_MOMENTUM_ENTRY_FILTER_ENABLED
       ? `ON (${PRICE_MOMENTUM_ENTRY_FILTER_MODE}; ${PRICE_MOMENTUM_LOOKBACK_CANDLES}x${PRICE_MOMENTUM_TIMEFRAME}; deadband=${PRICE_MOMENTUM_DEADBAND_PCT}%; fail-${PRICE_MOMENTUM_FAIL_CLOSED ? 'closed' : 'open'})`
       : 'OFF'}
 Reversal Inventory: ${REVERSAL_INVENTORY_ENABLED
-      ? `ON (one rescue=${REVERSAL_RESCUE_MARGIN_PCT}% wallet margin; stale=${REVERSAL_STALE_HOURS}h; reserve=${REVERSAL_PROFIT_RESERVE_USDT} USDT; existing=${REVERSAL_APPLY_TO_EXISTING_POSITIONS ? 'managed' : 'grandfathered'})`
+      ? `ON (rescue pool=${REVERSAL_RESCUE_MARGIN_PCT}% wallet margin split across ${SYMBOLS.length} pair(s); stale=${REVERSAL_STALE_HOURS}h; reserve=${REVERSAL_PROFIT_RESERVE_USDT} USDT; existing=${REVERSAL_APPLY_TO_EXISTING_POSITIONS ? 'managed' : 'grandfathered'})`
       : 'OFF'}
 Grid Mode: ${GRID_MODE}
 Grid Count: ${GRID_COUNT}

@@ -310,8 +310,10 @@ function reversalInventoryFromState(symState, orders, positionSide) {
       ? 'FILLED'
       : rescueOrder
         ? 'PENDING'
-        : rescueWaitReason === 'SIDE_BUDGET_EXHAUSTED'
+        : ['PAIR_BUDGET_UNAVAILABLE', 'SIDE_BUDGET_EXHAUSTED'].includes(rescueWaitReason)
           ? 'WAITING_BUDGET'
+          : rescueWaitReason === 'FREE_MARGIN_UNAVAILABLE'
+            ? 'WAITING_BALANCE'
           : rescueWaitReason === 'BELOW_MINIMUM_ORDER'
             ? 'WAITING_MINIMUM'
             : rescueUsed
@@ -329,6 +331,8 @@ function reversalInventoryFromState(symState, orders, positionSide) {
     rescueStatus,
     rescueWaitReason,
     rescueNotional: numberOrZero(persisted.rescueNotional),
+    rescueBudgetNotional: numberOrZero(persisted.rescueBudgetNotional),
+    rescuePairCount: numberOrZero(persisted.rescuePairCount),
     rescuePlacedAt: persisted.rescuePlacedAt || null,
     opposingSince: persisted.opposingSince || null,
     rescueOrder: rescueOrder ? {

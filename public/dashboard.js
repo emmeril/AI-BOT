@@ -166,8 +166,11 @@
         : 'Menunggu terisi';
       summary = 'Order rescue sedang aktif.';
     } else if (reversal.rescueStatus === 'WAITING_BUDGET') {
-      rescue = `Menunggu kuota ${state.positionSide}`;
-      summary = `Kuota rescue ${state.positionSide} sedang digunakan pair lain.`;
+      rescue = 'Menunggu kuota pair';
+      summary = 'Kuota rescue pair dihitung otomatis dari balance.';
+    } else if (reversal.rescueStatus === 'WAITING_BALANCE') {
+      rescue = 'Menunggu saldo tersedia';
+      summary = 'Saldo bebas belum cukup untuk memasang order rescue.';
     } else if (reversal.rescueStatus === 'WAITING_MINIMUM') {
       rescue = 'Menunggu ukuran minimum';
       summary = 'Kuota rescue belum cukup untuk memenuhi minimum order Binance.';

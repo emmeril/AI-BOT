@@ -16,6 +16,7 @@ const {
   nearestAdverseLevel,
   nearestFavorableLevel,
   realizedProfitBank,
+  rescueBudgetPerPair,
   reversalAgeHours,
   trackedInventorySummary,
 } = require('../src/reversal-inventory-manager');
@@ -85,6 +86,13 @@ test('opposing age is measured from the persisted transition timestamp', () => {
   const now = Date.parse('2026-10-21T12:00:00.000Z');
   assert.equal(reversalAgeHours('2026-10-20T12:00:00.000Z', now), 24);
   assert.equal(reversalAgeHours(null, now), 0);
+});
+
+test('rescue budget is divided equally across configured pairs', () => {
+  const input = { walletBalance: 100, marginPct: 5, leverage: 5 };
+  assert.equal(rescueBudgetPerPair({ ...input, pairCount: 1 }), 25);
+  assert.equal(rescueBudgetPerPair({ ...input, pairCount: 2 }), 12.5);
+  assert.equal(rescueBudgetPerPair({ ...input, pairCount: 5 }), 5);
 });
 
 test('reversal client order IDs recover rescue and profit-bank metadata', () => {
@@ -214,7 +222,7 @@ test('an unfilled canceled rescue restores its slot and may be placed again', as
   assert.ok(symState.reversalInventory.lastRescueResetAt);
 });
 
-test('an exhausted side rescue pool waits without placing a dust order', async () => {
+test('a rescue on another pair does not consume this pair rescue budget', async () => {
   const symState = {
     orders: {}, lastBuyByLevel: {},
     reversalInventory: {
@@ -228,8 +236,11 @@ test('an exhausted side rescue pool waits without placing a dust order', async (
     TEST: symState,
     OTHER: { reversalInventory: { rescueFilled: true, rescueNotional: 25 } },
   } };
-  let placements = 0;
-  engine.placeReversalLimitOrder = async () => { placements++; };
+  const placements = [];
+  engine.placeReversalLimitOrder = async (...args) => {
+    placements.push(args);
+    return { id: 'pair-rescue', amount: args[4], price: args[3] };
+  };
 
   await engine.manageReversalInventory({
     symbol: 'TEST', symState,
@@ -240,11 +251,12 @@ test('an exhausted side rescue pool waits without placing a dust order', async (
     managedOrders: [], now: Date.parse('2026-10-21T00:05:00.000Z'),
   });
 
-  assert.equal(placements, 0);
-  assert.equal(symState.reversalInventory.rescueWaitReason, 'SIDE_BUDGET_EXHAUSTED');
+  assert.equal(placements.length, 1);
+  assert.ok(Math.abs(placements[0][4] * placements[0][3] - 25) < 1e-12);
+  assert.equal(symState.reversalInventory.rescueWaitReason, null);
 });
 
-test('a residual side budget below exchange minimum waits without placing an order', async () => {
+test('a per-pair rescue budget below exchange minimum waits without placing an order', async () => {
   const symState = {
     orders: {}, lastBuyByLevel: {},
     reversalInventory: {
@@ -273,21 +285,7 @@ test('a residual side budget below exchange minimum waits without placing an ord
   });
 
   assert.equal(placements, 0);
-  assert.equal(symState.reversalInventory.rescueWaitReason, 'SIDE_BUDGET_EXHAUSTED');
-});
-
-test('rescue budget is pooled across all pairs on the same worker side', () => {
-  const engine = Object.create(FuturesGridEngine.prototype);
-  engine.state = { data: { symbols: {
-    A: { reversalInventory: { rescueUsed: true, rescueFilled: true, rescueNotional: 15 } },
-    B: {
-      orders: { pending: { kind: 'REVERSAL_RESCUE' } },
-      reversalInventory: { rescueUsed: true, rescueNotional: 7 },
-    },
-    C: { reversalInventory: { rescueUsed: false, rescueNotional: 100 } },
-  } } };
-  assert.equal(engine.getUsedReversalRescueNotional('B'), 15);
-  assert.equal(engine.getUsedReversalRescueNotional('NONE'), 22);
+  assert.equal(symState.reversalInventory.rescueWaitReason, 'BELOW_MINIMUM_ORDER');
 });
 
 test('stale opposing inventory places a profit-funded partial Fibonacci exit', async () => {

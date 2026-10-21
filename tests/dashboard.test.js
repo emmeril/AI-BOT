@@ -413,10 +413,19 @@ test('futures dashboard exposes managed reversal and pending rescue per side', (
       config: {}, orders: {}, lastBuyByLevel: {},
       reversalInventory: {
         initializedAt: '2026-10-21T00:00:00.000Z', mode: 'RESCUE',
-        rescueWaitReason: 'SIDE_BUDGET_EXHAUSTED',
+        rescueWaitReason: 'PAIR_BUDGET_UNAVAILABLE',
       },
     }, [], { contracts: 5 }, { positionSide: 'SHORT' });
     assert.equal(waiting.reversalInventory.rescueStatus, 'WAITING_BUDGET');
+
+    const waitingBalance = decisionSnapshot(engine, 'TEST/USDT:USDT', {
+      config: {}, orders: {}, lastBuyByLevel: {},
+      reversalInventory: {
+        initializedAt: '2026-10-21T00:00:00.000Z', mode: 'RESCUE',
+        rescueWaitReason: 'FREE_MARGIN_UNAVAILABLE',
+      },
+    }, [], { contracts: 5 }, { positionSide: 'SHORT' });
+    assert.equal(waitingBalance.reversalInventory.rescueStatus, 'WAITING_BALANCE');
 
     const belowMinimum = decisionSnapshot(engine, 'TEST/USDT:USDT', {
       config: {}, orders: {}, lastBuyByLevel: {},

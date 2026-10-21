@@ -7,6 +7,15 @@ function finiteNonNegative(value) {
   return Number.isFinite(number) && number >= 0 ? number : 0;
 }
 
+function rescueBudgetPerPair({ walletBalance, marginPct, leverage, pairCount }) {
+  const wallet = finiteNonNegative(walletBalance);
+  const percent = finiteNonNegative(marginPct);
+  const multiplier = finiteNonNegative(leverage);
+  const pairs = Math.floor(Number(pairCount));
+  if (!(wallet > 0) || !(percent > 0) || !(multiplier > 0) || !(pairs > 0)) return 0;
+  return wallet * percent / 100 * multiplier / pairs;
+}
+
 function momentumState(decision, positionSide) {
   if (!decision?.available || !decision.direction) return 'UNKNOWN';
   const direction = String(decision.direction).toUpperCase();
@@ -114,6 +123,7 @@ module.exports = {
   nearestAdverseLevel,
   nearestFavorableLevel,
   realizedProfitBank,
+  rescueBudgetPerPair,
   reversalAgeHours,
   trackedInventorySummary,
 };

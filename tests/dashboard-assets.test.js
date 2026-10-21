@@ -69,7 +69,8 @@ test('futures dashboard combines LONG and SHORT with accessible side filters', (
   assert.match(script, /\['Kelola reversal', reversal\.management\]/);
   assert.match(script, /\['Rescue', reversal\.rescue\]/);
   assert.match(script, /Dikelola langsung/);
-  assert.match(script, /Menunggu kuota \$\{state\.positionSide\}/);
+  assert.match(script, /Menunggu kuota pair/);
+  assert.match(script, /Menunggu saldo tersedia/);
   assert.doesNotMatch(script, /Jatah rescue posisi ini sudah digunakan/);
   assert.match(script, /function entryGateView\(momentum\)/);
   assert.doesNotMatch(script, /function primaryEntrySignal/);
