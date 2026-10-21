@@ -168,13 +168,14 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
   };
   const shortState = {
     exposureBudget: {
-      enabled: true, sidePct: 45, combinedPct: 90, bufferPct: 10,
-      symbolCap: 20, sideCap: 40, targetSideCap: 42, currentExposure: 38,
-      status: 'DEFERRED', deferredReason: 'active_exposure', lastCheckedAt: '2026-10-19T00:00:00.000Z',
+      enabled: true, entryGridEnabled: false, sidePct: 0, leverage: 5,
+      symbolCap: 0, sideCap: 0, targetSideCap: 0, currentExposure: 38,
+      rescueMarginPct: 5, rescueSymbolCap: 12.5, rescueSideCap: 25,
+      status: 'EXIT_ONLY', deferredReason: 'legacy_exposure', lastCheckedAt: '2026-10-19T00:00:00.000Z',
     },
     symbols: {
       'TEST/USDT:USDT': {
-        config: { count: 2, orderSizeUsdt: 10, rangeAdvisor: {
+        config: { count: 2, orderSizeUsdt: 10, entryGridEnabled: false, rangeAdvisor: {
           direction: 'BEARISH', directionApplied: 'BEARISH', directionScore: -0.8,
           directionConfidence: 0.9, directionConfirmationCount: 3,
           directionConfirmationsRequired: 2, directionTimeframes: { '1h': { direction: 'BEARISH', score: -3 } },
@@ -207,8 +208,9 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
   const engine = new TestEngine();
   engine.state = {
     data: { exposureBudget: {
-      enabled: true, sidePct: 45, combinedPct: 90, bufferPct: 10,
+      enabled: true, entryGridEnabled: true, sidePct: 45, leverage: 5,
       symbolCap: 21, sideCap: 40, targetSideCap: 40, currentExposure: 32,
+      rescueMarginPct: 5, rescueSymbolCap: 12.5, rescueSideCap: 25,
       status: 'APPLIED', lastCheckedAt: '2026-10-19T00:01:00.000Z',
     } },
     getSymbol: () => longState,
@@ -239,13 +241,17 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
   );
 
   assert.equal(snapshot.selectedPositionSide, 'SHORT');
+  assert.equal(snapshot.entryGridEnabled, false);
+  assert.equal(snapshot.tradingEnabled, false);
   assert.deepEqual(snapshot.symbols, ['TEST/USDT:USDT']);
   assert.equal(snapshot.comparison.LONG.exposure, 32);
   assert.equal(snapshot.comparison.SHORT.exposure, 60);
   assert.equal(snapshot.comparison.combined.exposure, 92);
   assert.equal(snapshot.intelligence.adaptive.allocatedInvestment, 60);
-  assert.equal(snapshot.intelligence.adaptive.symbolExposureCap, 20);
-  assert.equal(snapshot.intelligence.adaptive.sideExposureCap, 40);
+  assert.equal(snapshot.intelligence.adaptive.symbolExposureCap, 0);
+  assert.equal(snapshot.intelligence.adaptive.sideExposureCap, 0);
+  assert.equal(snapshot.intelligence.adaptive.exposurePct, null);
+  assert.equal(snapshot.intelligence.adaptive.entryGridEnabled, false);
   assert.equal(snapshot.intelligence.adaptive.exposureSource, 'exchange-conservative');
   assert.equal(snapshot.comparison.LONG.strategyPnl, 4.9);
   assert.equal(snapshot.comparison.SHORT.strategyPnl, 4.95);
@@ -272,15 +278,23 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
   assert.equal(snapshot.intelligence.reversalInventory.rescueStatus, 'FILLED');
   assert.equal(snapshot.exposureAllocation.enabled, true);
   assert.equal(snapshot.exposureAllocation.walletBalance, 100);
-  assert.equal(snapshot.exposureAllocation.sidePct, 45);
-  assert.equal(snapshot.exposureAllocation.bufferPct, 10);
+  assert.equal(snapshot.exposureAllocation.sidePct, 0);
+  assert.equal(snapshot.exposureAllocation.longPct, 45);
+  assert.equal(snapshot.exposureAllocation.shortPct, 0);
+  assert.equal(snapshot.exposureAllocation.legacyPct, 7.6);
+  assert.equal(snapshot.exposureAllocation.rescuePct, 5);
+  assert.equal(snapshot.exposureAllocation.bufferPct, 42.4);
   assert.equal(snapshot.exposureAllocation.LONG.status, 'APPLIED');
-  assert.equal(snapshot.exposureAllocation.SHORT.status, 'DEFERRED');
-  assert.equal(snapshot.exposureAllocation.SHORT.targetSideCap, 42);
+  assert.equal(snapshot.exposureAllocation.SHORT.status, 'EXIT_ONLY');
+  assert.equal(snapshot.exposureAllocation.SHORT.targetSideCap, 0);
+  assert.equal(snapshot.exposureAllocation.rescue.LONG.symbolCap, 12.5);
+  assert.equal(snapshot.exposureAllocation.rescue.SHORT.symbolCap, 0);
 
   const longSnapshot = await buildFuturesDashboardSnapshot(
     engine, 'TEST/USDT:USDT', 'LONG', { shortState, shortRunning: true }
   );
+  assert.equal(longSnapshot.entryGridEnabled, true);
+  assert.equal(longSnapshot.tradingEnabled, true);
   assert.equal(longSnapshot.intelligence.adaptive.symbolExposureCap, 21);
   assert.equal(longSnapshot.intelligence.adaptive.sideExposureCap, 40);
 });

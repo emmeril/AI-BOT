@@ -56,6 +56,14 @@ test('SHORT keeps the nearest profitable Fibonacci exit target', () => {
   assert.equal(overridden.GRID_EXIT_TARGET_LEVEL_OFFSET, '2');
 });
 
+test('SHORT entry grid can be switched to exit-only independently', () => {
+  const active = buildShortEnvironment({});
+  assert.equal(active.FUTURES_ENTRY_ENABLED, 'true');
+
+  const exitOnly = buildShortEnvironment({ SHORT_FUTURES_ENTRY_ENABLED: 'false' });
+  assert.equal(exitOnly.FUTURES_ENTRY_ENABLED, 'false');
+});
+
 test('SHORT inherits reversal inventory controls and accepts side-specific overrides', () => {
   const inherited = buildShortEnvironment({
     REVERSAL_INVENTORY_ENABLED: 'true',

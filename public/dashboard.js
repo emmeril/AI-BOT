@@ -271,6 +271,9 @@
 
   function allocationStatusView(budget) {
     if (!budget?.available) return { label: 'Data belum tersedia', tone: '' };
+    if (budget.status === 'EXIT_ONLY' || budget.entryGridEnabled === false) {
+      return { label: 'Exit-only', tone: 'warning' };
+    }
     if (budget.status === 'DEFERRED') {
       return { label: 'Menunggu sisi kosong', tone: 'warning' };
     }
@@ -280,29 +283,38 @@
 
   function renderAllocation() {
     const allocation = state.data.exposureAllocation || {};
-    const sidePct = clamp(num(allocation.sidePct), 0, 50);
-    const combinedPct = clamp(num(allocation.combinedPct) || sidePct * 2, 0, 100);
-    const bufferPct = clamp(num(allocation.bufferPct) || 100 - combinedPct, 0, 100);
-    const longPct = sidePct;
-    const shortPct = Math.min(sidePct, Math.max(0, 100 - longPct));
+    const longPct = clamp(num(allocation.longPct ?? allocation.LONG?.sidePct), 0, 100);
+    const shortPct = clamp(num(allocation.shortPct ?? allocation.SHORT?.sidePct), 0, 100);
+    const legacyPct = clamp(num(allocation.legacyPct), 0, 100);
+    const rescuePct = clamp(num(allocation.rescuePct ?? allocation.rescue?.totalPct), 0, 100);
+    const bufferPct = clamp(num(allocation.bufferPct), 0, 100);
     const track = byId('allocation-track');
     const segments = track.querySelectorAll('span');
     segments[0].style.width = `${longPct}%`;
-    segments[1].style.width = `${shortPct}%`;
-    segments[2].style.width = `${bufferPct}%`;
+    segments[1].style.width = `${legacyPct}%`;
+    segments[2].style.width = `${rescuePct}%`;
+    segments[3].style.width = `${bufferPct}%`;
     track.setAttribute(
       'aria-label',
-      `Alokasi exposure LONG ${money(longPct, 0)} persen, SHORT ${money(shortPct, 0)} persen, buffer ${money(bufferPct, 0)} persen`
+      `Alokasi entry LONG ${money(longPct, 0)} persen, entry SHORT ${money(shortPct, 0)} persen, ` +
+      `posisi lama ${money(legacyPct, 1)} persen, rescue ${money(rescuePct, 0)} persen, ` +
+      `buffer ${money(bufferPct, 1)} persen`
     );
-    text('allocation-mode', allocation.enabled ? 'AKTIF' : 'NONAKTIF');
+    const longOnly = allocation.LONG?.entryGridEnabled !== false && allocation.SHORT?.entryGridEnabled === false;
+    text('allocation-mode', allocation.enabled ? (longOnly ? 'LONG ONLY' : 'AKTIF') : 'NONAKTIF');
     text('allocation-long-pct', `LONG ${percent(longPct, 0)}`);
-    text('allocation-short-pct', `SHORT ${percent(shortPct, 0)}`);
+    text('allocation-short-pct', `SHORT LAMA ${percent(legacyPct, 1)}`);
+    text('allocation-rescue-pct', `RESCUE ${percent(rescuePct, 0)}`);
     text('allocation-buffer-pct', `BUFFER ${percent(bufferPct, 0)}`);
     text('allocation-wallet', `${money(allocation.walletBalance, 2)} ${quote()}`);
-    const budgets = [allocation.LONG || {}, allocation.SHORT || {}];
-    const symbolCaps = budgets.map(budget => nullable(budget.symbolCap)).filter(value => value !== null);
-    const commonSymbolCap = symbolCaps.length ? Math.min(...symbolCaps) : null;
-    text('allocation-symbol-cap', commonSymbolCap === null ? 'N/A' : `${money(commonSymbolCap, 2)} ${quote()}`);
+    text('allocation-leverage', `${money(allocation.leverage, 0)}x`);
+    for (const side of ['LONG', 'SHORT']) {
+      const rescue = allocation.rescue?.[side] || {};
+      const value = rescue.active
+        ? `${percent(rescue.marginPct, 0)} margin · ${money(rescue.symbolCap, 2)} ${quote()}`
+        : 'Tidak dicadangkan';
+      text(`allocation-${side.toLowerCase()}-rescue`, value);
+    }
     for (const side of ['LONG', 'SHORT']) {
       const budget = allocation[side] || {};
       const prefix = side.toLowerCase();
@@ -311,10 +323,12 @@
       status.className = `allocation-state ${view.tone}`.trim();
       text(`${prefix}-allocation-status`, view.label);
       text(`${prefix}-allocation-cap`, budget.available
-        ? `${money(budget.sideCap, 2)} ${quote()}`
+        ? budget.entryGridEnabled === false
+          ? `Entry 0 ${quote()}`
+          : `Cap entry ${money(budget.sideCap, 2)} ${quote()}`
         : 'Cap aktif N/A');
       text(`${prefix}-allocation-meta`, budget.available
-        ? `Terpakai ${money(budget.currentExposure, 2)} · target ${money(budget.targetSideCap, 2)} ${quote()}`
+        ? `Exposure ${money(budget.currentExposure, 2)} · target ${money(budget.targetSideCap, 2)} ${quote()}`
         : 'Data belum tersedia');
     }
   }
@@ -469,12 +483,17 @@
     const data = state.data; const adaptive = intel().adaptive || {}; const position = data.futures?.position;
     const exposure = num(adaptive.exposurePct); const threshold = num(adaptive.exposureWarningPct ?? adaptive.riskExposurePct) || 90;
     text('risk-title', `Exposure ${data.selectedSymbol || 'pair'}`);
-    text('risk-exposure', percent(adaptive.exposurePct));
-    text('risk-caption', adaptive.investmentCap > 0 ? `${money(adaptive.allocatedInvestment, 4)} dari cap pair ${money(adaptive.investmentCap, 2)} ${quote()}` : 'Batas exposure belum tersedia.');
+    const exitOnly = adaptive.entryGridEnabled === false;
+    text('risk-exposure', exitOnly ? 'EXIT-ONLY' : percent(adaptive.exposurePct));
+    text('risk-caption', exitOnly
+      ? `Exposure posisi lama ${money(adaptive.allocatedInvestment, 4)} ${quote()}; cap entry 0 ${quote()}.`
+      : adaptive.investmentCap > 0
+        ? `${money(adaptive.allocatedInvestment, 4)} dari cap pair ${money(adaptive.investmentCap, 2)} ${quote()}`
+        : 'Batas exposure belum tersedia.');
     byId('exposure-fill').style.width = `${clamp(exposure, 0, 100)}%`; byId('exposure-fill').style.background = exposure >= threshold ? 'var(--warning)' : 'var(--accent)';
     byId('exposure-limit').style.left = `${clamp(threshold, 0, 100)}%`; byId('exposure-meter').setAttribute('aria-valuenow', String(clamp(exposure, 0, 100)));
     const mark = num(position?.markPrice); const liquidation = num(position?.liquidationPrice); const distance = mark > 0 && liquidation > 0 ? Math.abs(mark - liquidation) / mark * 100 : null;
-    renderDefinitionList(byId('risk-facts'), [['Exposure', `${money(adaptive.allocatedInvestment, 2)} ${quote()}`], ['Cap pair', adaptive.investmentCap > 0 ? `${money(adaptive.investmentCap, 2)} ${quote()}` : 'N/A'], ['Saldo tersedia', `${money(data.futures?.availableBalance, 2)} ${quote()}`], ['Jarak likuidasi', distance == null ? 'N/A' : percent(distance, 2)]]);
+    renderDefinitionList(byId('risk-facts'), [['Exposure', `${money(adaptive.allocatedInvestment, 2)} ${quote()}`], ['Cap entry pair', exitOnly ? `0 ${quote()}` : adaptive.investmentCap > 0 ? `${money(adaptive.investmentCap, 2)} ${quote()}` : 'N/A'], ['Saldo tersedia', `${money(data.futures?.availableBalance, 2)} ${quote()}`], ['Jarak likuidasi', distance == null ? 'N/A' : percent(distance, 2)]]);
   }
 
   function renderOrders() {

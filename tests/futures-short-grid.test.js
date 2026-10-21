@@ -1,4 +1,12 @@
 process.env.FUTURES_POSITION_SIDE = 'SHORT';
+process.env.SYMBOLS = 'TEST/USDT:USDT';
+process.env.LEVERAGE = '5';
+process.env.GRID_COUNT = '10';
+process.env.FUTURES_DYNAMIC_EXPOSURE_ENABLED = 'true';
+process.env.FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT = '45';
+process.env.FUTURES_ENTRY_ENABLED = 'false';
+process.env.REVERSAL_INVENTORY_ENABLED = 'true';
+process.env.REVERSAL_RESCUE_MARGIN_PCT = '5';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -63,6 +71,63 @@ test('SHORT orders use an isolated client prefix and explicit position side', as
   await engine.createFuturesLimitOrder(symbol, 'sell', 1, 110, 2);
   assert.equal(submitted[1], 'sell');
   assert.equal(submitted[4].positionSide, 'SHORT');
+});
+
+test('SHORT exit-only mode blocks SELL entries but keeps BUY exits available', async () => {
+  const engine = shortEngine();
+  engine.entryGridEnabled = false;
+  engine.exposureLimits = null;
+  engine.canPlaceNewOrders = () => true;
+  let submitted = 0;
+  engine.exchange.createLimitOrder = async () => {
+    submitted += 1;
+    return { id: `order-${submitted}` };
+  };
+
+  assert.equal(await engine.createFuturesLimitOrder(symbol, 'sell', 1, 110, 2), null);
+  assert.ok(await engine.createFuturesLimitOrder(symbol, 'buy', 1, 100, 1));
+  assert.equal(submitted, 1);
+});
+
+test('SHORT exit-only mode has zero entry allocation but retains legacy exposure and rescue budget', async () => {
+  const engine = shortEngine();
+  engine.entryGridEnabled = false;
+  engine.exposureLimits = { symbol: 20, total: 40 };
+  engine.exposureBudgetLastCheckedAt = 0;
+  engine.exposureBudgetReferenceWalletBalance = 0;
+  engine.state = {
+    data: {},
+    save: async () => {},
+  };
+  engine.exchange.fetchBalance = async () => ({ total: { USDT: 100 } });
+  engine.exchange.fetchOpenOrders = async () => [];
+  engine.exchange.fetchPositions = async () => [{
+    symbol,
+    side: 'short',
+    contracts: 2,
+    entryPrice: 10,
+    markPrice: 10,
+    notional: -20,
+  }];
+
+  assert.equal(await engine.refreshExposureLimits({ force: true }), true);
+  assert.deepEqual(engine.exposureLimits, { symbol: 0, total: 0 });
+  assert.equal(engine.state.data.exposureBudget.status, 'EXIT_ONLY');
+  assert.equal(engine.state.data.exposureBudget.sidePct, 0);
+  assert.equal(engine.state.data.exposureBudget.currentExposure, 20);
+  assert.equal(engine.state.data.exposureBudget.rescueMarginPct, 5);
+  assert.equal(engine.state.data.exposureBudget.rescueSideCap, 25);
+});
+
+test('dynamic exposure cap determines the per-pair grid investment and order size', () => {
+  const engine = shortEngine();
+  engine.exposureLimits = { symbol: 300, total: 600 };
+  assert.equal(engine.getInvestmentLimitUsdt(), 300);
+  assert.equal(engine.getOrderSizeUsdt(), 30);
+
+  engine.exposureLimits = { symbol: 0, total: 0 };
+  assert.equal(engine.getInvestmentLimitUsdt(), 0);
+  assert.equal(engine.getOrderSizeUsdt(), 0);
 });
 
 test('SHORT exit target is below entry and covers two-sided fees', () => {

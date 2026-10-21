@@ -139,6 +139,7 @@ const POSITION_SIDE = Config.get('FUTURES_POSITION_SIDE', 'LONG').toUpperCase();
 const ENTRY_SIDE = POSITION_SIDE === 'SHORT' ? 'sell' : 'buy';
 const EXIT_SIDE = POSITION_SIDE === 'SHORT' ? 'buy' : 'sell';
 const ORDER_ID_PREFIX = POSITION_SIDE === 'SHORT' ? 'sgrid' : 'grid';
+const FUTURES_ENTRY_ENABLED = Config.boolean('FUTURES_ENTRY_ENABLED', true);
 const FUTURES_LONG_ENTRY_DIRECTION = Config.get(
   'FUTURES_LONG_ENTRY_DIRECTION', 'BULLISH'
 ).toUpperCase();
@@ -536,8 +537,8 @@ function validateRuntimeConfiguration() {
   requireNonNegative('GRID_TOTAL_INVESTMENT_USDT', GRID_TOTAL_INVESTMENT_USDT);
   requirePositive('FUTURES_MAX_SYMBOL_EXPOSURE_USDT', FUTURES_MAX_SYMBOL_EXPOSURE_USDT);
   requirePositive('FUTURES_MAX_TOTAL_EXPOSURE_USDT', FUTURES_MAX_TOTAL_EXPOSURE_USDT);
-  if (!(FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT > 0 && FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT <= 50)) {
-    errors.push('FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT must be greater than 0 and at most 50');
+  if (!(FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT > 0 && FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT <= 90)) {
+    errors.push('FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT must be greater than 0 and at most 90');
   }
   requireNonNegative(
     'FUTURES_DYNAMIC_EXPOSURE_REBALANCE_THRESHOLD_PCT',
@@ -1257,18 +1258,22 @@ class FuturesGridEngine {
     this.roiExitAlertedSymbols = new Set();
     this.roiCloseOrders = new Map();
     this.lastFundingSyncAt = new Map();
+    this.entryGridEnabled = FUTURES_ENTRY_ENABLED;
     const savedExposureBudget = this.state.data.exposureBudget;
     const savedBudgetMatchesConfig = FUTURES_DYNAMIC_EXPOSURE_ENABLED &&
       savedExposureBudget?.enabled === true &&
-      Number(savedExposureBudget.sidePct) === FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT &&
       Number(savedExposureBudget.leverage) === LEVERAGE &&
       Number(savedExposureBudget.pairCount) === SYMBOLS.length &&
-      Number(savedExposureBudget.sideCap) > 0;
+      (this.entryGridEnabled
+        ? Number(savedExposureBudget.sideCap) > 0
+        : Number(savedExposureBudget.sideCap) === 0);
     this.exposureLimits = savedBudgetMatchesConfig
       ? {
           symbol: Number(savedExposureBudget.symbolCap) || Number(savedExposureBudget.sideCap),
           total: Number(savedExposureBudget.sideCap),
         }
+      : !this.entryGridEnabled
+        ? { symbol: 0, total: 0 }
       : {
           symbol: FUTURES_DYNAMIC_EXPOSURE_ENABLED
             ? FUTURES_MAX_TOTAL_EXPOSURE_USDT
@@ -1500,9 +1505,21 @@ class FuturesGridEngine {
     return !killSwitchActive();
   }
 
+  canPlaceGridEntries() {
+    return this.entryGridEnabled !== false && this.canPlaceNewOrders();
+  }
+
+  getInvestmentLimitUsdt() {
+    if (FUTURES_DYNAMIC_EXPOSURE_ENABLED && Number.isFinite(Number(this.exposureLimits?.symbol))) {
+      return Math.max(0, Number(this.exposureLimits.symbol));
+    }
+    return GRID_TOTAL_INVESTMENT_USDT;
+  }
+
   getOrderSizeUsdt() {
-    if (GRID_TOTAL_INVESTMENT_USDT > 0) {
-      return GRID_TOTAL_INVESTMENT_USDT / Math.max(GRID_COUNT, 1);
+    const investmentLimit = this.getInvestmentLimitUsdt();
+    if (investmentLimit > 0 || FUTURES_DYNAMIC_EXPOSURE_ENABLED) {
+      return investmentLimit / Math.max(GRID_COUNT, 1);
     }
     return GRID_ORDER_SIZE_USDT;
   }
@@ -1549,8 +1566,9 @@ class FuturesGridEngine {
         .catch(error => {
           console.warn(`[ADAPTIVE-OUTCOME] ${symbol} outcome update failed: ${error.message}`);
         });
-      const exposureRatio = GRID_TOTAL_INVESTMENT_USDT > 0
-        ? this.getAllocatedInvestmentUsdt(symbol) / GRID_TOTAL_INVESTMENT_USDT
+      const investmentLimit = this.getInvestmentLimitUsdt();
+      const exposureRatio = investmentLimit > 0
+        ? this.getAllocatedInvestmentUsdt(symbol) / investmentLimit
         : 0;
       const marketSignalId = Object.values(analysis.timeframes || {})
         .map(timeframe => `${timeframe.timeframe}:${timeframe.lastClosedAt}`)
@@ -1588,7 +1606,7 @@ class FuturesGridEngine {
         await this.adaptiveSupervisorOutcomeJournal?.recordDecision(decision, {
           currentPrice,
           analysis,
-          investmentLimitUsdt: GRID_TOTAL_INVESTMENT_USDT,
+          investmentLimitUsdt: investmentLimit,
         });
       } catch (error) {
         console.warn(`[ADAPTIVE-OUTCOME] ${symbol} decision write failed: ${error.message}`);
@@ -1600,7 +1618,7 @@ class FuturesGridEngine {
         `changed=${decision.changed} exposure=${decision.exposurePct}% ` +
         `${decision.riskState ? `risk=${decision.riskState}->${decision.riskTargetState} ` : ''}` +
         `buy-weight=${weights.upper}/${weights.middle}/${weights.lower} ` +
-        `spacing=${decision.recommendation.spacingMultiplier} investment-cap=${GRID_TOTAL_INVESTMENT_USDT}USDT ` +
+        `spacing=${decision.recommendation.spacingMultiplier} investment-cap=${investmentLimit}USDT ` +
         `reasons=${decision.reasons.join(',')} ` +
         `${decision.riskReasons?.length ? `risk-reasons=${decision.riskReasons.join(',')}` : ''}`
       );
@@ -1637,7 +1655,8 @@ class FuturesGridEngine {
       };
     }
     const allocated = this.getAllocatedInvestmentUsdt(symbol);
-    const exposureRatio = GRID_TOTAL_INVESTMENT_USDT > 0 ? allocated / GRID_TOTAL_INVESTMENT_USDT : 0;
+    const investmentLimit = this.getInvestmentLimitUsdt();
+    const exposureRatio = investmentLimit > 0 ? allocated / investmentLimit : 0;
     if (exposureRatio >= ADAPTIVE_GRID_SUPERVISOR_RISK_EXPOSURE_PCT / 100) {
       return { ...recommendationFor(PROFILES.RISK_OFF), profile: PROFILES.RISK_OFF };
     }
@@ -1847,6 +1866,7 @@ class FuturesGridEngine {
       upper,
       autoRange: !manualRange,
       orderSizeUsdt: this.getOrderSizeUsdt(),
+      entryGridEnabled: this.entryGridEnabled !== false,
       rangeAdvisor: advisorState,
       volumeDeltaEntryGuard: symState.config.volumeDeltaEntryGuard,
     };
@@ -3069,6 +3089,7 @@ class FuturesGridEngine {
   async createFuturesLimitOrder(
     symbol, side, amount, price, levelIndex, refillCount = 0, sourceBuyLevelIndex = null
   ) {
+    if (side === ENTRY_SIDE && !this.canPlaceGridEntries()) return null;
     const clientOrderId = this.makeClientOrderId(
       symbol, side, levelIndex, refillCount, sourceBuyLevelIndex
     );
@@ -3174,32 +3195,47 @@ class FuturesGridEngine {
       throw new Error('USDT wallet balance is unavailable or zero');
     }
     const exposure = await this.fetchExposure();
-    const decision = decideExposureBudget({
-      walletBalance,
-      sidePct: FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT,
-      leverage: LEVERAGE,
-      pairCount: SYMBOLS.length,
-      referencePairCount: this.state.data.exposureBudget?.pairCount,
-      referenceLeverage: this.state.data.exposureBudget?.leverage ?? null,
-      currentLimits: this.exposureLimits,
-      referenceWalletBalance: this.exposureBudgetReferenceWalletBalance,
-      rebalanceThresholdPct: FUTURES_DYNAMIC_EXPOSURE_REBALANCE_THRESHOLD_PCT,
-      currentExposure: exposure.total,
-    });
+    const previousBudget = this.state.data.exposureBudget;
+    const entrySidePct = this.entryGridEnabled ? FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT : 0;
+    const rescueMarginPct = REVERSAL_INVENTORY_ENABLED ? REVERSAL_RESCUE_MARGIN_PCT : 0;
+    const rescueSideCap = roundNumber(walletBalance * rescueMarginPct / 100 * LEVERAGE, 2);
+    const rescueSymbolCap = roundNumber(rescueSideCap / SYMBOLS.length, 2);
+    const decision = this.entryGridEnabled
+      ? decideExposureBudget({
+          walletBalance,
+          sidePct: entrySidePct,
+          leverage: LEVERAGE,
+          pairCount: SYMBOLS.length,
+          referencePairCount: previousBudget?.pairCount,
+          referenceLeverage: previousBudget?.leverage ?? null,
+          referenceSidePct: previousBudget?.sidePct ?? entrySidePct,
+          currentLimits: this.exposureLimits,
+          referenceWalletBalance: this.exposureBudgetReferenceWalletBalance,
+          rebalanceThresholdPct: FUTURES_DYNAMIC_EXPOSURE_REBALANCE_THRESHOLD_PCT,
+          currentExposure: exposure.total,
+        })
+      : {
+          action: 'EXIT_ONLY',
+          target: { symbol: 0, total: 0 },
+          changePct: null,
+          limits: { symbol: 0, total: 0 },
+        };
 
-    if (decision.action === 'APPLIED' || decision.action === 'DEFERRED') {
+    if (['APPLIED', 'DEFERRED', 'EXIT_ONLY'].includes(decision.action)) {
       this.exposureLimits = decision.limits;
     }
-    if (decision.action === 'APPLIED') {
+    if (decision.action === 'APPLIED' || decision.action === 'EXIT_ONLY') {
       this.exposureBudgetReferenceWalletBalance = walletBalance;
     }
     this.state.data.exposureBudget = {
       enabled: true,
       positionSide: POSITION_SIDE,
-      sidePct: FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT,
+      entryGridEnabled: this.entryGridEnabled,
+      sidePct: entrySidePct,
       leverage: LEVERAGE,
-      combinedPct: FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT * 2,
-      bufferPct: Math.max(0, 100 - FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT * 2),
+      rescueMarginPct,
+      rescueSymbolCap,
+      rescueSideCap,
       pairCount: SYMBOLS.length,
       symbolCap: this.exposureLimits.symbol,
       sideCap: this.exposureLimits.total,
@@ -3209,11 +3245,15 @@ class FuturesGridEngine {
       walletChangePct: Number.isFinite(decision.changePct) ? decision.changePct : null,
       currentExposure: exposure.total,
       status: decision.action,
-      deferredReason: decision.action === 'DEFERRED' ? 'active_exposure' : null,
+      deferredReason: decision.action === 'DEFERRED'
+        ? 'active_exposure'
+        : decision.action === 'EXIT_ONLY' && exposure.total > 0
+          ? 'legacy_exposure'
+          : null,
       lastCheckedAt: new Date(now).toISOString(),
-      appliedAt: decision.action === 'APPLIED'
+      appliedAt: ['APPLIED', 'EXIT_ONLY'].includes(decision.action)
         ? new Date(now).toISOString()
-        : this.state.data.exposureBudget?.appliedAt || null,
+        : previousBudget?.appliedAt || null,
     };
     await this.state.save();
 
@@ -3228,8 +3268,14 @@ class FuturesGridEngine {
         `[EXPOSURE BUDGET] ${POSITION_SIDE} increase deferred until side exposure is zero: ` +
         `current=${roundNumber(exposure.total, 2)} USDT target-cap=${decision.target.total} USDT`
       );
+    } else if (decision.action === 'EXIT_ONLY' && previousBudget?.status !== 'EXIT_ONLY') {
+      console.log(
+        `[EXPOSURE BUDGET] ${POSITION_SIDE} exit-only: entry-cap=0 USDT ` +
+        `legacy-exposure=${roundNumber(exposure.total, 2)} USDT ` +
+        `rescue-pool=${rescueSideCap} USDT`
+      );
     }
-    return decision.action === 'APPLIED';
+    return decision.action === 'APPLIED' || decision.action === 'EXIT_ONLY';
   }
 
   async trimExcessBuys(symbol) {
@@ -4954,9 +5000,17 @@ class FuturesGridEngine {
     const volumeDeltaDecision = await this.getVolumeDeltaEntryDecision(symbol);
     const emaTrendDecision = await this.getEmaTrendEntryDecision(symbol);
     const priceMomentumDecision = await this.getPriceMomentumEntryDecision(symbol);
-    const entrySidePreferred = directionEntryPreferred && volumeDeltaDecision.allow &&
+    const entrySidePreferred = this.canPlaceGridEntries() && directionEntryPreferred && volumeDeltaDecision.allow &&
       emaTrendDecision.allow && priceMomentumDecision.allow;
-    if (!directionEntryPreferred) {
+    if (!this.entryGridEnabled) {
+      if (await this.cancelManagedEntryOrders(
+        symbol, managedOrders, 'entry grid disabled (exit-only mode)'
+      )) {
+        freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+        managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+      }
+      console.log(`[ENTRY] ${symbol} LONG grid is exit-only; BUY entries paused`);
+    } else if (!directionEntryPreferred) {
       const direction = this.getAppliedFibonacciDirection(symbol);
       if (await this.cancelManagedEntryOrders(
         symbol, managedOrders, `LONG direction gate rejected ${direction}`
@@ -5219,9 +5273,17 @@ class FuturesGridEngine {
     const volumeDeltaDecision = await this.getVolumeDeltaEntryDecision(symbol);
     const emaTrendDecision = await this.getEmaTrendEntryDecision(symbol);
     const priceMomentumDecision = await this.getPriceMomentumEntryDecision(symbol);
-    const entrySidePreferred = directionEntryPreferred && volumeDeltaDecision.allow &&
+    const entrySidePreferred = this.canPlaceGridEntries() && directionEntryPreferred && volumeDeltaDecision.allow &&
       emaTrendDecision.allow && priceMomentumDecision.allow;
-    if (!directionEntryPreferred) {
+    if (!this.entryGridEnabled) {
+      if (await this.cancelManagedEntryOrders(
+        symbol, managedOrders, 'entry grid disabled (exit-only mode)'
+      )) {
+        freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+        managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+      }
+      console.log(`[ENTRY] ${symbol} SHORT grid is exit-only; SELL entries paused`);
+    } else if (!directionEntryPreferred) {
       const direction = this.getAppliedFibonacciDirection(symbol);
       if (await this.cancelManagedEntryOrders(
         symbol, managedOrders, `SHORT direction gate rejected ${direction}`
@@ -5619,7 +5681,6 @@ class FuturesGridEngine {
   }
 
   getAllocatedInvestmentUsdt(symbol) {
-    if (!(GRID_TOTAL_INVESTMENT_USDT > 0)) return 0;
     const symState = this.state.getSymbol(symbol);
     let allocated = 0;
 
@@ -5638,8 +5699,11 @@ class FuturesGridEngine {
   }
 
   getRemainingInvestmentUsdt(symbol) {
-    if (!(GRID_TOTAL_INVESTMENT_USDT > 0)) return Infinity;
-    return Math.max(0, GRID_TOTAL_INVESTMENT_USDT - this.getAllocatedInvestmentUsdt(symbol));
+    const investmentLimit = this.getInvestmentLimitUsdt();
+    if (!(investmentLimit > 0)) {
+      return FUTURES_DYNAMIC_EXPOSURE_ENABLED ? 0 : Infinity;
+    }
+    return Math.max(0, investmentLimit - this.getAllocatedInvestmentUsdt(symbol));
   }
 
   amountForBuy(
@@ -5673,7 +5737,7 @@ class FuturesGridEngine {
   }
 
   warnIfInvestmentPermanentlyStuck(symbol, availableInvestmentUsdt, minCost) {
-    if (!(GRID_TOTAL_INVESTMENT_USDT > 0)) return;
+    if (!(this.getInvestmentLimitUsdt() > 0)) return;
     if (!(availableInvestmentUsdt > 0) || availableInvestmentUsdt >= minCost) return;
     if (this.stuckInvestmentWarned.has(symbol)) return;
     this.stuckInvestmentWarned.add(symbol);
@@ -5681,7 +5745,7 @@ class FuturesGridEngine {
       `[CONFIG] ${symbol} remaining investment ${roundNumber(availableInvestmentUsdt, 8)} USDT is below the ` +
       `exchange minimum order cost ${minCost} USDT. This leftover is PERMANENTLY stuck and cannot be used for ` +
       `new ${ENTRY_SIDE.toUpperCase()} orders until an exit adds funds back. Consider lowering GRID_COUNT, raising ` +
-      `GRID_TOTAL_INVESTMENT_USDT, or accepting fewer active buy levels.`
+      `the dynamic allocation, or accepting fewer active buy levels.`
     );
   }
 
@@ -5969,6 +6033,7 @@ Symbols: ${SYMBOLS.join(', ')}
 Leverage: ${LEVERAGE}x
 Margin Mode: ${MARGIN_MODE}
 Position Mode: HEDGE (trading ${POSITION_SIDE} side only)
+Entry Grid: ${this.entryGridEnabled ? 'ACTIVE' : 'EXIT-ONLY (normal entries disabled)'}
 Mutual Side Exclusion: ${FUTURES_MUTUAL_EXCLUSION_ENABLED
       ? `ON (Fibonacci ownership; cross-worker lock timeout=${FUTURES_MUTUAL_ENTRY_LOCK_TIMEOUT_MS}ms)`
       : 'OFF'}
@@ -5996,7 +6061,7 @@ Trailing Down: ${GRID_TRAILING_DOWN_ENABLED ? `ON (range-follow trigger, cooldow
 Active Order Policy: ${ENTRY_SIDE} entry hard-limit=${GRID_MAX_ACTIVE_BUY_ORDERS}, ${EXIT_SIDE} exit soft-warning=${GRID_MAX_ACTIVE_SELL_ORDERS}
 Exposure caps (${POSITION_SIDE} position + pending ${ENTRY_SIDE.toUpperCase()}): symbol=${this.exposureLimits.symbol} USDT, total=${this.exposureLimits.total} USDT
 Dynamic Exposure Allocation: ${FUTURES_DYNAMIC_EXPOSURE_ENABLED
-      ? `ON (${FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT}% per side; buffer=${Math.max(0, 100 - FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT * 2)}%; threshold=${FUTURES_DYNAMIC_EXPOSURE_REBALANCE_THRESHOLD_PCT}%; refresh=${FUTURES_DYNAMIC_EXPOSURE_REFRESH_MS / MINUTE_MS}m)`
+      ? `ON (${POSITION_SIDE} entry=${this.entryGridEnabled ? FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT : 0}% wallet margin; threshold=${FUTURES_DYNAMIC_EXPOSURE_REBALANCE_THRESHOLD_PCT}%; refresh=${FUTURES_DYNAMIC_EXPOSURE_REFRESH_MS / MINUTE_MS}m)`
       : 'OFF'}
 Max Refills Per Level: ${GRID_MAX_REFILLS}
 Exit Target: ${GRID_EXIT_TARGET_LEVEL_OFFSET === 0

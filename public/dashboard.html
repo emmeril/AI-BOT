@@ -8,8 +8,8 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/fontawesome/css/fontawesome.min.css?v=7.3.1">
   <link rel="stylesheet" href="/fontawesome/css/solid.min.css?v=7.3.1">
-  <link rel="stylesheet" href="/dashboard.css?v=20261020.3">
-  <script defer src="/dashboard.js?v=20261020.3"></script>
+  <link rel="stylesheet" href="/dashboard.css?v=20261021.1">
+  <script defer src="/dashboard.js?v=20261021.1"></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Lewati ke dashboard</a>
@@ -43,11 +43,11 @@
       </section>
 
       <section class="panel allocation-panel" aria-labelledby="allocation-title">
-        <div class="panel-head allocation-head"><div><p class="eyebrow">Alokasi</p><h2 class="panel-title" id="allocation-title">LONG / SHORT / Buffer</h2><p class="panel-copy">Batas exposure otomatis mengikuti saldo.</p></div><span class="status-code" id="allocation-mode">Menunggu</span></div>
+        <div class="panel-head allocation-head"><div><p class="eyebrow">Alokasi</p><h2 class="panel-title" id="allocation-title">Entry / Posisi / Rescue / Buffer</h2><p class="panel-copy">Alokasi entry dan rescue mengikuti saldo; posisi lama dihitung dari exposure nyata.</p></div><span class="status-code" id="allocation-mode">Menunggu</span></div>
         <div class="allocation-body">
           <div class="allocation-plan">
-            <div class="allocation-ratios" aria-hidden="true"><span id="allocation-long-pct">LONG N/A</span><span id="allocation-short-pct">SHORT N/A</span><span id="allocation-buffer-pct">BUFFER N/A</span></div>
-            <div class="allocation-track" id="allocation-track" role="img" aria-label="Komposisi alokasi exposure belum tersedia"><span class="allocation-long"></span><span class="allocation-short"></span><span class="allocation-buffer"></span></div>
+            <div class="allocation-ratios" aria-hidden="true"><span id="allocation-long-pct">LONG N/A</span><span id="allocation-short-pct">SHORT LAMA N/A</span><span id="allocation-rescue-pct">RESCUE N/A</span><span id="allocation-buffer-pct">BUFFER N/A</span></div>
+            <div class="allocation-track" id="allocation-track" role="img" aria-label="Komposisi alokasi belum tersedia"><span class="allocation-long"></span><span class="allocation-short"></span><span class="allocation-rescue"></span><span class="allocation-buffer"></span></div>
           </div>
           <div class="allocation-sides">
             <article class="allocation-side"><div><strong class="positive">LONG</strong><span class="allocation-state" id="long-allocation-status">Menunggu</span></div><p id="long-allocation-cap">Cap aktif N/A</p><small id="long-allocation-meta">Target dan evaluasi belum tersedia</small></article>
@@ -55,7 +55,9 @@
           </div>
           <dl class="allocation-meta">
             <div><dt>Saldo</dt><dd id="allocation-wallet">N/A</dd></div>
-            <div><dt>Cap per pair</dt><dd id="allocation-symbol-cap">N/A</dd></div>
+            <div><dt>Leverage</dt><dd id="allocation-leverage">N/A</dd></div>
+            <div><dt>Rescue LONG / pair</dt><dd id="allocation-long-rescue">N/A</dd></div>
+            <div><dt>Rescue SHORT / pair</dt><dd id="allocation-short-rescue">N/A</dd></div>
           </dl>
         </div>
       </section>

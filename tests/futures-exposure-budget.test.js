@@ -22,6 +22,14 @@ test('45 percent margin budget is multiplied by leverage and divided equally acr
   });
 });
 
+test('LONG-only allocation can use more than half the wallet while retaining an upper bound', () => {
+  assert.deepEqual(exposureBudgetTarget(100, 60, 5, 2), {
+    symbol: 150,
+    total: 300,
+  });
+  assert.throws(() => exposureBudgetTarget(100, 91, 5, 2), /at most 90%/);
+});
+
 test('budget rejects invalid leverage and configured pair count', () => {
   assert.throws(() => exposureBudgetTarget(100, 45, 0), /Leverage/);
   assert.throws(() => exposureBudgetTarget(100, 45, 5, 0), /Pair count/);
@@ -139,4 +147,22 @@ test('leverage-aware model migration applies immediately with active exposure', 
   });
   assert.equal(decision.action, 'APPLIED');
   assert.deepEqual(decision.limits, { symbol: 112.5, total: 225 });
+});
+
+test('an explicit side allocation change applies immediately with active exposure', () => {
+  const decision = decideExposureBudget({
+    walletBalance: 100,
+    sidePct: 60,
+    referenceSidePct: 45,
+    leverage: 5,
+    referenceLeverage: 5,
+    pairCount: 2,
+    referencePairCount: 2,
+    currentLimits: { symbol: 112.5, total: 225 },
+    referenceWalletBalance: 100,
+    rebalanceThresholdPct: 10,
+    currentExposure: 200,
+  });
+  assert.equal(decision.action, 'APPLIED');
+  assert.deepEqual(decision.limits, { symbol: 150, total: 300 });
 });

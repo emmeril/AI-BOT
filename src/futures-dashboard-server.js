@@ -358,12 +358,14 @@ function decisionSnapshot(engine, symbol, symState, orders, position, options = 
   const configuredCap = numberOrZero(process.env.GRID_TOTAL_INVESTMENT_USDT);
   const stateCap = numberOrZero(symState?.config?.orderSizeUsdt) * numberOrZero(symState?.config?.count);
   const gridInvestmentCap = positionSide === 'LONG' ? configuredCap : stateCap;
-  const symbolExposureCap = numberOrZero(options.exposureLimits?.symbol) || numberOrZero(
-    process.env[`${exposurePrefix}FUTURES_MAX_SYMBOL_EXPOSURE_USDT`]
-  ) || gridInvestmentCap;
-  const sideExposureCap = numberOrZero(options.exposureLimits?.total) || numberOrZero(
-    process.env[`${exposurePrefix}FUTURES_MAX_TOTAL_EXPOSURE_USDT`]
-  );
+  const hasSymbolExposureLimit = Number.isFinite(Number(options.exposureLimits?.symbol));
+  const hasSideExposureLimit = Number.isFinite(Number(options.exposureLimits?.total));
+  const symbolExposureCap = hasSymbolExposureLimit
+    ? Math.max(0, Number(options.exposureLimits.symbol))
+    : numberOrZero(process.env[`${exposurePrefix}FUTURES_MAX_SYMBOL_EXPOSURE_USDT`]) || gridInvestmentCap;
+  const sideExposureCap = hasSideExposureLimit
+    ? Math.max(0, Number(options.exposureLimits.total))
+    : numberOrZero(process.env[`${exposurePrefix}FUTURES_MAX_TOTAL_EXPOSURE_USDT`]);
   let allocatedInvestment = 0;
   if (positionSide === 'LONG' && typeof engine.getAllocatedInvestmentUsdt === 'function') {
     try {
@@ -384,7 +386,9 @@ function decisionSnapshot(engine, symbol, symState, orders, position, options = 
   }
   const exposurePct = symbolExposureCap > 0
     ? (allocatedInvestment / symbolExposureCap) * 100
-    : numberOrZero(adaptive?.exposurePct);
+    : options.entryGridEnabled === false
+      ? null
+      : numberOrZero(adaptive?.exposurePct);
   const minConfidence = numberOrZero(process.env.FIBONACCI_DIRECTION_MIN_CONFIDENCE || 0.65);
   const applyMode = String(process.env.FIBONACCI_DIRECTION_APPLY_MODE || 'REPORT_ONLY').toUpperCase();
   const directionStrategy = String(process.env.FIBONACCI_DIRECTION_STRATEGY || 'TREND').toUpperCase();
@@ -446,6 +450,7 @@ function decisionSnapshot(engine, symbol, symState, orders, position, options = 
       confirmationsRequired: numberOrZero(adaptive?.confirmationsRequired || process.env.ADAPTIVE_GRID_SUPERVISOR_PROFILE_CONFIRMATIONS),
       cooldownElapsed: adaptive?.cooldownElapsed ?? null,
       exposurePct,
+      entryGridEnabled: options.entryGridEnabled !== false,
       allocatedInvestment,
       investmentCap: symbolExposureCap,
       symbolExposureCap,
@@ -568,16 +573,43 @@ function exposureBudgetSnapshot(positionSide, budget, fallbackLimits) {
   return {
     available: Boolean(source),
     positionSide,
+    entryGridEnabled: source?.entryGridEnabled !== false,
     status: source?.status || 'PENDING',
     deferredReason: source?.deferredReason || null,
+    sidePct: numberOrZero(source?.sidePct),
     leverage: numberOrZero(source?.leverage),
     pairCount: numberOrZero(source?.pairCount),
     symbolCap: numberOrZero(source?.symbolCap ?? fallbackLimits?.symbol),
     sideCap: numberOrZero(source?.sideCap ?? fallbackLimits?.total),
     targetSideCap: numberOrZero(source?.targetSideCap ?? source?.sideCap ?? fallbackLimits?.total),
     currentExposure: numberOrZero(source?.currentExposure),
+    rescueMarginPct: numberOrZero(source?.rescueMarginPct),
+    rescueSymbolCap: numberOrZero(source?.rescueSymbolCap),
+    rescueSideCap: numberOrZero(source?.rescueSideCap),
     lastCheckedAt: source?.lastCheckedAt || null,
     appliedAt: source?.appliedAt || null,
+  };
+}
+
+function rescueBudgetSnapshot(budget, sideState) {
+  const configuredMarginPct = numberOrZero(budget?.rescueMarginPct);
+  const rescueStates = Object.values(sideState?.symbols || {})
+    .map(symbolState => symbolState?.reversalInventory)
+    .filter(reversal => reversal?.initializedAt);
+  const hasUnusedRescue = rescueStates.length === 0 || rescueStates.some(reversal =>
+    !reversal.rescueFilled && !reversal.rescueUsed && !reversal.rescueOrderId
+  );
+  const active = configuredMarginPct > 0 && (
+    budget?.entryGridEnabled !== false || (
+      numberOrZero(budget?.currentExposure) > 0 && hasUnusedRescue
+    )
+  );
+  return {
+    active,
+    marginPct: active ? configuredMarginPct : 0,
+    configuredMarginPct,
+    symbolCap: active ? numberOrZero(budget?.rescueSymbolCap) : 0,
+    sideCap: active ? numberOrZero(budget?.rescueSideCap) : 0,
   };
 }
 
@@ -652,21 +684,37 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedS
   const longBudget = engine.state.data?.exposureBudget || null;
   const shortBudget = shortState?.exposureBudget || null;
   const primaryBudget = longBudget || shortBudget;
-  const sidePct = numberOrZero(primaryBudget?.sidePct ?? process.env.FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT);
-  const combinedPct = numberOrZero(primaryBudget?.combinedPct) || sidePct * 2;
   const longExposureBudget = exposureBudgetSnapshot('LONG', longBudget, engine.exposureLimits);
   const shortExposureBudget = exposureBudgetSnapshot('SHORT', shortBudget, {
     symbol: process.env.SHORT_FUTURES_MAX_SYMBOL_EXPOSURE_USDT,
     total: process.env.SHORT_FUTURES_MAX_TOTAL_EXPOSURE_USDT,
   });
+  const longPct = longExposureBudget.sidePct;
+  const shortPct = shortExposureBudget.sidePct;
+  const combinedPct = Math.min(100, longPct + shortPct);
+  const longRescueBudget = rescueBudgetSnapshot(longExposureBudget, engine.state.data);
+  const shortRescueBudget = rescueBudgetSnapshot(shortExposureBudget, shortState);
+  const rescuePct = Math.min(100, longRescueBudget.marginPct + shortRescueBudget.marginPct);
+  const legacyPct = Math.min(100, [longExposureBudget, shortExposureBudget]
+    .filter(budget => budget.entryGridEnabled === false)
+    .reduce((sum, budget) => sum + (
+      walletBalance > 0 && budget.leverage > 0
+        ? budget.currentExposure / budget.leverage / walletBalance * 100
+        : 0
+    ), 0));
+  const bufferPct = Math.max(0, 100 - combinedPct - rescuePct - legacyPct);
   const longExchangeExposure = exposureBySymbol([symbol], positions, exchangeOrders, 'LONG').values[symbol];
   const shortExchangeExposure = exposureBySymbol([symbol], positions, exchangeOrders, 'SHORT').values[symbol];
   const longComparison = sideComparison('LONG', longAvailable, engine.circuitAllows(), longState, longOrders, long, leverage, longExchangeExposure);
   const shortComparison = sideComparison('SHORT', shortAvailable, shortRunning, selectedShortState, shortOrders, short, leverage, shortExchangeExposure);
   const selectedComparison = selectedPositionSide === 'SHORT' ? shortComparison : longComparison;
+  const selectedEntryGridEnabled = selectedPositionSide === 'SHORT'
+    ? selectedShortState.config?.entryGridEnabled !== false
+    : longState.config?.entryGridEnabled !== false;
   const intelligence = decisionSnapshot(engine, symbol, symState, orders, position, {
     positionSide: selectedPositionSide,
     pairExposure: selectedComparison.exposure,
+    entryGridEnabled: selectedEntryGridEnabled,
     exposureLimits: selectedPositionSide === 'SHORT'
       ? {
           symbol: shortState?.exposureBudget?.symbolCap,
@@ -680,7 +728,9 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedS
     generatedAt: new Date().toISOString(), refreshSeconds, dashboardAuthEnabled: authEnabled,
     source: 'Binance USDⓈ-M Futures',
     mode: process.env.EXCHANGE_MODE || 'testnet', running: selectedRunning,
-    tradingEnabled: selectedRunning && engine.canPlaceNewOrders(), symbols, selectedSymbol: symbol,
+    tradingEnabled: selectedRunning && engine.canPlaceNewOrders() && selectedEntryGridEnabled,
+    entryGridEnabled: selectedEntryGridEnabled,
+    symbols, selectedSymbol: symbol,
     positionSides: ['LONG', 'SHORT'], selectedPositionSide,
     sideAvailable: selectedPositionSide === 'SHORT' ? shortAvailable : longAvailable,
     comparison: {
@@ -693,13 +743,23 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedS
       enabled: Boolean(primaryBudget?.enabled),
       walletBalance,
       leverage,
-      sidePct,
+      sidePct: selectedPositionSide === 'SHORT' ? shortPct : longPct,
+      longPct,
+      shortPct,
       combinedPct,
-      bufferPct: numberOrZero(primaryBudget?.bufferPct) || Math.max(0, 100 - combinedPct),
+      legacyPct,
+      rescuePct,
+      bufferPct,
       rebalanceThresholdPct: numberOrZero(process.env.FUTURES_DYNAMIC_EXPOSURE_REBALANCE_THRESHOLD_PCT),
       refreshMinutes: numberOrZero(process.env.FUTURES_DYNAMIC_EXPOSURE_REFRESH_MINUTES),
       LONG: longExposureBudget,
       SHORT: shortExposureBudget,
+      rescue: {
+        totalPct: rescuePct,
+        totalCap: longRescueBudget.sideCap + shortRescueBudget.sideCap,
+        LONG: longRescueBudget,
+        SHORT: shortRescueBudget,
+      },
     },
     market: {
       price: marketPrice(engine, symbol, ticker.last), priceText: marketPriceText(engine, symbol, ticker.last),
