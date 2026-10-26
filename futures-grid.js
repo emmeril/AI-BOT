@@ -4510,6 +4510,7 @@ class FuturesGridEngine {
     const allocatedEntryFee = Number(entry.totalFeeQuote) * proportion;
     const profit = (allocatedEntryProceeds - allocatedEntryFee) - (price * amount + feeQuote);
     const refillCount = Math.max(0, Number(orderMeta.refillCount ?? entry.refillCount) || 0);
+    const combinedExit = entry.shortExitCombined === true;
 
     symState.realizedGridProfit += profit;
     this.state.data.totals.realizedGridProfit += profit;
@@ -4542,6 +4543,12 @@ class FuturesGridEngine {
       `Fee: ${signedUsdt(feeQuote)}`,
     ].join('\n'));
 
+    if (combinedExit) {
+      console.log(
+        `[SHORT EXIT] ${symbol} combined BUY filled amount=${amount}; immediate refill skipped`
+      );
+      return;
+    }
     if (!GRID_REFILL_ON_FILLED || !this.canPlaceNewOrders()) return;
     const nextRefillCount = refillCount + 1;
     if (nextRefillCount > GRID_MAX_REFILLS) return;
@@ -4549,8 +4556,14 @@ class FuturesGridEngine {
     if (!(entryPrice > 0) || this.hasActiveOrderAtLevel(symState, ENTRY_SIDE, entryLevelIndex)) return;
     if (this.countActiveOrders(symState, ENTRY_SIDE) >= GRID_MAX_ACTIVE_BUY_ORDERS) return;
     const remainingInvestment = this.getRemainingInvestmentUsdt(symbol);
-    const refillAmount = this.amountForBuy(symbol, entryPrice, remainingInvestment, 1);
+    let refillAmount = this.amountForBuy(symbol, entryPrice, remainingInvestment, 1);
+    const minimumExitAmount = this.getMinimumShortEntryAmountForExit(
+      symbol, levels, entryLevelIndex, entryPrice
+    );
+    if (minimumExitAmount > refillAmount) refillAmount = minimumExitAmount;
     if (!(refillAmount > 0)) return;
+    const refill = this.getPreciseOrderNumbers(symbol, entryPrice, refillAmount);
+    if (refill.notional > remainingInvestment + 1e-8) return;
     await this.placeLimit(symbol, ENTRY_SIDE, entryLevelIndex, entryPrice, refillAmount, {
       refillCount: nextRefillCount,
     });
@@ -5477,6 +5490,10 @@ class FuturesGridEngine {
       if (refillCount > GRID_MAX_REFILLS) continue;
       let amount = this.amountForBuy(symbol, level.price, remainingInvestment, 1);
       if (!(amount > 0)) break;
+      const minimumExitAmount = this.getMinimumShortEntryAmountForExit(
+        symbol, levels, level.index, level.price
+      );
+      if (minimumExitAmount > amount) amount = minimumExitAmount;
       let precise = this.getPreciseOrderNumbers(symbol, level.price, amount);
       const minCost = this.getMinCost(symbol);
       if (minCost > 0 && precise.notional < minCost - 1e-8) {
@@ -5498,6 +5515,16 @@ class FuturesGridEngine {
       .filter(order => String(order.side).toLowerCase() === EXIT_SIDE)
       .reduce((sum, order) => sum + this.getOpenOrderRemainingAmount(order), 0);
     let closableAmount = Math.max(0, positionAmount - reservedExitAmount);
+    const combinedExit = this.consolidateShortExitDust(
+      symbol, levels, currentPrice, symState, closableAmount
+    );
+    if (combinedExit) {
+      await this.state.save();
+      console.log(
+        `[SHORT EXIT] ${symbol} consolidated entry levels ${combinedExit.sourceLevels.join(',')} ` +
+        `into level ${combinedExit.entryLevelIndex} amount=${combinedExit.amount} for minimum-notional coverage`
+      );
+    }
     const trackedEntries = Object.entries(symState.lastBuyByLevel)
       .map(([entryLevelIndex, entry]) => ({ entryLevelIndex: Number(entryLevelIndex), entry }))
       .filter(item => Number.isInteger(item.entryLevelIndex) && item.entry)
@@ -5701,6 +5728,116 @@ class FuturesGridEngine {
     let precise = Number(buyPrice);
     try { precise = Number(this.exchange.priceToPrecision(symbol, buyPrice)); } catch {}
     return precise > 0 && precise <= this.getMaximumProfitableShortExitPrice(entry) + 1e-12;
+  }
+
+  getShortExitSizingPrice(symbol, levels, entryLevelIndex, entryPrice) {
+    const sourceLevel = Number(entryLevelIndex);
+    const preciseEntryPrice = Number(this.exchange.priceToPrecision(symbol, entryPrice));
+    if (!Array.isArray(levels) || !levels.length ||
+        !Number.isInteger(sourceLevel) || !(preciseEntryPrice > 0)) return 0;
+    const theoreticalEntry = {
+      amount: 1,
+      sellableAmount: 1,
+      totalCostQuote: preciseEntryPrice,
+      totalFeeQuote: preciseEntryPrice * BINANCE_FUTURES_MAKER_FEE_RATE,
+    };
+    const maximumPrice = this.getMaximumProfitableShortExitPrice(theoreticalEntry);
+    for (let index = Math.min(sourceLevel - 1, levels.length - 1); index >= 0; index--) {
+      const candidate = Number(levels[index]);
+      if (candidate > 0 && candidate < maximumPrice) return candidate;
+    }
+    const tick = this.getMarketTickSize(symbol);
+    if (!(tick > 0) || !(maximumPrice > tick)) return 0;
+    const rawPrice = Math.min(Number(levels[0]) - tick, maximumPrice - tick);
+    return Number(this.exchange.priceToPrecision(
+      symbol, Math.floor(rawPrice / tick) * tick
+    ));
+  }
+
+  getMinimumShortEntryAmountForExit(symbol, levels, entryLevelIndex, entryPrice) {
+    const minCost = this.getMinCost(symbol);
+    if (!(minCost > 0)) return 0;
+    const exitPrice = this.getShortExitSizingPrice(
+      symbol, levels, entryLevelIndex, entryPrice
+    );
+    if (!(exitPrice > 0)) return 0;
+    return this.getMinimumAmountForCost(symbol, exitPrice, minCost);
+  }
+
+  isShortExitMinimumNotionalBlocked(symbol, currentPrice, entry, amount) {
+    const minCost = this.getMinCost(symbol);
+    if (!(minCost > 0) || !(amount > 0)) return false;
+    const positionEntry = this.getPositionEntryFloor(symbol);
+    const maximumPrice = Math.min(
+      Number(currentPrice),
+      positionEntry > 0 ? positionEntry : Infinity,
+      this.getMaximumProfitableShortExitPrice(entry)
+    );
+    if (!(maximumPrice > 0) || !Number.isFinite(maximumPrice)) return false;
+    try {
+      return this.getPreciseOrderNumbers(symbol, maximumPrice, amount).notional < minCost - 1e-8;
+    } catch {
+      return false;
+    }
+  }
+
+  consolidateShortExitDust(symbol, levels, currentPrice, symState, closableAmount) {
+    if (!(closableAmount > 0)) return null;
+    symState.refillCountByLevel ||= {};
+    const entries = Object.entries(symState.lastBuyByLevel || {})
+      .map(([entryLevelIndex, entry]) => ({ entryLevelIndex: Number(entryLevelIndex), entry }))
+      .filter(item => Number.isInteger(item.entryLevelIndex) && item.entry)
+      .sort((left, right) => left.entryLevelIndex - right.entryLevelIndex);
+    const candidates = [];
+    let hasDust = false;
+    let available = closableAmount;
+
+    for (const item of entries) {
+      if (this.getActiveShortExitForEntry(symState, item.entryLevelIndex)) continue;
+      const trackedAmount = Math.max(0, Number(
+        item.entry.sellableAmount ?? item.entry.amount
+      ) || 0);
+      const amount = Math.min(trackedAmount, available);
+      available = Math.max(0, available - amount);
+      if (!(amount > 0) || amount + 1e-8 < trackedAmount) continue;
+      const target = this.findBuyTargetForShort(
+        symbol, levels, item.entryLevelIndex, item.entry,
+        { amount, maximumPrice: currentPrice }
+      );
+      if (!target && this.isShortExitMinimumNotionalBlocked(
+        symbol, currentPrice, item.entry, amount
+      )) hasDust = true;
+      candidates.push(item);
+    }
+
+    if (!hasDust || candidates.length < 2) return null;
+    let combined = null;
+    for (const { entry } of candidates) combined = this.mergeBuyRecords(combined, entry);
+    const entryLevelIndex = Math.max(...candidates.map(item => item.entryLevelIndex));
+    const sourceLevels = candidates.map(item => item.entryLevelIndex);
+    combined = {
+      ...combined,
+      shortExitCombined: true,
+      shortExitSourceLevels: sourceLevels,
+    };
+    const amount = Math.max(0, Number(combined.sellableAmount ?? combined.amount) || 0);
+    const target = this.findBuyTargetForShort(
+      symbol, levels, entryLevelIndex, combined,
+      { amount, maximumPrice: currentPrice }
+    );
+    if (!target) return null;
+
+    const refillCount = Math.max(...candidates.map(item =>
+      Math.max(0, Number(item.entry.refillCount) || 0)
+    ));
+    for (const item of candidates) {
+      delete symState.lastBuyByLevel[item.entryLevelIndex];
+      delete symState.refillCountByLevel[item.entryLevelIndex];
+      this.clearSellTargetWarning(symbol, item.entryLevelIndex);
+    }
+    symState.lastBuyByLevel[entryLevelIndex] = combined;
+    symState.refillCountByLevel[entryLevelIndex] = refillCount;
+    return { entryLevelIndex, sourceLevels, amount, target };
   }
 
   getActiveShortExitForEntry(symState, entryLevelIndex) {

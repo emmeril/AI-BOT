@@ -227,3 +227,182 @@ test('SHORT market exit is counted as a BUY fill', async () => {
   assert.ok(Math.abs(symState.realizedExitProfit - 9.958) < 1e-9);
   assert.deepEqual(symState.lastBuyByLevel, {});
 });
+
+test('SHORT dust entries consolidate into one profitable exit above minimum notional', () => {
+  const engine = shortEngine();
+  engine.exchange.markets[symbol] = {
+    precision: { price: 0.000001, amount: 1 },
+    limits: { cost: { min: 5 } },
+  };
+  engine.exchange.priceToPrecision = (_symbol, value) => Number(value).toFixed(6);
+  engine.exchange.amountToPrecision = (_symbol, value) => String(Math.floor(Number(value)));
+  engine.latestPositions.set(symbol, {
+    side: 'short', contracts: 3114, entryPrice: 0.004818642581888246,
+  });
+  const levels = [
+    0.004762, 0.004778, 0.00479, 0.004804, 0.004818, 0.004843, 0.004856,
+  ];
+  const symState = {
+    orders: {},
+    refillCountByLevel: { 3: 0, 4: 0, 5: 0 },
+    lastBuyByLevel: {
+      3: {
+        price: 0.004806, amount: 1041, sellableAmount: 1041,
+        totalCostQuote: 5.003046, totalFeeQuote: 0.0010006, refillCount: 0,
+      },
+      4: {
+        price: 0.004819, amount: 1038, sellableAmount: 1038,
+        totalCostQuote: 5.002122, totalFeeQuote: 0.00100042, refillCount: 0,
+      },
+      5: {
+        price: 0.004831, amount: 1035, sellableAmount: 1035,
+        totalCostQuote: 5.000085, totalFeeQuote: 0.00100001, refillCount: 0,
+      },
+    },
+  };
+
+  for (const [levelIndex, entry] of Object.entries(symState.lastBuyByLevel)) {
+    assert.equal(engine.findBuyTargetForShort(
+      symbol, levels, Number(levelIndex), entry,
+      { maximumPrice: 0.004844 }
+    ), null);
+  }
+
+  const result = engine.consolidateShortExitDust(
+    symbol, levels, 0.004844, symState, 3114
+  );
+
+  assert.deepEqual(result.sourceLevels, [3, 4, 5]);
+  assert.equal(result.entryLevelIndex, 5);
+  assert.equal(result.amount, 3114);
+  assert.ok(result.target.notional >= 5);
+  assert.deepEqual(Object.keys(symState.lastBuyByLevel), ['5']);
+  assert.equal(symState.lastBuyByLevel[5].shortExitCombined, true);
+  assert.equal(symState.lastBuyByLevel[5].sellableAmount, 3114);
+  assert.ok(Math.abs(symState.lastBuyByLevel[5].totalCostQuote - 15.005253) < 1e-10);
+  assert.ok(Math.abs(symState.lastBuyByLevel[5].totalFeeQuote - 0.00300103) < 1e-10);
+});
+
+test('SHORT dust consolidation leaves inventory with an active exit unchanged', () => {
+  const engine = shortEngine();
+  const first = {
+    amount: 0.045, sellableAmount: 0.045,
+    totalCostQuote: 4.95, totalFeeQuote: 0.001, refillCount: 0,
+  };
+  const second = {
+    amount: 0.044, sellableAmount: 0.044,
+    totalCostQuote: 4.84, totalFeeQuote: 0.001, refillCount: 0,
+  };
+  const symState = {
+    orders: {
+      active: { id: 'active', side: 'buy', levelIndex: 0, sourceBuyLevelIndex: 1 },
+    },
+    refillCountByLevel: { 1: 0, 2: 0 },
+    lastBuyByLevel: { 1: first, 2: second },
+  };
+
+  assert.equal(engine.consolidateShortExitDust(
+    symbol, [90, 100, 110], 105, symState, 0.044
+  ), null);
+  assert.strictEqual(symState.lastBuyByLevel[1], first);
+  assert.strictEqual(symState.lastBuyByLevel[2], second);
+});
+
+test('a single SHORT dust lot combines with uncovered inventory that could exit alone', () => {
+  const engine = shortEngine();
+  const symState = {
+    orders: {},
+    refillCountByLevel: { 2: 0, 3: 0 },
+    lastBuyByLevel: {
+      2: {
+        amount: 0.045, sellableAmount: 0.045,
+        totalCostQuote: 4.95, totalFeeQuote: 0.001, refillCount: 0,
+      },
+      3: {
+        amount: 0.06, sellableAmount: 0.06,
+        totalCostQuote: 6.6, totalFeeQuote: 0.0012, refillCount: 0,
+      },
+    },
+  };
+
+  assert.equal(engine.findBuyTargetForShort(
+    symbol, [80, 90, 100, 110], 2, symState.lastBuyByLevel[2],
+    { maximumPrice: 105 }
+  ), null);
+  assert.ok(engine.findBuyTargetForShort(
+    symbol, [80, 90, 100, 110], 3, symState.lastBuyByLevel[3],
+    { maximumPrice: 105 }
+  ));
+
+  const result = engine.consolidateShortExitDust(
+    symbol, [80, 90, 100, 110], 105, symState, 0.105
+  );
+
+  assert.deepEqual(result.sourceLevels, [2, 3]);
+  assert.equal(result.amount, 0.105);
+  assert.ok(result.target.notional >= 5);
+  assert.deepEqual(Object.keys(symState.lastBuyByLevel), ['3']);
+});
+
+test('SHORT entry sizing keeps the future BUY exit above minimum notional', () => {
+  const engine = shortEngine();
+  engine.exchange.markets[symbol] = {
+    precision: { price: 0.000001, amount: 1 },
+    limits: { cost: { min: 5 } },
+  };
+  engine.exchange.priceToPrecision = (_symbol, value) => Number(value).toFixed(6);
+  engine.exchange.amountToPrecision = (_symbol, value) => String(Math.floor(Number(value)));
+  const levels = [0.004762, 0.004778, 0.00479, 0.004804, 0.004818];
+
+  const amount = engine.getMinimumShortEntryAmountForExit(
+    symbol, levels, 4, levels[4]
+  );
+  const exitPrice = engine.getShortExitSizingPrice(symbol, levels, 4, levels[4]);
+
+  assert.ok(amount * exitPrice >= 5 - 1e-8);
+  assert.ok(amount * levels[4] > 5);
+});
+
+test('combined SHORT exit fill preserves profit accounting and does not double-refill', async () => {
+  const engine = shortEngine();
+  const symState = {
+    orders: {
+      exit: { id: 'exit', side: 'buy', levelIndex: 1, sourceBuyLevelIndex: 2 },
+    },
+    lastBuyByLevel: {
+      2: {
+        amount: 2,
+        sellableAmount: 2,
+        totalCostQuote: 220,
+        totalFeeQuote: 0.044,
+        refillCount: 1,
+        shortExitCombined: true,
+        shortExitSourceLevels: [1, 2],
+      },
+    },
+    refillCountByLevel: { 2: 1 },
+    filledBuys: 0,
+    filledSells: 2,
+    realizedGridProfit: 0,
+    tradingFees: 0,
+  };
+  let refillPlacements = 0;
+  engine.state = {
+    data: { totals: { filledBuys: 0, filledSells: 2, realizedGridProfit: 0, tradingFees: 0 } },
+    markProcessedTradeLocal: () => true,
+    save: async () => {},
+  };
+  engine.sendAlert = async () => {};
+  engine.canPlaceNewOrders = () => true;
+  engine.placeLimit = async () => { refillPlacements += 1; };
+
+  await engine.handleShortExitFill(symbol, [90, 100, 110], symState, {
+    id: 'combined-exit', order: 'exit', side: 'buy', price: 100, amount: 2,
+    fee: { cost: 0.04, currency: 'USDT' }, info: {},
+  }, { levelIndex: 1, sourceBuyLevelIndex: 2, refillCount: 1 }, new Set());
+
+  assert.ok(Math.abs(symState.realizedGridProfit - 19.916) < 1e-9);
+  assert.equal(symState.lastBuyByLevel[2], undefined);
+  assert.equal(symState.filledBuys, 1);
+  assert.equal(refillPlacements, 0);
+});
