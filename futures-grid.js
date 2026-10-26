@@ -1263,7 +1263,6 @@ class FuturesGridEngine {
     const savedBudgetMatchesConfig = FUTURES_DYNAMIC_EXPOSURE_ENABLED &&
       savedExposureBudget?.enabled === true &&
       Number(savedExposureBudget.leverage) === LEVERAGE &&
-      Number(savedExposureBudget.pairCount) === SYMBOLS.length &&
       (this.entryGridEnabled
         ? Number(savedExposureBudget.sideCap) > 0
         : Number(savedExposureBudget.sideCap) === 0);
@@ -2376,6 +2375,33 @@ class FuturesGridEngine {
       amountNum,
       notional: priceNum * amountNum,
     };
+  }
+
+  getMinimumAmountForCost(symbol, price, minCost = this.getMinCost(symbol)) {
+    const precisePrice = Number(this.exchange.priceToPrecision(symbol, price));
+    if (!(precisePrice > 0) || !(minCost > 0)) return 0;
+
+    const requiredAmount = minCost / precisePrice;
+    const amountPrecision = Number(this.exchange.markets?.[symbol]?.precision?.amount);
+    let amountStep = 0;
+    if (this.exchange.precisionMode === ccxt.TICK_SIZE && amountPrecision > 0) {
+      amountStep = amountPrecision;
+    } else if (this.exchange.precisionMode === ccxt.DECIMAL_PLACES &&
+        Number.isInteger(amountPrecision) && amountPrecision >= 0) {
+      amountStep = 10 ** -amountPrecision;
+    }
+
+    let candidate = amountStep > 0
+      ? Math.ceil((requiredAmount - Number.EPSILON) / amountStep) * amountStep
+      : requiredAmount * 1.000001;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const precise = this.getPreciseOrderNumbers(symbol, precisePrice, candidate);
+      if (precise.notional >= minCost - 1e-8) return precise.amountNum;
+      candidate = amountStep > 0
+        ? precise.amountNum + amountStep
+        : candidate * 1.01;
+    }
+    return 0;
   }
 
   async applyTrailingRangeShift(symbol, lower, upper, shift, direction) {
@@ -4290,7 +4316,6 @@ class FuturesGridEngine {
       const weight = Number.isFinite(adaptiveWeight) ? adaptiveWeight : 1;
       const remainingInvestmentUsdt = this.getRemainingInvestmentUsdt(symbol);
       let amountToBuy = this.amountForBuy(symbol, buyPrice, remainingInvestmentUsdt, weight);
-      let cost = amountToBuy * buyPrice;
       if (!(amountToBuy > 0)) {
         console.warn(
           `[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | adaptive minimum or investment cap reached`
@@ -4298,15 +4323,15 @@ class FuturesGridEngine {
         return;
       }
       const minCost = this.getMinCost(symbol);
-      if (minCost > 0 && cost < minCost - 1e-8) {
-        amountToBuy = minCost / buyPrice;
-        cost = amountToBuy * buyPrice;
-        if (cost < minCost - 1e-8) {
+      let precise = this.getPreciseOrderNumbers(symbol, buyPrice, amountToBuy);
+      if (minCost > 0 && precise.notional < minCost - 1e-8) {
+        amountToBuy = this.getMinimumAmountForCost(symbol, buyPrice, minCost);
+        precise = this.getPreciseOrderNumbers(symbol, buyPrice, amountToBuy);
+        if (precise.notional < minCost - 1e-8) {
           console.warn(`[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | cannot meet min notional ${minCost}`);
           return;
         }
       }
-      const precise = this.getPreciseOrderNumbers(symbol, buyPrice, amountToBuy);
       if (precise.notional > remainingInvestmentUsdt + 1e-8) {
         console.warn(
           `[SKIP] ${symbol} BUY refill level=${buyLevelIndex} | rounded cost ${precise.notional.toFixed(8)} exceeds remaining investment ${roundNumber(remainingInvestmentUsdt, 8)}`
@@ -5121,7 +5146,6 @@ class FuturesGridEngine {
       const adaptiveWeight = Number(level.weight);
       const weight = Number.isFinite(adaptiveWeight) ? adaptiveWeight : 1;
       let amount = this.amountForBuy(symbol, level.price, remainingInvestmentUsdt, weight);
-      let cost = amount * level.price;
       if (!(amount > 0)) {
         const recommendation = this.getAdaptiveRecommendation(symbol);
         if (recommendation && this.getOrderSizeUsdt() * weight < this.getMinCost(symbol) - 1e-8) {
@@ -5132,18 +5156,17 @@ class FuturesGridEngine {
       }
 
       const minCost = this.getMinCost(symbol);
-      if (minCost > 0 && cost < minCost - 1e-8) {
-        const requiredAmount = minCost / level.price;
-        amount = this.exchange.amountToPrecision(symbol, requiredAmount);
-        cost = Number(amount) * level.price;
-        if (cost < minCost - 1e-8) {
+      let precise = this.getPreciseOrderNumbers(symbol, level.price, amount);
+      if (minCost > 0 && precise.notional < minCost - 1e-8) {
+        amount = this.getMinimumAmountForCost(symbol, level.price, minCost);
+        precise = this.getPreciseOrderNumbers(symbol, level.price, amount);
+        if (precise.notional < minCost - 1e-8) {
           console.warn(`[SKIP] ${symbol} BUY level=${level.index} | cannot meet min notional ${minCost}`);
           break;
         }
       }
 
-      const precise = this.getPreciseOrderNumbers(symbol, level.price, amount);
-      cost = precise.notional;
+      const cost = precise.notional;
       if (cost > remainingInvestmentUsdt + 1e-8) {
         console.warn(
           `[SKIP] ${symbol} BUY level=${level.index} | rounded cost ${cost.toFixed(8)} exceeds remaining investment ${roundNumber(remainingInvestmentUsdt, 8)}`
@@ -5383,7 +5406,7 @@ class FuturesGridEngine {
       let precise = this.getPreciseOrderNumbers(symbol, level.price, amount);
       const minCost = this.getMinCost(symbol);
       if (minCost > 0 && precise.notional < minCost - 1e-8) {
-        amount = minCost / level.price;
+        amount = this.getMinimumAmountForCost(symbol, level.price, minCost);
         precise = this.getPreciseOrderNumbers(symbol, level.price, amount);
       }
       if (precise.notional > remainingInvestment + 1e-8 ||

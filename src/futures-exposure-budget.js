@@ -72,7 +72,8 @@ function decideExposureBudget({
   }
 
   const currentTotal = finitePositive(currentLimits?.total);
-  if (!leverageChanged && !sidePctChanged && target.total > currentTotal && finitePositive(currentExposure) > 0) {
+  const hasReferenceWallet = finitePositive(referenceWalletBalance) > 0;
+  if (hasReferenceWallet && !leverageChanged && !sidePctChanged && target.total > currentTotal && finitePositive(currentExposure) > 0) {
     return {
       action: 'DEFERRED',
       target,

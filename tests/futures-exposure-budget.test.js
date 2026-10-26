@@ -99,6 +99,22 @@ test('budget applies reductions but defers increases while exposure is active', 
   assert.deepEqual(flat.limits, { symbol: 54, total: 54 });
 });
 
+test('budget applies the configured target when no valid wallet reference exists', () => {
+  const decision = decideExposureBudget({
+    walletBalance: 92.73,
+    sidePct: 80,
+    leverage: 5,
+    pairCount: 3,
+    referencePairCount: 3,
+    currentLimits: { symbol: 41.68, total: 41.68 },
+    referenceWalletBalance: 0,
+    rebalanceThresholdPct: 1,
+    currentExposure: 322.3,
+  });
+  assert.equal(decision.action, 'APPLIED');
+  assert.deepEqual(decision.limits, { symbol: 123.64, total: 370.92 });
+});
+
 test('pair count changes rebalance immediately without waiting for wallet threshold', () => {
   const decision = decideExposureBudget({
     walletBalance: 92.62192843,
