@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const {
   decideExposureBudget,
   exposureBudgetTarget,
+  stagedSideAllocation,
   walletBalanceUsdt,
   walletChangePct,
 } = require('../src/futures-exposure-budget');
@@ -181,4 +182,63 @@ test('an explicit side allocation change applies immediately with active exposur
   });
   assert.equal(decision.action, 'APPLIED');
   assert.deepEqual(decision.limits, { symbol: 150, total: 300 });
+});
+
+test('staged allocation reserves margin and promotes one step after confirmation', () => {
+  const base = {
+    walletBalance: 100,
+    leverage: 5,
+    maximumSidePct: 35,
+    startingSidePct: 10,
+    stepPct: 5,
+    reservedMarginPct: 30,
+    requiredConfirmations: 3,
+  };
+  const held = stagedSideAllocation({
+    ...base,
+    oppositeExposure: 300,
+    currentSidePct: 10,
+  });
+  assert.equal(held.safeMaximumPct, 10);
+  assert.equal(held.sidePct, 10);
+  assert.equal(held.action, 'UNCHANGED');
+
+  const confirming = stagedSideAllocation({
+    ...base,
+    oppositeExposure: 275,
+    currentSidePct: 10,
+    promotionConfirmations: 1,
+  });
+  assert.equal(confirming.safeMaximumPct, 15);
+  assert.equal(confirming.sidePct, 10);
+  assert.equal(confirming.promotionConfirmations, 2);
+  assert.equal(confirming.action, 'CONFIRMING');
+
+  const promoted = stagedSideAllocation({
+    ...base,
+    oppositeExposure: 275,
+    currentSidePct: 10,
+    promotionConfirmations: 2,
+  });
+  assert.equal(promoted.sidePct, 15);
+  assert.equal(promoted.action, 'PROMOTED');
+});
+
+test('staged allocation reduces immediately when the reserved margin is threatened', () => {
+  const reduced = stagedSideAllocation({
+    walletBalance: 100,
+    leverage: 5,
+    oppositeExposure: 325,
+    currentSidePct: 20,
+    maximumSidePct: 35,
+    startingSidePct: 10,
+    stepPct: 5,
+    reservedMarginPct: 30,
+    promotionConfirmations: 2,
+    requiredConfirmations: 3,
+  });
+  assert.equal(reduced.safeMaximumPct, 5);
+  assert.equal(reduced.sidePct, 0);
+  assert.equal(reduced.promotionConfirmations, 0);
+  assert.equal(reduced.action, 'REDUCED');
 });

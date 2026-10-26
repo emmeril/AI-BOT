@@ -366,7 +366,7 @@ function renderMarkdown(report) {
     '- Fibonacci remains the only range and grid-level generator.',
     '- Every exit uses the nearest fee-adjusted profitable Fibonacci level.',
     '- Indicators use only completed 5-minute candles and do not use Volume Delta.',
-    '- Order size and per-symbol cap match live: LONG 5 USDT, SHORT 6 USDT, cap 22 USDT.',
+    `- Order size: LONG ${report.configuration.longOrderSizeUsdt} USDT, SHORT ${report.configuration.shortOrderSizeUsdt} USDT; per-symbol cap ${report.configuration.maxExposureUsdt} USDT.`,
     '- The first 45 days are training and the final 45 days are out-of-sample.',
     '- Queue position, slippage, latency, liquidation tiers, and exact intrabar ordering are not simulated.',
     ''
@@ -381,6 +381,12 @@ async function main() {
   const end = Date.parse(reference.period.end);
   const splitAt = Date.parse(reference.period.splitAt);
   const screenOnly = String(process.env.BACKTEST_SCREEN_ONLY || '').toLowerCase() === 'true';
+  const requestedMaxExposure = Number(process.env.BACKTEST_MAX_EXPOSURE_USDT);
+  const maxExposureUsdt = Number.isFinite(requestedMaxExposure) && requestedMaxExposure > 0
+    ? requestedMaxExposure
+    : 22;
+  const longOrderSizeUsdt = 5;
+  const shortOrderSizeUsdt = 6;
   const scopes = screenOnly
     ? { full: { start, end, perSymbol: {} } }
     : {
@@ -408,8 +414,8 @@ async function main() {
           const options = {
             ...reference.configuration[side],
             minimumNotional,
-            orderSizeUsdt: side === 'SHORT' ? 6 : 5,
-            maxExposureUsdt: 22,
+            orderSizeUsdt: side === 'SHORT' ? shortOrderSizeUsdt : longOrderSizeUsdt,
+            maxExposureUsdt,
             exitTargetLevelOffset: 0,
             longEntryDirection: variant.longEntryDirection,
             shortEntryDirection: variant.shortEntryDirection,
@@ -466,6 +472,11 @@ async function main() {
     period: reference.period,
     symbols,
     screenOnly,
+    configuration: {
+      maxExposureUsdt,
+      longOrderSizeUsdt,
+      shortOrderSizeUsdt,
+    },
     variants: ACTIVE_VARIANTS.map(({ decide, ...variant }) => variant),
     ...scopes,
   };

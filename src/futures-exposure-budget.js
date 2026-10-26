@@ -48,6 +48,78 @@ function walletChangePct(referenceWalletBalance, walletBalance) {
   return Math.abs(current - reference) / reference * 100;
 }
 
+function stagedSideAllocation({
+  walletBalance,
+  leverage = 1,
+  oppositeExposure = 0,
+  currentSidePct,
+  maximumSidePct,
+  startingSidePct,
+  stepPct,
+  reservedMarginPct,
+  promotionConfirmations = 0,
+  requiredConfirmations = 1,
+}) {
+  const wallet = finitePositive(walletBalance);
+  const multiplier = finitePositive(leverage);
+  const maximum = finitePositive(maximumSidePct);
+  const starting = finitePositive(startingSidePct);
+  const step = finitePositive(stepPct);
+  const reserved = Math.max(0, Number(reservedMarginPct) || 0);
+  const required = Math.max(1, Math.floor(Number(requiredConfirmations) || 1));
+  if (!(wallet > 0) || !(multiplier > 0)) throw new Error('Wallet and leverage must be positive');
+  if (!(maximum > 0 && maximum <= 90)) throw new Error('Maximum side allocation must be at most 90%');
+  if (!(starting > 0 && starting <= maximum)) throw new Error('Starting side allocation must not exceed maximum');
+  if (!(step > 0)) throw new Error('Allocation step must be positive');
+  if (!(reserved >= 0 && reserved < 100)) throw new Error('Reserved margin must be below 100%');
+
+  const walletNotional = wallet * multiplier;
+  const oppositePct = Math.max(0, Number(oppositeExposure) || 0) / walletNotional * 100;
+  const rawSafePct = Math.max(0, 100 - reserved - oppositePct);
+  const safeMaximumPct = Math.min(
+    maximum,
+    Math.floor((rawSafePct + 1e-9) / step) * step
+  );
+  const current = Math.max(0, Math.min(maximum, Number(currentSidePct) || starting));
+
+  if (safeMaximumPct < current) {
+    return {
+      sidePct: safeMaximumPct >= starting ? safeMaximumPct : 0,
+      safeMaximumPct,
+      oppositePct,
+      promotionConfirmations: 0,
+      action: 'REDUCED',
+    };
+  }
+  if (safeMaximumPct <= current) {
+    return {
+      sidePct: current,
+      safeMaximumPct,
+      oppositePct,
+      promotionConfirmations: 0,
+      action: 'UNCHANGED',
+    };
+  }
+
+  const confirmations = Math.max(0, Math.floor(Number(promotionConfirmations) || 0)) + 1;
+  if (confirmations < required) {
+    return {
+      sidePct: current,
+      safeMaximumPct,
+      oppositePct,
+      promotionConfirmations: confirmations,
+      action: 'CONFIRMING',
+    };
+  }
+  return {
+    sidePct: Math.min(safeMaximumPct, current > 0 ? current + step : starting),
+    safeMaximumPct,
+    oppositePct,
+    promotionConfirmations: 0,
+    action: 'PROMOTED',
+  };
+}
+
 function decideExposureBudget({
   walletBalance,
   sidePct,
@@ -88,6 +160,7 @@ function decideExposureBudget({
 module.exports = {
   decideExposureBudget,
   exposureBudgetTarget,
+  stagedSideAllocation,
   walletBalanceUsdt,
   walletChangePct,
 };

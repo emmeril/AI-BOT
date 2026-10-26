@@ -64,6 +64,38 @@ test('SHORT entry grid can be switched to exit-only independently', () => {
   assert.equal(exitOnly.FUTURES_ENTRY_ENABLED, 'false');
 });
 
+test('SHORT dynamic exposure accepts a side-specific allocation', () => {
+  const inherited = buildShortEnvironment({
+    FUTURES_DYNAMIC_EXPOSURE_ENABLED: 'true',
+    FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT: '35',
+  });
+  assert.equal(inherited.FUTURES_DYNAMIC_EXPOSURE_ENABLED, 'true');
+  assert.equal(inherited.FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT, '35');
+
+  const overridden = buildShortEnvironment({
+    FUTURES_DYNAMIC_EXPOSURE_ENABLED: 'true',
+    FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT: '35',
+    SHORT_FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT: '10',
+  });
+  assert.equal(overridden.FUTURES_DYNAMIC_EXPOSURE_ENABLED, 'true');
+  assert.equal(overridden.FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT, '10');
+});
+
+test('SHORT automatic ramp accepts side-specific controls', () => {
+  const environment = buildShortEnvironment({
+    SHORT_FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_ENABLED: 'true',
+    SHORT_FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_START_PCT: '10',
+    SHORT_FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_STEP_PCT: '5',
+    SHORT_FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_RESERVED_MARGIN_PCT: '30',
+    SHORT_FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_CONFIRMATIONS: '3',
+  });
+  assert.equal(environment.FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_ENABLED, 'true');
+  assert.equal(environment.FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_START_PCT, '10');
+  assert.equal(environment.FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_STEP_PCT, '5');
+  assert.equal(environment.FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_RESERVED_MARGIN_PCT, '30');
+  assert.equal(environment.FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_CONFIRMATIONS, '3');
+});
+
 test('SHORT inherits reversal inventory controls and accepts side-specific overrides', () => {
   const inherited = buildShortEnvironment({
     REVERSAL_INVENTORY_ENABLED: 'true',

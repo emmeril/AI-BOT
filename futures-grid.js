@@ -30,6 +30,7 @@ const { syncIncome, incomeMetrics } = require('./src/futures-income');
 const { exposureBySymbol } = require('./src/futures-exposure');
 const {
   decideExposureBudget,
+  stagedSideAllocation,
   walletBalanceUsdt,
 } = require('./src/futures-exposure-budget');
 const { displayNumber, signedUsdt, sellOverview, sellFillMessage } = require('./src/futures-display');
@@ -242,6 +243,21 @@ const FUTURES_DYNAMIC_EXPOSURE_REFRESH_MINUTES = Config.number(
 const FUTURES_DYNAMIC_EXPOSURE_REFRESH_MS = Math.max(
   FUTURES_DYNAMIC_EXPOSURE_REFRESH_MINUTES, 1
 ) * MINUTE_MS;
+const FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_ENABLED = Config.boolean(
+  'FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_ENABLED', false
+);
+const FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_START_PCT = Config.number(
+  'FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_START_PCT', 10
+);
+const FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_STEP_PCT = Config.number(
+  'FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_STEP_PCT', 5
+);
+const FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_RESERVED_MARGIN_PCT = Config.number(
+  'FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_RESERVED_MARGIN_PCT', 30
+);
+const FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_CONFIRMATIONS = Config.number(
+  'FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_CONFIRMATIONS', 3
+);
 const GRID_MAX_ACTIVE_BUY_ORDERS = Config.number('GRID_MAX_ACTIVE_BUY_ORDERS', 5);
 const GRID_MAX_ACTIVE_SELL_ORDERS = Config.number('GRID_MAX_ACTIVE_SELL_ORDERS', 5);
 const GRID_RECREATE_ON_START = Config.boolean('GRID_RECREATE_ON_START', false);
@@ -545,6 +561,28 @@ function validateRuntimeConfiguration() {
     FUTURES_DYNAMIC_EXPOSURE_REBALANCE_THRESHOLD_PCT
   );
   requirePositive('FUTURES_DYNAMIC_EXPOSURE_REFRESH_MINUTES', FUTURES_DYNAMIC_EXPOSURE_REFRESH_MINUTES);
+  if (FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_ENABLED) {
+    if (!FUTURES_DYNAMIC_EXPOSURE_ENABLED) {
+      errors.push('FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_ENABLED requires FUTURES_DYNAMIC_EXPOSURE_ENABLED=true');
+    }
+    if (!(FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_START_PCT > 0 &&
+        FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_START_PCT <= FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT)) {
+      errors.push('FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_START_PCT must be greater than 0 and at most the side allocation');
+    }
+    requirePositive(
+      'FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_STEP_PCT',
+      FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_STEP_PCT
+    );
+    if (!(FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_RESERVED_MARGIN_PCT >= 0 &&
+        FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_RESERVED_MARGIN_PCT < 100)) {
+      errors.push('FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_RESERVED_MARGIN_PCT must be between 0 and 100');
+    }
+    requireInteger(
+      'FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_CONFIRMATIONS',
+      FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_CONFIRMATIONS,
+      1
+    );
+  }
   requirePositive(
     GRID_TOTAL_INVESTMENT_USDT > 0 ? 'GRID_TOTAL_INVESTMENT_USDT' : 'GRID_ORDER_SIZE_USDT',
     GRID_TOTAL_INVESTMENT_USDT > 0 ? GRID_TOTAL_INVESTMENT_USDT : GRID_ORDER_SIZE_USDT
@@ -3204,7 +3242,11 @@ class FuturesGridEngine {
     // Reading positions after orders conservatively counts fills during the snapshot twice.
     const positions = await this.exchange.fetchPositions(SYMBOLS);
     const exposure = exposureBySymbol(SYMBOLS, positions, orders, POSITION_SIDE);
-    return { ...exposure, orders };
+    const oppositePositionSide = POSITION_SIDE === 'SHORT' ? 'LONG' : 'SHORT';
+    const oppositeExposure = exposureBySymbol(
+      SYMBOLS, positions, orders, oppositePositionSide
+    );
+    return { ...exposure, orders, oppositeTotal: oppositeExposure.total };
   }
 
   async refreshExposureLimits({ force = false } = {}) {
@@ -3222,11 +3264,27 @@ class FuturesGridEngine {
     }
     const exposure = await this.fetchExposure();
     const previousBudget = this.state.data.exposureBudget;
-    const entrySidePct = this.entryGridEnabled ? FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT : 0;
+    const autoRamp = FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_ENABLED && this.entryGridEnabled
+      ? stagedSideAllocation({
+          walletBalance,
+          leverage: LEVERAGE,
+          oppositeExposure: exposure.oppositeTotal,
+          currentSidePct: previousBudget?.sidePct ?? FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_START_PCT,
+          maximumSidePct: FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT,
+          startingSidePct: FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_START_PCT,
+          stepPct: FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_STEP_PCT,
+          reservedMarginPct: FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_RESERVED_MARGIN_PCT,
+          promotionConfirmations: previousBudget?.autoRampPromotionConfirmations,
+          requiredConfirmations: FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_CONFIRMATIONS,
+        })
+      : null;
+    const entrySidePct = this.entryGridEnabled
+      ? autoRamp?.sidePct ?? FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT
+      : 0;
     const rescueMarginPct = REVERSAL_INVENTORY_ENABLED ? REVERSAL_RESCUE_MARGIN_PCT : 0;
     const rescueSideCap = roundNumber(walletBalance * rescueMarginPct / 100 * LEVERAGE, 2);
     const rescueSymbolCap = roundNumber(rescueSideCap / SYMBOLS.length, 2);
-    const decision = this.entryGridEnabled
+    const decision = this.entryGridEnabled && entrySidePct > 0
       ? decideExposureBudget({
           walletBalance,
           sidePct: entrySidePct,
@@ -3241,7 +3299,7 @@ class FuturesGridEngine {
           currentExposure: exposure.total,
         })
       : {
-          action: 'EXIT_ONLY',
+          action: this.entryGridEnabled ? 'APPLIED' : 'EXIT_ONLY',
           target: { symbol: 0, total: 0 },
           changePct: null,
           limits: { symbol: 0, total: 0 },
@@ -3270,6 +3328,13 @@ class FuturesGridEngine {
       referenceWalletBalance: this.exposureBudgetReferenceWalletBalance,
       walletChangePct: Number.isFinite(decision.changePct) ? decision.changePct : null,
       currentExposure: exposure.total,
+      oppositeExposure: exposure.oppositeTotal,
+      configuredSidePct: FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT,
+      autoRampEnabled: FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_ENABLED,
+      autoRampAction: autoRamp?.action || null,
+      autoRampSafeMaximumPct: autoRamp?.safeMaximumPct ?? null,
+      autoRampOppositePct: autoRamp?.oppositePct ?? null,
+      autoRampPromotionConfirmations: autoRamp?.promotionConfirmations || 0,
       status: decision.action,
       deferredReason: decision.action === 'DEFERRED'
         ? 'active_exposure'
@@ -3282,6 +3347,15 @@ class FuturesGridEngine {
         : previousBudget?.appliedAt || null,
     };
     await this.state.save();
+
+    if (autoRamp && autoRamp.action !== 'UNCHANGED') {
+      console.log(
+        `[EXPOSURE RAMP] ${POSITION_SIDE} ${autoRamp.action.toLowerCase()}: ` +
+        `active=${entrySidePct}% safe-max=${autoRamp.safeMaximumPct}% ` +
+        `opposite=${roundNumber(exposure.oppositeTotal, 2)} USDT ` +
+        `confirmation=${autoRamp.promotionConfirmations}/${FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_CONFIRMATIONS}`
+      );
+    }
 
     if (decision.action === 'APPLIED') {
       console.log(
@@ -6085,6 +6159,9 @@ Active Order Policy: ${ENTRY_SIDE} entry hard-limit=${GRID_MAX_ACTIVE_BUY_ORDERS
 Exposure caps (${POSITION_SIDE} position + pending ${ENTRY_SIDE.toUpperCase()}): symbol=${this.exposureLimits.symbol} USDT, total=${this.exposureLimits.total} USDT
 Dynamic Exposure Allocation: ${FUTURES_DYNAMIC_EXPOSURE_ENABLED
       ? `ON (${POSITION_SIDE} entry=${this.entryGridEnabled ? FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT : 0}% wallet margin; threshold=${FUTURES_DYNAMIC_EXPOSURE_REBALANCE_THRESHOLD_PCT}%; refresh=${FUTURES_DYNAMIC_EXPOSURE_REFRESH_MS / MINUTE_MS}m)`
+      : 'OFF'}
+Automatic Exposure Ramp: ${FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_ENABLED
+      ? `ON (start=${FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_START_PCT}%; max=${FUTURES_DYNAMIC_EXPOSURE_SIDE_PCT}%; step=${FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_STEP_PCT}%; reserve=${FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_RESERVED_MARGIN_PCT}%; confirmations=${FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_CONFIRMATIONS})`
       : 'OFF'}
 Max Refills Per Level: ${GRID_MAX_REFILLS}
 Exit Target: ${GRID_EXIT_TARGET_LEVEL_OFFSET === 0
