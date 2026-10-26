@@ -8,8 +8,8 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/fontawesome/css/fontawesome.min.css?v=7.3.1">
   <link rel="stylesheet" href="/fontawesome/css/solid.min.css?v=7.3.1">
-  <link rel="stylesheet" href="/dashboard.css?v=20261021.7">
-  <script defer src="/dashboard.js?v=20261021.7"></script>
+  <link rel="stylesheet" href="/dashboard.css?v=20261026.1">
+  <script defer src="/dashboard.js?v=20261026.1"></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Lewati ke dashboard</a>
@@ -17,6 +17,10 @@
     <header class="topbar">
       <div class="brand"><div class="brand-mark" aria-hidden="true">GF</div><div><p class="brand-kicker" id="source-label">Binance</p><h1>Grid Flow Control</h1></div></div>
       <div class="top-actions">
+        <div class="position-switch" role="group" aria-label="Pilih sisi posisi">
+          <button class="position-switch-button" type="button" data-position-side="LONG" aria-pressed="true">LONG</button>
+          <button class="position-switch-button" type="button" data-position-side="SHORT" aria-pressed="false">SHORT</button>
+        </div>
         <label class="sr-only" for="symbol-select">Pilih pair</label>
         <select class="pair-select mono" id="symbol-select" aria-label="Pilih pair trading"></select>
         <button class="control-button" id="refresh-button" type="button" aria-label="Perbarui data" title="Perbarui data"><i class="fa-solid fa-rotate-right refresh-icon" aria-hidden="true"></i><span class="sr-only">Perbarui</span></button>
@@ -31,20 +35,27 @@
 
     <main id="main-content">
       <section class="comparison-board" aria-labelledby="comparison-title">
-        <div class="comparison-lead"><p class="eyebrow">Ringkasan</p><h2 id="comparison-title">Posisi LONG</h2><p>Exposure dan PnL pair terpilih.</p></div>
-        <div class="comparison-total"><span>Exposure LONG</span><strong id="long-exposure">N/A</strong><small>Pair terpilih</small></div>
-        <div class="comparison-total"><span>PnL LONG</span><strong id="long-pnl">N/A</strong><small>Setelah fee</small></div>
-        <div class="comparison-total"><span>Status LONG</span><strong id="long-runtime">Menunggu</strong><small>BUY → SELL</small></div>
+        <div class="comparison-lead"><p class="eyebrow">Ringkasan</p><h2 id="comparison-title">LONG dan SHORT</h2><p>Exposure, PnL, dan status kedua sisi pada pair terpilih.</p></div>
+        <article class="side-summary" data-summary-side="LONG">
+          <div class="side-summary-head"><strong>LONG</strong><span>BUY masuk, SELL keluar</span></div>
+          <dl><div><dt>Exposure</dt><dd id="long-exposure">N/A</dd></div><div><dt>PnL</dt><dd id="long-pnl">N/A</dd></div><div><dt>Status</dt><dd id="long-runtime">Menunggu</dd></div></dl>
+        </article>
+        <article class="side-summary" data-summary-side="SHORT">
+          <div class="side-summary-head"><strong>SHORT</strong><span>SELL masuk, BUY keluar</span></div>
+          <dl><div><dt>Exposure</dt><dd id="short-exposure">N/A</dd></div><div><dt>PnL</dt><dd id="short-pnl">N/A</dd></div><div><dt>Status</dt><dd id="short-runtime">Menunggu</dd></div></dl>
+        </article>
       </section>
 
       <section class="panel allocation-panel" aria-labelledby="allocation-title">
-        <div class="panel-head allocation-head"><div><p class="eyebrow">Alokasi</p><h2 class="panel-title" id="allocation-title">Modal LONG pair terpilih</h2><p class="panel-copy" id="allocation-copy">Menunggu pair dan pembagian modal.</p></div><span class="status-code" id="allocation-mode">Menunggu</span></div>
+        <div class="panel-head allocation-head"><div><p class="eyebrow">Alokasi</p><h2 class="panel-title" id="allocation-title">Modal pair terpilih</h2><p class="panel-copy" id="allocation-copy">Menunggu pair dan pembagian modal.</p></div><span class="status-code" id="allocation-mode">Menunggu</span></div>
         <div class="allocation-body">
           <dl class="allocation-meta">
             <div><dt>Saldo</dt><dd id="allocation-wallet">N/A</dd></div>
             <div><dt>Leverage</dt><dd id="allocation-leverage">N/A</dd></div>
             <div><dt>Total pair</dt><dd id="allocation-pair-count">N/A</dd></div>
             <div><dt>Sisa margin</dt><dd id="allocation-buffer-pct">N/A</dd></div>
+            <div><dt>Alokasi aktif</dt><dd id="allocation-active-pct">N/A</dd></div>
+            <div><dt>Target / aman</dt><dd id="allocation-ramp-limit">N/A</dd></div>
           </dl>
           <div class="allocation-pair-list" id="allocation-pair-list" aria-live="polite"><div class="allocation-empty">Memuat alokasi pair terpilih.</div></div>
         </div>

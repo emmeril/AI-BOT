@@ -570,6 +570,11 @@ function sideComparison(positionSide, available, running, symState, orders, rawP
 
 function exposureBudgetSnapshot(positionSide, budget, fallbackLimits) {
   const source = budget && typeof budget === 'object' ? budget : null;
+  const prefix = positionSide === 'SHORT' ? 'SHORT_' : '';
+  const autoRampRequiredConfirmations = numberOrZero(
+    source?.autoRampRequiredConfirmations ??
+    process.env[`${prefix}FUTURES_DYNAMIC_EXPOSURE_AUTO_RAMP_CONFIRMATIONS`]
+  ) || 1;
   return {
     available: Boolean(source),
     positionSide,
@@ -583,6 +588,14 @@ function exposureBudgetSnapshot(positionSide, budget, fallbackLimits) {
     sideCap: numberOrZero(source?.sideCap ?? fallbackLimits?.total),
     targetSideCap: numberOrZero(source?.targetSideCap ?? source?.sideCap ?? fallbackLimits?.total),
     currentExposure: numberOrZero(source?.currentExposure),
+    oppositeExposure: numberOrZero(source?.oppositeExposure),
+    configuredSidePct: numberOrZero(source?.configuredSidePct ?? source?.sidePct),
+    autoRampEnabled: Boolean(source?.autoRampEnabled),
+    autoRampAction: source?.autoRampAction || null,
+    autoRampSafeMaximumPct: numberOrZero(source?.autoRampSafeMaximumPct),
+    autoRampOppositePct: numberOrZero(source?.autoRampOppositePct),
+    autoRampPromotionConfirmations: numberOrZero(source?.autoRampPromotionConfirmations),
+    autoRampRequiredConfirmations,
     rescueMarginPct: numberOrZero(source?.rescueMarginPct),
     rescueSymbolCap: numberOrZero(source?.rescueSymbolCap),
     rescueSideCap: numberOrZero(source?.rescueSideCap),

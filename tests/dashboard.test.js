@@ -170,6 +170,10 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
     exposureBudget: {
       enabled: true, entryGridEnabled: false, sidePct: 0, leverage: 5,
       symbolCap: 0, sideCap: 0, targetSideCap: 0, currentExposure: 38,
+      oppositeExposure: 225, configuredSidePct: 35,
+      autoRampEnabled: true, autoRampAction: 'UNCHANGED',
+      autoRampSafeMaximumPct: 10, autoRampOppositePct: 45,
+      autoRampPromotionConfirmations: 0, autoRampRequiredConfirmations: 3,
       rescueMarginPct: 5, rescueSymbolCap: 12.5, rescueSideCap: 25,
       status: 'EXIT_ONLY', deferredReason: 'legacy_exposure', lastCheckedAt: '2026-10-19T00:00:00.000Z',
     },
@@ -287,6 +291,11 @@ test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one
   assert.equal(snapshot.exposureAllocation.LONG.status, 'APPLIED');
   assert.equal(snapshot.exposureAllocation.SHORT.status, 'EXIT_ONLY');
   assert.equal(snapshot.exposureAllocation.SHORT.targetSideCap, 0);
+  assert.equal(snapshot.exposureAllocation.SHORT.configuredSidePct, 35);
+  assert.equal(snapshot.exposureAllocation.SHORT.autoRampEnabled, true);
+  assert.equal(snapshot.exposureAllocation.SHORT.autoRampSafeMaximumPct, 10);
+  assert.equal(snapshot.exposureAllocation.SHORT.autoRampOppositePct, 45);
+  assert.equal(snapshot.exposureAllocation.SHORT.autoRampRequiredConfirmations, 3);
   assert.equal(snapshot.exposureAllocation.rescue.LONG.symbolCap, 12.5);
   assert.equal(snapshot.exposureAllocation.rescue.SHORT.symbolCap, 0);
 
