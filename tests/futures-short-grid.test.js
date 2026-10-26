@@ -363,6 +363,42 @@ test('SHORT entry sizing keeps the future BUY exit above minimum notional', () =
   assert.ok(amount * levels[4] > 5);
 });
 
+test('tracked exit allocation ignores insignificant floating-point residue', () => {
+  const engine = shortEngine();
+
+  assert.equal(engine.getAvailableTrackedAmount(1038, 1037.999999999998), 1038);
+  assert.equal(engine.getAvailableTrackedAmount(1038, 1037.5), 1037.5);
+});
+
+test('unsafe legacy SHORT entries are cancelled before they can create exit dust', async () => {
+  const engine = shortEngine();
+  const cancelled = [];
+  const forgotten = [];
+  engine.exchange.cancelOrder = async id => { cancelled.push(id); };
+  engine.state = {
+    getSymbol: () => ({
+      orders: {
+        unsafe: { levelIndex: 2 },
+        safe: { levelIndex: 2 },
+        rescue: { levelIndex: 2, kind: 'REVERSAL_RESCUE' },
+      },
+    }),
+    forgetOrder: async (_symbol, id) => { forgotten.push(id); },
+  };
+  const orders = [
+    { id: 'unsafe', side: 'sell', price: 110, amount: 0.045, remaining: 0.045 },
+    { id: 'safe', side: 'sell', price: 110, amount: 0.06, remaining: 0.06 },
+    { id: 'rescue', side: 'sell', price: 110, amount: 0.045, remaining: 0.045 },
+    { id: 'exit', side: 'buy', price: 100, amount: 0.045, remaining: 0.045 },
+  ];
+
+  assert.equal(await engine.cancelUnsafeShortEntryOrders(
+    symbol, [90, 100, 110], orders
+  ), 1);
+  assert.deepEqual(cancelled, ['unsafe']);
+  assert.deepEqual(forgotten, ['unsafe']);
+});
+
 test('combined SHORT exit fill preserves profit accounting and does not double-refill', async () => {
   const engine = shortEngine();
   const symState = {

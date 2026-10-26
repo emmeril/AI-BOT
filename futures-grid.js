@@ -2415,6 +2415,12 @@ class FuturesGridEngine {
     };
   }
 
+  getAvailableTrackedAmount(trackedAmount, availableAmount) {
+    const tracked = Math.max(0, Number(trackedAmount) || 0);
+    const available = Math.max(0, Number(availableAmount) || 0);
+    return available + 1e-8 >= tracked ? tracked : available;
+  }
+
   getMinimumAmountForCost(symbol, price, minCost = this.getMinCost(symbol)) {
     const precisePrice = Number(this.exchange.priceToPrecision(symbol, price));
     if (!(precisePrice > 0) || !(minCost > 0)) return 0;
@@ -5286,7 +5292,7 @@ class FuturesGridEngine {
       if (this.getActiveSellOrderForBuyLevel(symState, buyLevelIndex)) continue;
       const trackedAmount = Math.max(0, Number(trackedBuy.sellableAmount ?? trackedBuy.amount) || 0);
       if (!(trackedAmount > 0)) continue;
-      let amount = Math.min(trackedAmount, baseFree);
+      let amount = this.getAvailableTrackedAmount(trackedAmount, baseFree);
       if (!(amount > 0)) {
         console.warn(`[SKIP] ${symbol} SELL sourceBuy=${buyLevelIndex} | insufficient free position`);
         continue;
@@ -5306,7 +5312,8 @@ class FuturesGridEngine {
         { refillCount, sourceBuyLevelIndex: buyLevelIndex, referencePrice: currentPrice }
       );
       if (!order) continue;
-      baseFree -= amount;
+      const placedAmount = Number(order.amount) || amount;
+      baseFree = Math.max(0, baseFree - placedAmount);
     }
 
     console.log(
@@ -5375,6 +5382,10 @@ class FuturesGridEngine {
     let managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
     const symState = this.state.getSymbol(symbol);
     if (await this.cancelShortBuysAbovePositionEntry(symbol, managedOrders)) {
+      freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
+      managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
+    }
+    if (await this.cancelUnsafeShortEntryOrders(symbol, levels, managedOrders)) {
       freshOpenOrders = await retry(() => this.exchange.fetchOpenOrders(symbol));
       managedOrders = await this.getManagedOpenOrders(symbol, freshOpenOrders);
     }
@@ -5532,7 +5543,7 @@ class FuturesGridEngine {
     for (const { entryLevelIndex, entry } of trackedEntries) {
       if (this.getActiveShortExitForEntry(symState, entryLevelIndex)) continue;
       const trackedAmount = Math.max(0, Number(entry.sellableAmount ?? entry.amount) || 0);
-      const amount = Math.min(trackedAmount, closableAmount);
+      const amount = this.getAvailableTrackedAmount(trackedAmount, closableAmount);
       if (!(amount > 0)) continue;
       const target = this.findBuyTargetForShort(symbol, levels, entryLevelIndex, entry, {
         amount,
@@ -5551,7 +5562,10 @@ class FuturesGridEngine {
           referencePrice: currentPrice,
         }
       );
-      if (order) closableAmount -= amount;
+      if (order) {
+        const placedAmount = Number(order.amount) || amount;
+        closableAmount = Math.max(0, closableAmount - placedAmount);
+      }
     }
 
     const activePosition = this.getActivePosition(positions, symbol);
@@ -5600,6 +5614,34 @@ class FuturesGridEngine {
       );
     }
     return invalid.length;
+  }
+
+  async cancelUnsafeShortEntryOrders(symbol, levels, managedOrders) {
+    const minCost = this.getMinCost(symbol);
+    if (!(minCost > 0)) return 0;
+    const symState = this.state?.getSymbol?.(symbol) || { orders: {} };
+    let cancelled = 0;
+    for (const order of managedOrders || []) {
+      if (String(order?.side).toLowerCase() !== ENTRY_SIDE) continue;
+      const meta = symState.orders?.[String(order.id)] || this.getBotOrderMeta(order);
+      if (meta?.kind === 'REVERSAL_RESCUE' || meta?.isReversalRescue) continue;
+      const entryLevelIndex = Number.isInteger(Number(meta?.levelIndex))
+        ? Number(meta.levelIndex)
+        : this.getLevelIndex(levels, Number(order.price));
+      const exitPrice = this.getShortExitSizingPrice(
+        symbol, levels, entryLevelIndex, Number(order.price)
+      );
+      const amount = this.getOpenOrderRemainingAmount(order);
+      if (!(exitPrice > 0) || !(amount > 0)) continue;
+      const exit = this.getPreciseOrderNumbers(symbol, exitPrice, amount);
+      if (exit.notional >= minCost - 1e-8) continue;
+      await this.cancelOrder(
+        symbol, order,
+        `SHORT entry cannot produce a ${minCost} USDT minimum-notional BUY exit`
+      );
+      cancelled++;
+    }
+    return cancelled;
   }
 
   amountForTrackedSell(symbol, sellLevelIndex) {
