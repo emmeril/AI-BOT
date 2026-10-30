@@ -3311,7 +3311,7 @@ class FuturesGridEngine {
           limits: { symbol: 0, total: 0 },
         };
 
-    if (['APPLIED', 'DEFERRED', 'EXIT_ONLY'].includes(decision.action)) {
+    if (['APPLIED', 'EXIT_ONLY'].includes(decision.action)) {
       this.exposureLimits = decision.limits;
     }
     if (decision.action === 'APPLIED' || decision.action === 'EXIT_ONLY') {
@@ -3342,9 +3342,7 @@ class FuturesGridEngine {
       autoRampOppositePct: autoRamp?.oppositePct ?? null,
       autoRampPromotionConfirmations: autoRamp?.promotionConfirmations || 0,
       status: decision.action,
-      deferredReason: decision.action === 'DEFERRED'
-        ? 'active_exposure'
-        : decision.action === 'EXIT_ONLY' && exposure.total > 0
+      deferredReason: decision.action === 'EXIT_ONLY' && exposure.total > 0
           ? 'legacy_exposure'
           : null,
       lastCheckedAt: new Date(now).toISOString(),
@@ -3368,11 +3366,6 @@ class FuturesGridEngine {
         `[EXPOSURE BUDGET] ${POSITION_SIDE} applied: wallet=${roundNumber(walletBalance, 2)} USDT ` +
         `leverage=${LEVERAGE}x pairs=${SYMBOLS.length} symbol-cap=${this.exposureLimits.symbol} USDT ` +
         `side-cap=${this.exposureLimits.total} USDT`
-      );
-    } else if (decision.action === 'DEFERRED') {
-      console.log(
-        `[EXPOSURE BUDGET] ${POSITION_SIDE} increase deferred until side exposure is zero: ` +
-        `current=${roundNumber(exposure.total, 2)} USDT target-cap=${decision.target.total} USDT`
       );
     } else if (decision.action === 'EXIT_ONLY' && previousBudget?.status !== 'EXIT_ONLY') {
       console.log(

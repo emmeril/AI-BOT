@@ -131,7 +131,6 @@ function decideExposureBudget({
   currentLimits,
   referenceWalletBalance,
   rebalanceThresholdPct,
-  currentExposure = 0,
 }) {
   const target = exposureBudgetTarget(walletBalance, sidePct, leverage, pairCount);
   const changePct = walletChangePct(referenceWalletBalance, walletBalance);
@@ -141,17 +140,6 @@ function decideExposureBudget({
   const sidePctChanged = Number(referenceSidePct) !== Number(sidePct);
   if (!pairCountChanged && !leverageChanged && !sidePctChanged && changePct < threshold) {
     return { action: 'UNCHANGED', target, changePct, limits: currentLimits };
-  }
-
-  const currentTotal = finitePositive(currentLimits?.total);
-  const hasReferenceWallet = finitePositive(referenceWalletBalance) > 0;
-  if (hasReferenceWallet && !leverageChanged && !sidePctChanged && target.total > currentTotal && finitePositive(currentExposure) > 0) {
-    return {
-      action: 'DEFERRED',
-      target,
-      changePct,
-      limits: { ...currentLimits, symbol: Math.min(target.symbol, currentTotal) },
-    };
   }
 
   return { action: 'APPLIED', target, changePct, limits: target };

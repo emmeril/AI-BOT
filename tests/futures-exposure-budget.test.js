@@ -62,7 +62,7 @@ test('budget ignores sub-threshold balance movement', () => {
   assert.deepEqual(decision.limits, { symbol: 22, total: 45 });
 });
 
-test('budget applies reductions but defers increases while exposure is active', () => {
+test('budget applies reductions and increases while exposure is active', () => {
   const reduction = decideExposureBudget({
     walletBalance: 80,
     sidePct: 45,
@@ -84,8 +84,8 @@ test('budget applies reductions but defers increases while exposure is active', 
     rebalanceThresholdPct: 10,
     currentExposure: 5,
   });
-  assert.equal(increase.action, 'DEFERRED');
-  assert.deepEqual(increase.limits, { symbol: 45, total: 45 });
+  assert.equal(increase.action, 'APPLIED');
+  assert.deepEqual(increase.limits, { symbol: 54, total: 54 });
 
   const flat = decideExposureBudget({
     walletBalance: 120,
@@ -132,7 +132,7 @@ test('pair count changes rebalance immediately without waiting for wallet thresh
   assert.deepEqual(decision.limits, { symbol: 20.84, total: 41.68 });
 });
 
-test('pair cap changes immediately while an active exposure defers only a total-cap increase', () => {
+test('pair and total caps change together while exposure is active', () => {
   const decision = decideExposureBudget({
     walletBalance: 120,
     sidePct: 45,
@@ -144,9 +144,9 @@ test('pair cap changes immediately while an active exposure defers only a total-
     rebalanceThresholdPct: 10,
     currentExposure: 20,
   });
-  assert.equal(decision.action, 'DEFERRED');
+  assert.equal(decision.action, 'APPLIED');
   assert.deepEqual(decision.target, { symbol: 13.5, total: 54 });
-  assert.deepEqual(decision.limits, { symbol: 13.5, total: 45 });
+  assert.deepEqual(decision.limits, { symbol: 13.5, total: 54 });
 });
 
 test('leverage-aware model migration applies immediately with active exposure', () => {
