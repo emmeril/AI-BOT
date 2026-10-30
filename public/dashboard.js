@@ -269,42 +269,96 @@
     };
   }
 
-  function renderComparison() {
-    const comparison = state.data.comparison || {};
-    for (const side of ['LONG', 'SHORT']) {
-      const metrics = comparison[side] || {};
-      const key = side.toLowerCase();
-      text(`${key}-exposure`, metrics.available ? `${money(metrics.exposure, 2)} ${quote()}` : 'Tidak dikelola');
-      text(`${key}-pnl`, metrics.available ? `${signed(metrics.strategyPnl, 4)} ${quote()}` : 'N/A');
-      text(`${key}-runtime`, !metrics.available ? 'Pair tidak aktif' : metrics.running ? 'Bot online' : 'Bot offline');
-      pnlTone(byId(`${key}-pnl`), metrics.available ? metrics.strategyPnl : null);
+  function setAllocationSegment(id, value) {
+    const element = byId(id);
+    if (!element) return;
+    const share = clamp(num(value), 0, 100);
+    element.style.flex = `0 0 ${share}%`;
+    element.setAttribute('aria-label', `${element.title} ${percent(share, 0)}`);
+  }
+
+  function renderPlainOverview() {
+    const data = state.data;
+    const comparison = data.comparison || {};
+    const allocation = data.exposureAllocation || {};
+    const execution = intel().execution || {};
+    const selectedSide = positionSide();
+    const position = data.futures?.position;
+    const uncovered = num(execution.uncovered);
+    const coverage = nullable(execution.exitCoveragePct ?? execution.sellCoveragePct);
+    const long = comparison.LONG || {};
+    const short = comparison.SHORT || {};
+    const workersOnline = Boolean(long.available && long.running && short.available && short.running);
+    const exitProtected = !position || (uncovered <= 0 && coverage !== null && coverage >= 99.999);
+    const healthState = !workersOnline ? 'error' : exitProtected ? 'safe' : 'attention';
+
+    byId('health-mark').dataset.state = healthState;
+    text('plain-title', !workersOnline
+      ? 'Ada bot yang tidak aktif'
+      : exitProtected
+        ? 'Bot aktif dan exit aman'
+        : 'Order exit perlu diperiksa');
+    text('health-copy', !workersOnline
+      ? 'Salah satu sisi bot tidak terhubung. Periksa status LONG dan SHORT di bawah.'
+      : !position
+        ? `Bot ${selectedSide} aktif. Pair ini belum memiliki posisi yang perlu ditutup.`
+        : exitProtected
+          ? `Posisi ${selectedSide} pada pair ini sudah memiliki order exit untuk seluruh kontrak.`
+          : `${compact(uncovered)} kontrak ${selectedSide} belum memiliki order exit aktif.`);
+    text('health-long', !long.available ? 'Tidak tersedia' : long.running ? 'Aktif' : 'Offline');
+    text('health-short', !short.available ? 'Tidak tersedia' : short.running ? 'Aktif' : 'Offline');
+    text('health-exit', !position ? 'Tidak diperlukan' : exitProtected ? 'Terlindungi 100%' : 'Perlu perhatian');
+
+    const longTarget = clamp(num(allocation.LONG?.configuredSidePct ?? allocation.longPct), 0, 100);
+    const shortTarget = clamp(num(allocation.SHORT?.configuredSidePct ?? allocation.shortPct), 0, 100);
+    const rescueLong = clamp(num(allocation.rescue?.LONG?.configuredMarginPct), 0, 100);
+    const rescueShort = clamp(num(allocation.rescue?.SHORT?.configuredMarginPct), 0, 100);
+    const plannedBuffer = clamp(100 - longTarget - shortTarget - rescueLong - rescueShort, 0, 100);
+    const planTotal = longTarget + shortTarget + rescueLong + rescueShort + plannedBuffer;
+
+    text('plan-long-pct', percent(longTarget, 0));
+    text('plan-short-pct', percent(shortTarget, 0));
+    text('plan-rescue-long-pct', percent(rescueLong, 0));
+    text('plan-rescue-short-pct', percent(rescueShort, 0));
+    text('plan-buffer-pct', percent(plannedBuffer, 0));
+    text('portfolio-status', Math.abs(planTotal - 100) < .01 ? 'Total 100%' : `Total ${percent(planTotal, 0)}`);
+    setAllocationSegment('segment-long', longTarget);
+    setAllocationSegment('segment-short', shortTarget);
+    setAllocationSegment('segment-rescue-long', rescueLong);
+    setAllocationSegment('segment-rescue-short', rescueShort);
+    setAllocationSegment('segment-buffer', plannedBuffer);
+
+    const shortCurrent = clamp(num(allocation.SHORT?.sidePct ?? allocation.shortPct), 0, 100);
+    const pairCount = Math.max(num(allocation.LONG?.pairCount), num(allocation.SHORT?.pairCount));
+    const temporaryReserve = Math.max(0, shortTarget - shortCurrent);
+    if (allocation.SHORT?.autoRampEnabled && shortCurrent < shortTarget) {
+      text('ramp-message', `SHORT aktif ${percent(shortCurrent, 0)} dari target ${percent(shortTarget, 0)}. Bot akan menaikkannya otomatis saat kondisi aman. Sementara ${percent(temporaryReserve, 0)} tetap di cadangan.`);
+    } else {
+      text('ramp-message', `LONG dan SHORT sudah sesuai target. Setiap jatah dibagi rata ke ${pairCount || 'semua'} pair.`);
     }
-    document.querySelectorAll('[data-summary-side]').forEach(element => {
-      element.dataset.selected = String(element.dataset.summarySide === positionSide());
-    });
   }
 
   function allocationStatusView(budget) {
     if (!budget?.available) return { label: 'Data belum tersedia', tone: '' };
     if (budget.status === 'EXIT_ONLY' || budget.entryGridEnabled === false) {
-      return { label: 'Exit-only', tone: 'warning' };
+      return { label: 'Hanya mengelola exit', tone: 'warning' };
     }
     if (budget.status === 'DEFERRED') {
-      return { label: 'Menunggu sisi kosong', tone: 'warning' };
+      return { label: 'Menunggu penyesuaian', tone: 'warning' };
     }
     if (budget.autoRampEnabled) {
-      if (budget.autoRampAction === 'PROMOTED') return { label: 'Naik otomatis', tone: 'positive' };
-      if (budget.autoRampAction === 'REDUCED') return { label: 'Cap dikurangi', tone: 'warning' };
+      if (budget.autoRampAction === 'PROMOTED') return { label: 'Jatah baru saja naik', tone: 'positive' };
+      if (budget.autoRampAction === 'REDUCED') return { label: 'Jatah diturunkan demi keamanan', tone: 'warning' };
       if (budget.autoRampAction === 'CONFIRMING') {
         return {
-          label: `Konfirmasi ${num(budget.autoRampPromotionConfirmations)}/${num(budget.autoRampRequiredConfirmations)}`,
+          label: `Memeriksa keamanan ${num(budget.autoRampPromotionConfirmations)}/${num(budget.autoRampRequiredConfirmations)}`,
           tone: 'warning',
         };
       }
       if (num(budget.autoRampSafeMaximumPct) <= num(budget.sidePct)) {
-        return { label: 'Ditahan batas aman', tone: 'warning' };
+        return { label: 'Naik lagi saat aman', tone: 'warning' };
       }
-      return { label: 'Auto-ramp aktif', tone: 'positive' };
+      return { label: 'Kenaikan otomatis aktif', tone: 'positive' };
     }
     if (budget.status === 'UNCHANGED' || budget.status === 'APPLIED') return { label: 'Aktif', tone: 'positive' };
     return { label: 'Menunggu', tone: '' };
@@ -317,7 +371,7 @@
 
     const head = document.createElement('div'); head.className = 'allocation-pair-head';
     const identity = document.createElement('div');
-    const indexLabel = document.createElement('span'); indexLabel.textContent = 'PAIR TERPILIH';
+    const indexLabel = document.createElement('span'); indexLabel.textContent = 'Pair terpilih';
     const title = document.createElement('strong'); title.textContent = symbol;
     identity.append(indexLabel, title);
     const status = document.createElement('span'); status.className = `allocation-state ${budget.status.tone}`.trim(); status.textContent = budget.status.label;
@@ -325,14 +379,14 @@
 
     const values = document.createElement('dl'); values.className = 'allocation-pair-budget';
     for (const [label, share, cap] of [
-      [`Grid ${side}`, budget.gridPct, budget.gridCap],
-      ['Rescue', budget.rescuePct, budget.rescueCap],
+      [`Jatah entry ${side}`, budget.gridPct, budget.gridCap],
+      ['Jatah rescue', budget.rescuePct, budget.rescueCap],
     ]) {
       const row = document.createElement('div');
       const term = document.createElement('dt'); term.textContent = label;
       const description = document.createElement('dd');
       const percentValue = document.createElement('strong'); percentValue.textContent = percent(share, 2);
-      const capValue = document.createElement('small'); capValue.textContent = cap > 0 ? `Cap ${money(cap, 2)} ${quote()}` : 'Tidak dicadangkan';
+      const capValue = document.createElement('small'); capValue.textContent = cap > 0 ? `Batas setelah leverage ${money(cap, 2)} ${quote()}` : 'Tidak dicadangkan';
       description.append(percentValue, capValue); row.append(term, description); values.append(row);
     }
     article.append(head, values);
@@ -353,18 +407,18 @@
     const safePct = budget.autoRampEnabled
       ? clamp(num(budget.autoRampSafeMaximumPct), 0, 100)
       : targetPct;
-    text('allocation-title', `Modal ${side} pair terpilih`);
-    text('allocation-mode', !allocation.enabled ? 'NONAKTIF' : budget.autoRampEnabled ? 'AUTO-RAMP' : `${side} AKTIF`);
+    text('allocation-title', `Jatah ${side} untuk pair terpilih`);
+    text('allocation-mode', !allocation.enabled ? 'Tidak aktif' : budget.autoRampEnabled ? 'Naik otomatis' : `${side} aktif`);
     text('allocation-buffer-pct', percent(bufferPct, 0));
     text('allocation-active-pct', percent(sidePct, 0));
     text('allocation-ramp-limit', budget.autoRampEnabled
       ? `${percent(targetPct, 0)} / ${percent(safePct, 0)}`
       : percent(targetPct, 0));
     const rampCopy = budget.autoRampEnabled
-      ? ` Auto-ramp aktif ${percent(sidePct, 0)} dari target ${percent(targetPct, 0)}; batas aman saat ini ${percent(safePct, 0)} dan konfirmasi ${num(budget.autoRampPromotionConfirmations)}/${num(budget.autoRampRequiredConfirmations)}.`
+      ? ` Jatah aktif ${percent(sidePct, 0)} dari target ${percent(targetPct, 0)}. Batas aman sekarang ${percent(safePct, 0)}, pemeriksaan ${num(budget.autoRampPromotionConfirmations)}/${num(budget.autoRampRequiredConfirmations)}.`
       : '';
     text('allocation-copy', pairCount > 0
-      ? `Pair terpilih mendapat ${percent(gridPerPairPct, 2)} margin grid + ${percent(rescuePerPairPct, 2)} margin rescue dari ${pairCount} pair. Cap USDT sudah termasuk leverage.${rampCopy}`
+      ? `Jatah ${side} dibagi rata ke ${pairCount} pair. Pair ini mendapat ${percent(gridPerPairPct, 2)} untuk entry dan ${percent(rescuePerPairPct, 2)} untuk rescue.${rampCopy}`
       : 'Menunggu pair dan pembagian modal.');
     text('allocation-wallet', `${money(allocation.walletBalance, 2)} ${quote()}`);
     text('allocation-leverage', `${money(allocation.leverage, 0)}x`);
@@ -396,17 +450,17 @@
     text('overview-title', `${data.selectedSymbol || 'Pair belum dipilih'} · ${side}`);
     text('overview-copy', gate.summary);
     text('market-price', `${data.market?.priceText || price(data.market?.price)} ${quote()}`);
-    text('market-change', `24 jam: ${signed(data.market?.changePercent, 2)}%`);
-    text('entry-signal-label', signal.label);
+    text('market-change', `Perubahan 24 jam: ${signed(data.market?.changePercent, 2)}%`);
+    text('entry-signal-label', signal.label.replace('Momentum', 'Arah harga'));
     text('entry-signal-status', gate.status);
     text('entry-signal-value', signal.value);
     byId('entry-signal-status').className = `metric-value ${gate.tone}`.trim();
-    text('exposure-label', `Exposure ${data.selectedSymbol || 'pair'}`);
+    text('exposure-label', 'Jatah pair terpakai');
     text('exposure-value', percent(adaptive.exposurePct));
     text('exposure-note', adaptive.investmentCap > 0
-      ? `${money(adaptive.allocatedInvestment, 2)} / ${money(adaptive.investmentCap, 2)} ${quote()}`
-      : 'Batas exposure belum tersedia');
-    text('pnl-label', `PnL ${data.selectedSymbol || 'pair'} ${side}`);
+      ? `${money(adaptive.allocatedInvestment, 2)} dari ${money(adaptive.investmentCap, 2)} ${quote()}`
+      : 'Batas pair belum tersedia');
+    text('pnl-label', `Hasil ${side}`);
     text('net-pnl', `${signed(data.profit?.net, 4)} ${quote()}`);
     pnlTone(byId('net-pnl'), data.profit?.net);
   }
@@ -444,7 +498,7 @@
     setNode('supervisor', gate.tone, gate.status, signal.value, signal.reason);
     setNode('buy', entryView.tone, entryView.status, `${money(entryValue, 2)} ${quote()}`, entryView.meta);
     setNode('position', position ? (num(data.profit?.unrealizedPnl) >= 0 ? 'positive' : 'negative') : 'accent', position ? `${side} AKTIF` : 'TIDAK ADA POSISI', position ? compact(position.contracts) : '0', position ? `${reversal.label} · PnL ${signed(data.profit?.unrealizedPnl, 4)} ${quote()}` : 'Reversal menunggu posisi');
-    setNode('sell', coverage !== null && coverage !== undefined && coverage < 99.999 ? 'negative' : 'positive', `${exitCount} ORDER`, coverage == null ? 'Coverage N/A' : `Coverage ${percent(coverage, 0)}`, execution.uncovered > 0 ? `${compact(execution.uncovered)} kontrak belum tertutup` : 'Tidak ada posisi tanpa exit');
+    setNode('sell', coverage !== null && coverage !== undefined && coverage < 99.999 ? 'negative' : 'positive', `${exitCount} ORDER`, coverage == null ? 'Perlindungan N/A' : `Terlindungi ${percent(coverage, 0)}`, execution.uncovered > 0 ? `${compact(execution.uncovered)} kontrak belum memiliki exit` : 'Seluruh posisi memiliki exit');
     setFlowNodeState('market', marketAvailable ? 'active' : 'waiting');
     setFlowNodeState('fibonacci', fibonacciAvailable ? 'active' : 'waiting');
     setFlowNodeState('supervisor', gate.allowed ? 'active' : gate.available && gate.blocked ? 'error' : 'waiting');
@@ -600,7 +654,7 @@
       button.setAttribute('aria-pressed', String(button.dataset.positionSide === state.positionSide));
     });
   }
-  function render() { renderPositionSwitch(); renderComparison(); renderAllocation(); renderOverview(); renderFlow(); renderInspector(); renderLedger(); renderRisk(); renderOrders(); renderChartMeta(); renderRuntime(); }
+  function render() { renderPositionSwitch(); renderPlainOverview(); renderAllocation(); renderOverview(); renderFlow(); renderInspector(); renderLedger(); renderRisk(); renderOrders(); renderChartMeta(); renderRuntime(); }
   function renderSymbols(symbols, selected) {
     const select = byId('symbol-select'); const current = [...select.options].map(option => option.value);
     if (JSON.stringify(current) !== JSON.stringify(symbols)) { select.replaceChildren(); for (const symbol of symbols) { const option = document.createElement('option'); option.value = symbol; option.textContent = symbol; select.append(option); } }
@@ -655,6 +709,11 @@
     }));
     byId('symbol-select').addEventListener('change', event => { persistSelectedSymbol(event.target.value, state.positionSide); load({ symbol: event.target.value, announced: true }); }); byId('refresh-button').addEventListener('click', () => { spinRefreshButton(); load({ announced: true }); }); byId('retry-button').addEventListener('click', () => load({ announced: true }));
     byId('motion-select').addEventListener('change', event => applyMotionPreference(event.target.value, { persist: true }));
+    byId('technical-details').addEventListener('toggle', event => {
+      if (!event.target.open) return;
+      queueFlowLayout();
+      requestAnimationFrame(drawChart);
+    });
     reducedMotion.addEventListener?.('change', () => { if (state.motionPreference === 'system') applyMotionPreference('system'); });
     let resizeTimer; window.addEventListener('resize', () => { queueFlowLayout(); clearTimeout(resizeTimer); resizeTimer = setTimeout(drawChart, 100); });
     if ('ResizeObserver' in window) {

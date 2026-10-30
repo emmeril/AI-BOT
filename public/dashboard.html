@@ -4,105 +4,138 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>Grid Flow Control</title>
+  <title>Dashboard Bot Futures</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/fontawesome/css/fontawesome.min.css?v=7.3.1">
   <link rel="stylesheet" href="/fontawesome/css/solid.min.css?v=7.3.1">
-  <link rel="stylesheet" href="/dashboard.css?v=20261026.1">
-  <script defer src="/dashboard.js?v=20261026.1"></script>
+  <link rel="stylesheet" href="/dashboard.css?v=20261030.2">
+  <script defer src="/dashboard.js?v=20261030.2"></script>
 </head>
 <body>
-  <a class="skip-link" href="#main-content">Lewati ke dashboard</a>
+  <a class="skip-link" href="#main-content">Lewati ke isi dashboard</a>
   <div class="app-shell" id="app" aria-busy="true">
     <header class="topbar">
-      <div class="brand"><div class="brand-mark" aria-hidden="true">GF</div><div><p class="brand-kicker" id="source-label">Binance</p><h1>Grid Flow Control</h1></div></div>
+      <div class="brand">
+        <p class="brand-kicker" id="source-label">Binance Futures</p>
+        <h1>Dashboard Bot Futures</h1>
+        <p>Pantau modal, posisi, dan perlindungan exit dalam satu layar.</p>
+      </div>
       <div class="top-actions">
-        <div class="position-switch" role="group" aria-label="Pilih sisi posisi">
-          <button class="position-switch-button" type="button" data-position-side="LONG" aria-pressed="true">LONG</button>
-          <button class="position-switch-button" type="button" data-position-side="SHORT" aria-pressed="false">SHORT</button>
+        <div class="position-switch" role="group" aria-label="Pilih cara trading yang ingin dilihat">
+          <button class="position-switch-button" type="button" data-position-side="LONG" aria-pressed="true">LONG <small>harga naik</small></button>
+          <button class="position-switch-button" type="button" data-position-side="SHORT" aria-pressed="false">SHORT <small>harga turun</small></button>
         </div>
-        <label class="sr-only" for="symbol-select">Pilih pair</label>
-        <select class="pair-select mono" id="symbol-select" aria-label="Pilih pair trading"></select>
-        <button class="control-button" id="refresh-button" type="button" aria-label="Perbarui data" title="Perbarui data"><i class="fa-solid fa-rotate-right refresh-icon" aria-hidden="true"></i><span class="sr-only">Perbarui</span></button>
-        <label class="motion-control" id="motion-control"><span>Animasi</span><select id="motion-select" aria-label="Pengaturan animasi"><option value="on">Aktif</option><option value="system">Sistem</option><option value="off">Mati</option></select><span class="sr-only" id="motion-state" aria-live="polite"></span></label>
-        <div class="status-block" role="status" aria-live="polite"><span class="status-mark" id="status-mark"></span><span id="status-text">Menghubungkan</span></div>
+        <label class="pair-control" for="symbol-select"><span>Pair</span><select class="pair-select" id="symbol-select"></select></label>
+        <button class="control-button icon-button" id="refresh-button" type="button" aria-label="Perbarui data sekarang" title="Perbarui data sekarang"><i class="fa-solid fa-rotate-right refresh-icon" aria-hidden="true"></i><span class="sr-only">Perbarui data</span></button>
+        <div class="status-block" role="status" aria-live="polite"><span class="status-mark" id="status-mark" aria-hidden="true"></span><span id="status-text">Menghubungkan</span></div>
         <form class="logout-form" id="logout-form" method="post" action="/logout" hidden><button class="control-button" type="submit">Keluar</button></form>
       </div>
     </header>
 
     <div class="notice" id="error-notice" role="alert" hidden><span id="error-text">Data dashboard tidak tersedia.</span><button class="control-button" id="retry-button" type="button">Coba lagi</button></div>
-    <div class="loading-state" id="loading-state" role="status" aria-live="polite"><span class="loading-bar" aria-hidden="true"></span><span>Mengambil posisi, order, dan keputusan terbaru dari bot.</span></div>
+    <div class="loading-state" id="loading-state" role="status" aria-live="polite"><span class="loading-bar" aria-hidden="true"></span><span>Mengambil data terbaru dari bot dan Binance.</span></div>
 
     <main id="main-content">
-      <section class="comparison-board" aria-labelledby="comparison-title">
-        <div class="comparison-lead"><p class="eyebrow">Ringkasan</p><h2 id="comparison-title">LONG dan SHORT</h2><p>Exposure, PnL, dan status kedua sisi pada pair terpilih.</p></div>
-        <article class="side-summary" data-summary-side="LONG">
-          <div class="side-summary-head"><strong>LONG</strong><span>BUY masuk, SELL keluar</span></div>
-          <dl><div><dt>Exposure</dt><dd id="long-exposure">N/A</dd></div><div><dt>PnL</dt><dd id="long-pnl">N/A</dd></div><div><dt>Status</dt><dd id="long-runtime">Menunggu</dd></div></dl>
-        </article>
-        <article class="side-summary" data-summary-side="SHORT">
-          <div class="side-summary-head"><strong>SHORT</strong><span>SELL masuk, BUY keluar</span></div>
-          <dl><div><dt>Exposure</dt><dd id="short-exposure">N/A</dd></div><div><dt>PnL</dt><dd id="short-pnl">N/A</dd></div><div><dt>Status</dt><dd id="short-runtime">Menunggu</dd></div></dl>
-        </article>
-      </section>
+      <section class="plain-overview" aria-labelledby="plain-title">
+        <div class="health-summary" aria-live="polite">
+          <p class="section-label">Kondisi sekarang</p>
+          <div class="health-heading"><span class="health-mark" id="health-mark" data-state="waiting" aria-hidden="true"></span><h2 id="plain-title">Memeriksa bot</h2></div>
+          <p id="health-copy">Menunggu data posisi dan order exit.</p>
+          <div class="health-facts">
+            <div><span>Bot LONG</span><strong id="health-long">Memeriksa</strong></div>
+            <div><span>Bot SHORT</span><strong id="health-short">Memeriksa</strong></div>
+            <div><span>Exit pair ini</span><strong id="health-exit">Memeriksa</strong></div>
+          </div>
+        </div>
 
-      <section class="panel allocation-panel" aria-labelledby="allocation-title">
-        <div class="panel-head allocation-head"><div><p class="eyebrow">Alokasi</p><h2 class="panel-title" id="allocation-title">Modal pair terpilih</h2><p class="panel-copy" id="allocation-copy">Menunggu pair dan pembagian modal.</p></div><span class="status-code" id="allocation-mode">Menunggu</span></div>
-        <div class="allocation-body">
-          <dl class="allocation-meta">
-            <div><dt>Saldo</dt><dd id="allocation-wallet">N/A</dd></div>
-            <div><dt>Leverage</dt><dd id="allocation-leverage">N/A</dd></div>
-            <div><dt>Total pair</dt><dd id="allocation-pair-count">N/A</dd></div>
-            <div><dt>Sisa margin</dt><dd id="allocation-buffer-pct">N/A</dd></div>
-            <div><dt>Alokasi aktif</dt><dd id="allocation-active-pct">N/A</dd></div>
-            <div><dt>Target / aman</dt><dd id="allocation-ramp-limit">N/A</dd></div>
+        <div class="portfolio-plan" aria-labelledby="portfolio-title">
+          <div class="section-heading"><div><p class="section-label">Rencana modal 100%</p><h2 id="portfolio-title">Pembagian otomatis</h2></div><span class="plain-status" id="portfolio-status">Memuat</span></div>
+          <div class="allocation-track" id="portfolio-track" aria-label="Pembagian modal bot">
+            <span class="allocation-segment long" id="segment-long" title="Entry LONG"></span>
+            <span class="allocation-segment short" id="segment-short" title="Entry SHORT"></span>
+            <span class="allocation-segment rescue-long" id="segment-rescue-long" title="Rescue LONG"></span>
+            <span class="allocation-segment rescue-short" id="segment-rescue-short" title="Rescue SHORT"></span>
+            <span class="allocation-segment buffer" id="segment-buffer" title="Buffer"></span>
+          </div>
+          <dl class="portfolio-legend">
+            <div><dt><span class="legend-key long" aria-hidden="true"></span>Entry LONG</dt><dd id="plan-long-pct">35%</dd></div>
+            <div><dt><span class="legend-key short" aria-hidden="true"></span>Entry SHORT</dt><dd id="plan-short-pct">35%</dd></div>
+            <div><dt><span class="legend-key rescue-long" aria-hidden="true"></span>Rescue LONG</dt><dd id="plan-rescue-long-pct">10%</dd></div>
+            <div><dt><span class="legend-key rescue-short" aria-hidden="true"></span>Rescue SHORT</dt><dd id="plan-rescue-short-pct">10%</dd></div>
+            <div><dt><span class="legend-key buffer" aria-hidden="true"></span>Buffer</dt><dd id="plan-buffer-pct">10%</dd></div>
           </dl>
-          <div class="allocation-pair-list" id="allocation-pair-list" aria-live="polite"><div class="allocation-empty">Memuat alokasi pair terpilih.</div></div>
+          <p class="ramp-message" id="ramp-message">Bot membagi modal sama rata ke semua pair.</p>
         </div>
       </section>
 
       <div id="position-detail">
-      <section class="command-strip" aria-labelledby="overview-title">
-        <div class="command-lead"><p class="eyebrow">Pair aktif</p><h2 id="overview-title">Menunggu data</h2><p id="overview-copy">Status keputusan bot akan muncul setelah sinkronisasi pertama.</p></div>
-        <div class="command-metric"><span class="metric-label">Harga Binance</span><strong class="metric-value" id="market-price">N/A</strong><span class="metric-note" id="market-change">24 jam: N/A</span></div>
-        <div class="command-metric entry-signal-metric"><span class="metric-label" id="entry-signal-label">Momentum 12J</span><strong class="metric-value" id="entry-signal-status">Menunggu</strong><span class="metric-note" id="entry-signal-value">Data belum tersedia</span></div>
-        <div class="command-metric"><span class="metric-label" id="exposure-label">Exposure pair</span><strong class="metric-value" id="exposure-value">N/A</strong><span class="metric-note" id="exposure-note">Batas exposure belum tersedia</span></div>
-        <div class="command-metric"><span class="metric-label" id="pnl-label">PnL pair</span><strong class="metric-value" id="net-pnl">N/A</strong><span class="metric-note">Setelah fee</span></div>
-      </section>
-
-      <section class="panel flow-panel" aria-labelledby="flow-title">
-        <div class="panel-head"><div><p class="eyebrow">Alur bot</p><h2 class="panel-title" id="flow-title">Harga ke exit SELL</h2><p class="panel-copy">Fibonacci membuat level. Momentum menentukan entry.</p></div><div class="legend" aria-label="Legenda koneksi"><span><i class="live"></i> Aktif</span><span><i class="waiting"></i> Menunggu</span><span><i class="error"></i> Ditahan</span></div></div>
-        <div class="flow-map" id="flow-map" data-running="false">
-          <svg class="flow-lines" viewBox="0 0 1200 220" preserveAspectRatio="none" aria-hidden="true">
-            <g class="flow-track"><path data-edge="market-fibonacci"></path><path data-edge="fibonacci-supervisor"></path><path data-edge="supervisor-buy"></path><path data-edge="buy-position"></path><path data-edge="position-sell"></path></g>
-            <g class="flow-signal"><path data-edge="market-fibonacci"></path><path data-edge="fibonacci-supervisor"></path><path data-edge="supervisor-buy"></path><path data-edge="buy-position"></path><path data-edge="position-sell"></path></g>
-          </svg>
-          <div class="flow-grid">
-            <button class="flow-node node-market" type="button" data-node="market" data-tone="accent" aria-pressed="false"><span class="node-index">01 / HARGA</span><span class="node-title">Binance</span><strong class="node-status" id="market-node-status">LIVE</strong><span class="node-value" id="market-node-value">N/A</span><span class="node-meta" id="market-node-meta">Menunggu harga</span></button>
-            <button class="flow-node node-fibonacci" type="button" data-node="fibonacci" aria-pressed="false"><span class="node-index">02 / LEVEL</span><span class="node-title">Fibonacci</span><strong class="node-status" id="fib-node-status">MENUNGGU</strong><span class="node-value" id="fib-node-value">Range belum tersedia</span><span class="node-meta" id="fib-node-meta">Menunggu level final</span></button>
-            <button class="flow-node node-supervisor" type="button" data-node="supervisor" aria-pressed="true"><span class="node-index">03 / SINYAL</span><span class="node-title" id="supervisor-node-title">Entry LONG</span><strong class="node-status" id="supervisor-node-status">MENUNGGU</strong><span class="node-value" id="supervisor-node-value">Momentum menunggu</span><span class="node-meta" id="supervisor-node-meta">Menunggu candle</span></button>
-            <button class="flow-node node-buy" type="button" data-node="buy" aria-pressed="false"><span class="node-index">04 / ORDER</span><span class="node-title" id="entry-node-title">Grid BUY</span><strong class="node-status" id="buy-node-status">0 ORDER</strong><span class="node-value" id="buy-node-value">0 USDT</span><span class="node-meta" id="buy-node-meta">Menunggu entry</span></button>
-            <button class="flow-node node-position" type="button" data-node="position" aria-pressed="false"><span class="node-index">05 / POSISI</span><span class="node-title" id="position-node-title">LONG</span><strong class="node-status" id="position-node-status">KOSONG</strong><span class="node-value" id="position-node-value">0</span><span class="node-meta" id="position-node-meta">PnL 0 USDT</span></button>
-            <button class="flow-node node-sell" type="button" data-node="sell" aria-pressed="false"><span class="node-index">06 / EXIT</span><span class="node-title" id="exit-node-title">Exit SELL</span><strong class="node-status" id="sell-node-status">0 ORDER</strong><span class="node-value" id="sell-node-value">Coverage N/A</span><span class="node-meta" id="sell-node-meta">Belum ada exit aktif</span></button>
+        <section class="command-strip" aria-labelledby="overview-title">
+          <div class="command-lead">
+            <p class="section-label">Pair yang dipilih</p>
+            <h2 id="overview-title">Menunggu data</h2>
+            <p id="overview-copy">Keputusan bot akan muncul setelah data tersambung.</p>
+            <div class="pair-price"><span>Harga sekarang</span><strong id="market-price">N/A</strong><small id="market-change">Perubahan 24 jam: N/A</small></div>
           </div>
-        </div>
-      </section>
+          <div class="command-metric entry-signal-metric"><span class="metric-label" id="entry-signal-label">Bot sekarang</span><strong class="metric-value" id="entry-signal-status">Memeriksa</strong><span class="metric-note" id="entry-signal-value">Data belum tersedia</span></div>
+          <div class="command-metric"><span class="metric-label" id="exposure-label">Jatah terpakai</span><strong class="metric-value" id="exposure-value">N/A</strong><span class="metric-note" id="exposure-note">Batas belum tersedia</span></div>
+          <div class="command-metric"><span class="metric-label" id="pnl-label">Hasil pair</span><strong class="metric-value" id="net-pnl">N/A</strong><span class="metric-note">Setelah fee yang tercatat</span></div>
+        </section>
 
-      <div class="detail-layout">
-        <section class="panel inspector" aria-labelledby="inspector-title"><div class="panel-head"><div><p class="eyebrow">Detail</p><h2 class="panel-title" id="inspector-title">Entry LONG</h2></div><span class="status-code" id="inspector-status">MENUNGGU</span></div><div class="inspector-body"><div><p class="inspector-summary" id="inspector-summary">Pilih langkah di atas untuk melihat detail.</p><div class="tag-list" id="inspector-tags" aria-label="Status terkait"></div></div><dl class="detail-list" id="inspector-details"></dl></div></section>
-        <section class="panel ledger" aria-labelledby="ledger-title"><div class="panel-head"><div><p class="eyebrow">Hasil</p><h2 class="panel-title" id="ledger-title">PnL LONG</h2></div></div><div class="ledger-body"><div class="ledger-row"><span>Realisasi</span><strong id="realized-pnl">N/A</strong></div><div class="ledger-row"><span>Funding Binance</span><strong id="funding-pnl">N/A</strong></div><div class="ledger-row"><span>Berjalan</span><strong id="unrealized-pnl">N/A</strong></div><div class="ledger-row"><span>Fee tercatat</span><strong id="fees-value">N/A</strong></div><div class="ledger-row"><span id="grid-profit-label">Profit grid LONG</span><strong id="grid-profit">N/A</strong></div><div class="ledger-row total"><span>Total strategi</span><strong id="ledger-net">N/A</strong></div><p class="formula">Total = realisasi + berjalan − fee entry terbuka. Funding hanya ditampilkan.</p></div></section>
-      </div>
+        <details class="technical-details" id="technical-details">
+          <summary><span><strong>Lihat rincian</strong><small>Pembagian per pair, grafik, dan order aktif</small></span><span class="summary-action" aria-hidden="true">Buka</span></summary>
+          <div class="technical-content">
+            <section class="panel allocation-panel" aria-labelledby="allocation-title">
+              <div class="panel-head allocation-head"><div><p class="section-label">Jatah pair ini</p><h2 class="panel-title" id="allocation-title">Pembagian modal pair</h2><p class="panel-copy" id="allocation-copy">Menunggu pembagian modal.</p></div><span class="plain-status" id="allocation-mode">Memuat</span></div>
+              <div class="allocation-body">
+                <dl class="allocation-meta">
+                  <div><dt>Saldo acuan</dt><dd id="allocation-wallet">N/A</dd></div>
+                  <div><dt>Pengali leverage</dt><dd id="allocation-leverage">N/A</dd></div>
+                  <div><dt>Jumlah pair</dt><dd id="allocation-pair-count">N/A</dd></div>
+                  <div><dt>Buffer sekarang</dt><dd id="allocation-buffer-pct">N/A</dd></div>
+                  <div><dt>Entry aktif</dt><dd id="allocation-active-pct">N/A</dd></div>
+                  <div><dt>Target / batas aman</dt><dd id="allocation-ramp-limit">N/A</dd></div>
+                </dl>
+                <div class="allocation-pair-list" id="allocation-pair-list" aria-live="polite"><div class="allocation-empty">Memuat jatah pair.</div></div>
+              </div>
+            </section>
 
-      <div class="telemetry-layout">
-        <section class="panel chart-panel" aria-labelledby="chart-title"><div class="panel-head"><div><p class="eyebrow">Grafik</p><h2 class="panel-title" id="chart-title">Harga dan grid</h2><p class="panel-copy" id="range-copy">Range belum tersedia.</p></div><span class="status-code" id="timeframe-label">N/A</span></div><div class="chart-wrap"><canvas id="price-chart" role="img" aria-label="Grafik harga Binance dan batas grid"></canvas></div></section>
-        <section class="panel risk-panel" aria-labelledby="risk-title"><div class="panel-head"><div><p class="eyebrow">Exposure</p><h2 class="panel-title" id="risk-title">Pemakaian pair</h2></div></div><div class="risk-body"><div class="risk-number" id="risk-exposure">N/A</div><div class="risk-caption" id="risk-caption">Menunggu data.</div><div class="meter" role="meter" id="exposure-meter" aria-label="Pemakaian cap exposure pair" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="meter-fill" id="exposure-fill"></div><div class="meter-limit" id="exposure-limit" title="Batas aman"></div></div><dl class="detail-list risk-facts" id="risk-facts"></dl></div></section>
-      </div>
+            <label class="motion-control" id="motion-control"><span>Animasi alur</span><select id="motion-select" aria-label="Pengaturan animasi"><option value="on">Aktif</option><option value="system">Ikuti perangkat</option><option value="off">Mati</option></select><span class="sr-only" id="motion-state" aria-live="polite"></span></label>
 
-      <section class="panel orders-panel" aria-labelledby="orders-title">
-        <div class="panel-head"><div><p class="eyebrow">Order</p><h2 class="panel-title" id="orders-title">Order aktif Binance</h2><p class="panel-copy" id="orders-copy">Order grid untuk posisi LONG.</p></div><div class="order-summary" aria-label="Ringkasan order"><span class="count-label" id="buy-count">BUY 0</span><span class="count-label" id="sell-count">SELL 0</span></div></div>
-        <div class="table-wrap"><table><thead><tr><th>Sisi</th><th>Level</th><th>Harga</th><th>Jumlah</th><th>Tersisa</th><th>Keterangan</th><th>Order ID</th></tr></thead><tbody id="orders-body"><tr class="empty-row"><td colspan="7">Mengambil order aktif dari Binance.</td></tr></tbody></table></div>
-        <div class="order-cards" id="order-cards" aria-label="Order aktif versi mobile"></div>
-      </section>
+            <section class="panel flow-panel" aria-labelledby="flow-title">
+              <div class="panel-head"><div><p class="section-label">Cara bot bekerja</p><h2 class="panel-title" id="flow-title">Harga sampai order exit</h2><p class="panel-copy">Pilih satu langkah untuk melihat keterangannya.</p></div><div class="legend" aria-label="Keterangan garis"><span><i class="live"></i> Aktif</span><span><i class="waiting"></i> Menunggu</span><span><i class="error"></i> Perlu perhatian</span></div></div>
+              <div class="flow-map" id="flow-map" data-running="false">
+                <svg class="flow-lines" viewBox="0 0 1200 220" preserveAspectRatio="none" aria-hidden="true">
+                  <g class="flow-track"><path data-edge="market-fibonacci"></path><path data-edge="fibonacci-supervisor"></path><path data-edge="supervisor-buy"></path><path data-edge="buy-position"></path><path data-edge="position-sell"></path></g>
+                  <g class="flow-signal"><path data-edge="market-fibonacci"></path><path data-edge="fibonacci-supervisor"></path><path data-edge="supervisor-buy"></path><path data-edge="buy-position"></path><path data-edge="position-sell"></path></g>
+                </svg>
+                <div class="flow-grid">
+                  <button class="flow-node node-market" type="button" data-node="market" data-tone="accent" aria-pressed="false"><span class="node-index">1. HARGA</span><span class="node-title">Binance</span><strong class="node-status" id="market-node-status">LIVE</strong><span class="node-value" id="market-node-value">N/A</span><span class="node-meta" id="market-node-meta">Menunggu harga</span></button>
+                  <button class="flow-node node-fibonacci" type="button" data-node="fibonacci" aria-pressed="false"><span class="node-index">2. LEVEL</span><span class="node-title">Fibonacci</span><strong class="node-status" id="fib-node-status">MENUNGGU</strong><span class="node-value" id="fib-node-value">Range belum tersedia</span><span class="node-meta" id="fib-node-meta">Menunggu level</span></button>
+                  <button class="flow-node node-supervisor" type="button" data-node="supervisor" aria-pressed="true"><span class="node-index">3. KEPUTUSAN</span><span class="node-title" id="supervisor-node-title">Entry LONG</span><strong class="node-status" id="supervisor-node-status">MENUNGGU</strong><span class="node-value" id="supervisor-node-value">Memeriksa arah</span><span class="node-meta" id="supervisor-node-meta">Menunggu candle</span></button>
+                  <button class="flow-node node-buy" type="button" data-node="buy" aria-pressed="false"><span class="node-index">4. ENTRY</span><span class="node-title" id="entry-node-title">Grid BUY</span><strong class="node-status" id="buy-node-status">0 ORDER</strong><span class="node-value" id="buy-node-value">0 USDT</span><span class="node-meta" id="buy-node-meta">Menunggu entry</span></button>
+                  <button class="flow-node node-position" type="button" data-node="position" aria-pressed="false"><span class="node-index">5. POSISI</span><span class="node-title" id="position-node-title">LONG</span><strong class="node-status" id="position-node-status">KOSONG</strong><span class="node-value" id="position-node-value">0</span><span class="node-meta" id="position-node-meta">Hasil 0 USDT</span></button>
+                  <button class="flow-node node-sell" type="button" data-node="sell" aria-pressed="false"><span class="node-index">6. EXIT</span><span class="node-title" id="exit-node-title">Exit SELL</span><strong class="node-status" id="sell-node-status">0 ORDER</strong><span class="node-value" id="sell-node-value">Perlindungan N/A</span><span class="node-meta" id="sell-node-meta">Belum ada exit aktif</span></button>
+                </div>
+              </div>
+            </section>
+
+            <div class="detail-layout">
+              <section class="panel inspector" aria-labelledby="inspector-title"><div class="panel-head"><div><p class="section-label">Langkah terpilih</p><h2 class="panel-title" id="inspector-title">Entry LONG</h2></div><span class="plain-status" id="inspector-status">MENUNGGU</span></div><div class="inspector-body"><div><p class="inspector-summary" id="inspector-summary">Pilih langkah di atas untuk melihat detail.</p><div class="tag-list" id="inspector-tags" aria-label="Status terkait"></div></div><dl class="detail-list" id="inspector-details"></dl></div></section>
+              <section class="panel ledger" aria-labelledby="ledger-title"><div class="panel-head"><div><p class="section-label">Rincian hasil</p><h2 class="panel-title" id="ledger-title">Hasil LONG</h2></div></div><div class="ledger-body"><div class="ledger-row"><span>Sudah terealisasi</span><strong id="realized-pnl">N/A</strong></div><div class="ledger-row"><span>Funding Binance</span><strong id="funding-pnl">N/A</strong></div><div class="ledger-row"><span>Posisi berjalan</span><strong id="unrealized-pnl">N/A</strong></div><div class="ledger-row"><span>Fee tercatat</span><strong id="fees-value">N/A</strong></div><div class="ledger-row"><span id="grid-profit-label">Profit grid LONG</span><strong id="grid-profit">N/A</strong></div><div class="ledger-row total"><span>Total strategi</span><strong id="ledger-net">N/A</strong></div><p class="formula">Total strategi berasal dari hasil terealisasi, posisi berjalan, dan fee posisi terbuka. Funding ditampilkan terpisah.</p></div></section>
+            </div>
+
+            <div class="telemetry-layout">
+              <section class="panel chart-panel" aria-labelledby="chart-title"><div class="panel-head"><div><p class="section-label">Pergerakan harga</p><h2 class="panel-title" id="chart-title">Harga dan batas grid</h2><p class="panel-copy" id="range-copy">Range belum tersedia.</p></div><span class="plain-status" id="timeframe-label">N/A</span></div><div class="chart-wrap"><canvas id="price-chart" role="img" aria-label="Grafik harga Binance dan batas grid"></canvas></div></section>
+              <section class="panel risk-panel" aria-labelledby="risk-title"><div class="panel-head"><div><p class="section-label">Pemakaian jatah</p><h2 class="panel-title" id="risk-title">Modal pair</h2></div></div><div class="risk-body"><div class="risk-number" id="risk-exposure">N/A</div><div class="risk-caption" id="risk-caption">Menunggu data.</div><div class="meter" role="meter" id="exposure-meter" aria-label="Pemakaian batas modal pair" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="meter-fill" id="exposure-fill"></div><div class="meter-limit" id="exposure-limit" title="Batas peringatan"></div></div><dl class="detail-list risk-facts" id="risk-facts"></dl></div></section>
+            </div>
+
+            <section class="panel orders-panel" aria-labelledby="orders-title">
+              <div class="panel-head"><div><p class="section-label">Order di Binance</p><h2 class="panel-title" id="orders-title">Order aktif</h2><p class="panel-copy" id="orders-copy">Order grid untuk sisi yang dipilih.</p></div><div class="order-summary" aria-label="Jumlah order"><span class="count-label" id="buy-count">BUY 0</span><span class="count-label" id="sell-count">SELL 0</span></div></div>
+              <div class="table-wrap"><table><thead><tr><th>Arah</th><th>Level</th><th>Harga</th><th>Jumlah</th><th>Tersisa</th><th>Fungsi</th><th>Order ID</th></tr></thead><tbody id="orders-body"><tr class="empty-row"><td colspan="7">Mengambil order aktif dari Binance.</td></tr></tbody></table></div>
+              <div class="order-cards" id="order-cards" aria-label="Order aktif versi mobile"></div>
+            </section>
+          </div>
+        </details>
       </div>
     </main>
 
