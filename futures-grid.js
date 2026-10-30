@@ -5529,6 +5529,19 @@ class FuturesGridEngine {
         `into level ${combinedExit.entryLevelIndex} amount=${combinedExit.amount} for minimum-notional coverage`
       );
     }
+    const activeExitMerge = this.consolidateShortExitDustIntoActive(
+      symbol, levels, currentPrice, symState, managedOrders, closableAmount
+    );
+    if (activeExitMerge) {
+      await this.state.save();
+      console.log(
+        `[SHORT EXIT] ${symbol} merged dust levels ${activeExitMerge.dustLevels.join(',')} ` +
+        `into active exit source=${activeExitMerge.entryLevelIndex} amount=${activeExitMerge.amount}`
+      );
+    }
+    await this.resizeUndercoveredShortExits(
+      symbol, symState, managedOrders, positionAmount
+    );
     const trackedEntries = Object.entries(symState.lastBuyByLevel)
       .map(([entryLevelIndex, entry]) => ({ entryLevelIndex: Number(entryLevelIndex), entry }))
       .filter(item => Number.isInteger(item.entryLevelIndex) && item.entry)
@@ -5873,6 +5886,176 @@ class FuturesGridEngine {
     symState.lastBuyByLevel[entryLevelIndex] = combined;
     symState.refillCountByLevel[entryLevelIndex] = refillCount;
     return { entryLevelIndex, sourceLevels, amount, target };
+  }
+
+  consolidateShortExitDustIntoActive(
+    symbol, levels, currentPrice, symState, managedOrders, closableAmount
+  ) {
+    if (!(closableAmount > 0)) return null;
+    symState.refillCountByLevel ||= {};
+    const dust = [];
+    let available = closableAmount;
+    const entries = Object.entries(symState.lastBuyByLevel || {})
+      .map(([entryLevelIndex, entry]) => ({ entryLevelIndex: Number(entryLevelIndex), entry }))
+      .filter(item => Number.isInteger(item.entryLevelIndex) && item.entry)
+      .sort((left, right) => left.entryLevelIndex - right.entryLevelIndex);
+
+    for (const item of entries) {
+      if (this.getActiveShortExitForEntry(symState, item.entryLevelIndex)) continue;
+      const trackedAmount = Math.max(0, Number(
+        item.entry.sellableAmount ?? item.entry.amount
+      ) || 0);
+      const amount = Math.min(trackedAmount, available);
+      available = Math.max(0, available - amount);
+      if (!(amount > 0) || amount + 1e-8 < trackedAmount) continue;
+      const target = this.findBuyTargetForShort(
+        symbol, levels, item.entryLevelIndex, item.entry,
+        { amount, maximumPrice: currentPrice }
+      );
+      if (!target && this.isShortExitMinimumNotionalBlocked(
+        symbol, currentPrice, item.entry, amount
+      )) dust.push(item);
+    }
+    if (!dust.length) return null;
+
+    for (const order of managedOrders || []) {
+      if (String(order?.side).toLowerCase() !== EXIT_SIDE) continue;
+      const meta = symState.orders?.[String(order.id)] || this.getBotOrderMeta(order);
+      if (!meta || meta.kind || meta.isPositionExit || meta.isReversalRescue) continue;
+      const entryLevelIndex = this.getSellSourceBuyLevelIndex(meta);
+      const activeEntry = symState.lastBuyByLevel?.[entryLevelIndex];
+      if (!activeEntry) continue;
+
+      let combined = { ...activeEntry };
+      for (const item of dust) combined = this.mergeBuyRecords(combined, item.entry);
+      const amount = Math.max(0, Number(combined.sellableAmount ?? combined.amount) || 0);
+      const existingPrice = Number(order.price);
+      let target = null;
+      if (existingPrice > 0 && existingPrice < currentPrice &&
+          this.isTrackedShortExitProfitable(symbol, combined, existingPrice)) {
+        const precise = this.getPreciseOrderNumbers(symbol, existingPrice, amount);
+        if (precise.notional >= this.getMinCost(symbol) - 1e-8) {
+          target = {
+            entryLevelIndex,
+            buyLevelIndex: Number(meta.levelIndex),
+            buyPrice: existingPrice,
+            amount: Number(precise.amountNum ?? precise.preciseAmount),
+            notional: precise.notional,
+          };
+        }
+      }
+      if (!target) {
+        target = this.findBuyTargetForShort(
+          symbol, levels, entryLevelIndex, combined,
+          { amount, maximumPrice: currentPrice }
+        );
+      }
+      if (!target) continue;
+
+      const sourceLevels = new Set(
+        Array.isArray(activeEntry.shortExitSourceLevels)
+          ? activeEntry.shortExitSourceLevels.map(Number)
+          : [entryLevelIndex]
+      );
+      for (const item of dust) {
+        const levelsForEntry = Array.isArray(item.entry.shortExitSourceLevels)
+          ? item.entry.shortExitSourceLevels
+          : [item.entryLevelIndex];
+        for (const sourceLevel of levelsForEntry) sourceLevels.add(Number(sourceLevel));
+        delete symState.lastBuyByLevel[item.entryLevelIndex];
+        delete symState.refillCountByLevel[item.entryLevelIndex];
+        this.clearSellTargetWarning(symbol, item.entryLevelIndex);
+      }
+      combined.shortExitCombined = true;
+      combined.shortExitSourceLevels = [...sourceLevels]
+        .filter(Number.isInteger)
+        .sort((left, right) => left - right);
+      symState.lastBuyByLevel[entryLevelIndex] = combined;
+      symState.refillCountByLevel[entryLevelIndex] = Math.max(
+        Number(symState.refillCountByLevel[entryLevelIndex]) || 0,
+        ...dust.map(item => Number(item.entry.refillCount) || 0)
+      );
+      return {
+        entryLevelIndex,
+        dustLevels: dust.map(item => item.entryLevelIndex),
+        sourceLevels: combined.shortExitSourceLevels,
+        amount,
+        target,
+      };
+    }
+    return null;
+  }
+
+  async resizeUndercoveredShortExits(symbol, symState, managedOrders, positionAmount) {
+    if (typeof this.exchange?.editOrder !== 'function') {
+      console.warn(`[SHORT EXIT] ${symbol} cannot resize undercovered exit: exchange editOrder unavailable`);
+      return 0;
+    }
+    const exits = (managedOrders || []).filter(order =>
+      String(order?.side).toLowerCase() === EXIT_SIDE
+    );
+    const totalReserved = exits.reduce(
+      (sum, order) => sum + this.getOpenOrderRemainingAmount(order), 0
+    );
+    let updated = 0;
+
+    for (const order of exits) {
+      const orderId = String(order.id);
+      const meta = symState.orders?.[orderId] || this.getBotOrderMeta(order);
+      if (!meta || meta.kind || meta.isPositionExit || meta.isReversalRescue) continue;
+      const entryLevelIndex = this.getSellSourceBuyLevelIndex(meta);
+      const entry = symState.lastBuyByLevel?.[entryLevelIndex];
+      if (!entry) continue;
+      const currentRemaining = this.getOpenOrderRemainingAmount(order);
+      const otherReserved = Math.max(0, totalReserved - currentRemaining);
+      const maximumRemaining = Math.max(0, Number(positionAmount) - otherReserved);
+      const trackedAmount = Math.max(0, Number(entry.sellableAmount ?? entry.amount) || 0);
+      const desiredRemaining = Math.min(trackedAmount, maximumRemaining);
+      if (desiredRemaining <= currentRemaining + 1e-8) continue;
+
+      const price = Number(order.price);
+      if (!(price > 0) || !this.isTrackedShortExitProfitable(symbol, entry, price)) {
+        console.warn(
+          `[SHORT EXIT] ${symbol} cannot resize BUY ${orderId}: existing price is no longer profitable`
+        );
+        continue;
+      }
+      const filled = Math.max(
+        0,
+        Number(order.filled) || (Math.max(0, Number(order.amount) || 0) - currentRemaining)
+      );
+      const requestedTotal = filled + desiredRemaining;
+      const precise = this.getPreciseOrderNumbers(symbol, price, requestedTotal);
+      try {
+        const edited = await retry(() => this.exchange.editOrder(
+          order.id, symbol, 'limit', EXIT_SIDE, precise.preciseAmount, precise.precisePrice
+        ));
+        const editedOrder = {
+          ...order,
+          ...edited,
+          id: String(edited?.id || order.id),
+          side: String(edited?.side || order.side || EXIT_SIDE).toLowerCase(),
+          price: Number(edited?.price ?? precise.priceNum),
+          amount: Number(edited?.amount ?? precise.amountNum),
+        };
+        if (editedOrder.id !== orderId) delete symState.orders[orderId];
+        await this.state.rememberOrder(symbol, editedOrder, {
+          levelIndex: Number(meta.levelIndex),
+          refillCount: Number(meta.refillCount) || 0,
+          sourceBuyLevelIndex: entryLevelIndex,
+        });
+        console.log(
+          `[SHORT EXIT] ${symbol} resized BUY ${orderId} ` +
+          `remaining=${currentRemaining}->${desiredRemaining} total=${precise.amountNum}`
+        );
+        updated++;
+      } catch (err) {
+        console.warn(
+          `[SHORT EXIT] ${symbol} resize BUY ${orderId} failed; existing exit remains active: ${err.message}`
+        );
+      }
+    }
+    return updated;
   }
 
   getActiveShortExitForEntry(symState, entryLevelIndex) {

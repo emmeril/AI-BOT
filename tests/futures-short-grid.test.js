@@ -308,6 +308,82 @@ test('SHORT dust consolidation leaves inventory with an active exit unchanged', 
   assert.strictEqual(symState.lastBuyByLevel[2], second);
 });
 
+test('SHORT dust extends an active BUY exit without cancelling protection', async () => {
+  const engine = shortEngine();
+  engine.exchange.markets[symbol] = {
+    precision: { price: 0.000001, amount: 1 },
+    limits: { cost: { min: 5 } },
+  };
+  engine.exchange.priceToPrecision = (_symbol, value) => Number(value).toFixed(6);
+  engine.exchange.amountToPrecision = (_symbol, value) => String(Math.floor(Number(value)));
+  engine.latestPositions.set(symbol, {
+    side: 'short', contracts: 9242, entryPrice: 0.0027236307076390393,
+  });
+  const levels = [0.002577, 0.00265, 0.002691, 0.00272, 0.00274, 0.002765];
+  const symState = {
+    orders: {
+      active: {
+        id: 'active', side: 'buy', levelIndex: 2, sourceBuyLevelIndex: 4,
+        refillCount: 1, price: 0.002691, amount: 7427,
+      },
+    },
+    refillCountByLevel: { 4: 1, 5: 0 },
+    lastBuyByLevel: {
+      4: {
+        price: 0.0027135209371213142, amount: 7427, sellableAmount: 7427,
+        totalCostQuote: 20.15332, totalFeeQuote: 0.00403065, refillCount: 1,
+        shortExitCombined: true, shortExitSourceLevels: [2, 4],
+      },
+      5: {
+        price: 0.002765, amount: 1815, sellableAmount: 1815,
+        totalCostQuote: 5.018475, totalFeeQuote: 0.00100369, refillCount: 0,
+      },
+    },
+  };
+  const managedOrders = [{
+    id: 'active', side: 'buy', price: 0.002691,
+    amount: 7427, filled: 0, remaining: 7427,
+  }];
+  let edited = null;
+  let cancelCalls = 0;
+  engine.exchange.editOrder = async (...args) => {
+    edited = args;
+    return { id: 'active', side: 'buy', price: 0.002691, amount: 9242 };
+  };
+  engine.exchange.cancelOrder = async () => { cancelCalls++; };
+  engine.state = {
+    getSymbol: () => symState,
+    save: async () => {},
+    rememberOrder: async (_symbol, order, meta) => {
+      symState.orders[String(order.id)] = {
+        id: String(order.id), side: order.side, price: order.price, amount: order.amount,
+        levelIndex: meta.levelIndex, refillCount: meta.refillCount,
+        sourceBuyLevelIndex: meta.sourceBuyLevelIndex,
+      };
+    },
+  };
+
+  const merge = engine.consolidateShortExitDustIntoActive(
+    symbol, levels, 0.002767, symState, managedOrders, 1815
+  );
+  assert.deepEqual(merge.dustLevels, [5]);
+  assert.deepEqual(merge.sourceLevels, [2, 4, 5]);
+  assert.equal(merge.amount, 9242);
+  assert.deepEqual(Object.keys(symState.lastBuyByLevel), ['4']);
+  assert.equal(symState.lastBuyByLevel[4].sellableAmount, 9242);
+
+  assert.equal(await engine.resizeUndercoveredShortExits(
+    symbol, symState, managedOrders, 9242
+  ), 1);
+  assert.equal(edited[0], 'active');
+  assert.equal(edited[2], 'limit');
+  assert.equal(edited[3], 'buy');
+  assert.equal(Number(edited[4]), 9242);
+  assert.equal(Number(edited[5]), 0.002691);
+  assert.equal(symState.orders.active.amount, 9242);
+  assert.equal(cancelCalls, 0);
+});
+
 test('a single SHORT dust lot combines with uncovered inventory that could exit alone', () => {
   const engine = shortEngine();
   const symState = {
