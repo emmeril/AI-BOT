@@ -35,12 +35,8 @@ const {
 } = require('./src/futures-exposure-budget');
 const { displayNumber, signedUsdt, sellOverview, sellFillMessage } = require('./src/futures-display');
 const { CrossProcessMutex } = require('./src/cross-process-mutex');
-const { isHandoffActive, loadState: loadScalperState } = require('./src/scalper-handoff');
-const {
-  formatNumber: formatScalperNumber,
-  normalizeAlgoOrders,
-  scalperProtectionSnapshot,
-} = require('./src/scalper-telegram');
+const { isHandoffActive, loadState: loadScalperState } = require('./src/scalper/state-store');
+const { ScalperTelegramReports } = require('./src/scalper/telegram-reports');
 const {
   VolumeDeltaAnalyzer,
   evaluateVolumeDeltaEntry,
@@ -1333,6 +1329,12 @@ class FuturesGridEngine {
     this.exposureBudgetLastCheckedAt = 0;
     this.telegramCommandTimer = null;
     this.telegramCommandProcessing = false;
+    this.scalperTelegramReports = new ScalperTelegramReports({
+      exchange: this.exchange,
+      environment: process.env,
+      retry,
+      stateLoader: loadScalperState,
+    });
     this.userStreamReconcileTimers = new Map();
     this.userStreamSymbolMap = new Map();
     this.marginCallUntil = new Map();
@@ -6383,82 +6385,12 @@ class FuturesGridEngine {
     }
   }
 
-  async fetchScalperAlgoOrders(symbol) {
-    if (typeof this.exchange.fapiPrivateGetOpenAlgoOrders !== 'function') return [];
-    const marketId = typeof this.exchange.market === 'function' ? this.exchange.market(symbol)?.id : null;
-    const response = await retry(() => this.exchange.fapiPrivateGetOpenAlgoOrders({
-      symbol: marketId || symbol,
-    }));
-    return normalizeAlgoOrders(response);
-  }
-
   async buildScalperTelegramStatusMessage() {
-    const positions = await retry(() => this.exchange.fetchPositions(SYMBOLS));
-    const scalperState = loadScalperState(scalperHandoffStatePath);
-    const paused = killSwitchActive();
-    const configured = Config.boolean('SCALPER_TRADING_ENABLED', true);
-    const lines = [
-      '[STATUS SCALPER FUTURES]',
-      '',
-      `Trading: ${configured && !paused ? 'AKTIF' : 'DIJEDA'}`,
-      `Strategi: Volume delta reversal ${Config.get('SCALPER_TIMEFRAME', '15m')}`,
-      `Alokasi: LONG ${Config.number('SCALPER_LONG_ALLOCATION_PCT', 35)}% + SHORT ${Config.number('SCALPER_SHORT_ALLOCATION_PCT', 35)}%`,
-    ];
-    for (const symbol of SYMBOLS) {
-      const algoOrders = await this.fetchScalperAlgoOrders(symbol);
-      const symbolState = scalperState.symbols?.[symbol] || {};
-      lines.push('', symbol, `Handoff: ${symbolState.handoffActive ? 'SIAP' : 'MENYELESAIKAN POSISI LAMA'}`);
-      for (const side of ['LONG', 'SHORT']) {
-        const position = positions.find(item => item.symbol === symbol &&
-          String(item.side || item.info?.positionSide || '').toUpperCase() === side &&
-          Math.abs(Number(item.contracts ?? item.info?.positionAmt) || 0) > 0);
-        const protection = scalperProtectionSnapshot(algoOrders, side, Boolean(position));
-        const signal = symbolState.signals?.[side];
-        const signalText = !signal?.available
-          ? 'menunggu candle'
-          : signal.allow
-            ? 'ENTRY'
-            : 'menunggu';
-        if (!position) {
-          lines.push(`${side}: kosong | Sinyal ${signalText}`);
-          continue;
-        }
-        lines.push(
-          `${side}: ${formatScalperNumber(position.contracts)} kontrak @ ${formatScalperNumber(position.entryPrice)}`,
-          `TP/SL ${side}: ${protection.covered ? 'LENGKAP' : 'PERLU DIPERIKSA'} | PnL ${formatScalperNumber(position.unrealizedPnl, 4)} USDT`
-        );
-      }
-    }
-    return lines.join('\n').slice(0, 3900);
+    return this.scalperTelegramReports.status({ paused: killSwitchActive() });
   }
 
   async buildScalperTelegramOrdersMessage() {
-    const positions = await retry(() => this.exchange.fetchPositions(SYMBOLS));
-    const lines = ['[ORDER SCALPER FUTURES]'];
-    for (const symbol of SYMBOLS) {
-      const [regularOrders, algoOrders] = await Promise.all([
-        retry(() => this.exchange.fetchOpenOrders(symbol)),
-        this.fetchScalperAlgoOrders(symbol),
-      ]);
-      lines.push('', symbol);
-      let count = 0;
-      for (const side of ['LONG', 'SHORT']) {
-        const position = positions.find(item => item.symbol === symbol &&
-          String(item.side || item.info?.positionSide || '').toUpperCase() === side &&
-          Math.abs(Number(item.contracts ?? item.info?.positionAmt) || 0) > 0);
-        const protection = scalperProtectionSnapshot(algoOrders, side, Boolean(position));
-        for (const order of protection.orders) {
-          count += 1;
-          lines.push(`${side} ${order.kind}: ${formatScalperNumber(order.triggerPrice)} | close position`);
-        }
-      }
-      for (const order of regularOrders) {
-        count += 1;
-        lines.push(`${String(order.side || '').toUpperCase()} REGULAR: ${formatScalperNumber(order.amount)} @ ${formatScalperNumber(order.price)}`);
-      }
-      if (!count) lines.push('Tidak ada order aktif');
-    }
-    return lines.join('\n').slice(0, 3900);
+    return this.scalperTelegramReports.orders();
   }
 
   buildTelegramStatusMessage() {

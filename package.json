@@ -34,6 +34,7 @@
     "backtest:reversal-rescue": "node scripts/backtest-reversal-rescue.js",
     "backtest:stale-inventory": "node scripts/backtest-reversal-rescue.js",
     "reconcile:inventory": "node scripts/reconcile-spot-inventory.js",
+    "test:scalper": "node --test tests/scalper-handoff.test.js tests/scalper-modules.test.js tests/dashboard.test.js tests/dashboard-assets.test.js",
     "test": "node --test"
   },
   "keywords": [],

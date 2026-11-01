@@ -8,7 +8,7 @@ const { incomeMetrics } = require('./futures-income');
 const { sellEntryLabel } = require('./futures-display');
 const { resolveAppliedDirection } = require('./fibonacci-direction-analyzer');
 const { timeframeToMs } = require('./fibonacci-range-advisor');
-const { normalizeAlgoOrders, scalperProtectionSnapshot } = require('./scalper-telegram');
+const { buildDashboardView, fetchAlgoOrders: fetchScalperAlgoOrders } = require('./scalper/dashboard-view');
 const {
   marketPrice,
   marketPriceText,
@@ -148,31 +148,6 @@ function booleanValue(value, fallback = false) {
   if (TRUE_VALUES.has(normalized)) return true;
   if (FALSE_VALUES.has(normalized)) return false;
   return fallback;
-}
-
-function scalperPauseReason() {
-  if (!booleanValue(process.env.SCALPER_TRADING_ENABLED, true)) return 'Trading scalper dimatikan dari konfigurasi';
-  if (booleanValue(process.env.STOP_TRADING, false)) return 'STOP_TRADING aktif';
-  if (!booleanValue(process.env.KILL_SWITCH_ENABLED, true)) return null;
-  const killSwitchPath = path.resolve(process.env.KILL_SWITCH_FILE || 'bot-paused.flag');
-  try {
-    return fs.existsSync(killSwitchPath) ? 'Kill switch Telegram aktif' : null;
-  } catch {
-    return 'Status kill switch tidak dapat diperiksa';
-  }
-}
-
-async function fetchScalperAlgoOrders(exchange, symbol) {
-  if (typeof exchange.fapiPrivateGetOpenAlgoOrders !== 'function') {
-    return { available: false, orders: [], error: 'API algo order tidak tersedia' };
-  }
-  try {
-    const marketId = typeof exchange.market === 'function' ? exchange.market(symbol)?.id : null;
-    const response = await exchange.fapiPrivateGetOpenAlgoOrders({ symbol: marketId || symbol });
-    return { available: true, orders: normalizeAlgoOrders(response), error: null };
-  } catch (error) {
-    return { available: false, orders: [], error: error.message };
-  }
 }
 
 function volumeDeltaFromState(symState, positionSide) {
@@ -769,53 +744,20 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedS
   const combinedStrategyPnl = longComparison.strategyPnl + shortComparison.strategyPnl;
   const combinedExposure = longComparison.exposure + shortComparison.exposure;
   const scalperSymbolState = scalperState?.symbols?.[symbol] || null;
-  const handoffActive = scalperSymbolState?.handoffActive === true;
-  const scalperAllocationPct = numberOrZero(process.env.SCALPER_ALLOCATION_PCT || 70);
-  const scalperLongAllocationPct = numberOrZero(
-    process.env.SCALPER_LONG_ALLOCATION_PCT || scalperAllocationPct / 2
-  );
-  const scalperShortAllocationPct = numberOrZero(
-    process.env.SCALPER_SHORT_ALLOCATION_PCT || scalperAllocationPct / 2
-  );
-  const scalperEnabled = booleanValue(process.env.SCALPER_ENABLED, true);
-  const scalperSideEnabled = booleanValue(
-    process.env[`SCALPER_${selectedPositionSide}_ENABLED`],
-    selectedPositionSide === 'LONG'
-  );
-  const pauseReason = scalperPauseReason();
-  const scalperTradingEnabled = scalperEnabled && handoffActive && scalperSideEnabled && !pauseReason;
-  const selectedProtection = scalperProtectionSnapshot(
-    algoOrderResult.orders,
-    selectedPositionSide,
-    Boolean(rawPosition)
-  );
-  selectedProtection.available = algoOrderResult.available;
-  selectedProtection.error = algoOrderResult.error;
-  if (rawPosition && !algoOrderResult.available) {
-    selectedProtection.status = 'UNKNOWN';
-    selectedProtection.covered = false;
-  }
-  const trackedScalperPosition = scalperSymbolState?.positions?.[selectedPositionSide] || null;
-  const scalperSignal = scalperSymbolState?.signals?.[selectedPositionSide] || null;
-  const scalperPairCount = new Set([...longSymbols, ...shortSymbols]).size || longSymbols.length || shortSymbols.length;
-  const displayedOrders = handoffActive
-    ? selectedProtection.orders.map(order => ({
-        id: order.id,
-        side: order.side,
-        price: numberOrZero(order.triggerPrice),
-        priceText: marketPriceText(engine, symbol, order.triggerPrice),
-        amount: numberOrZero(rawPosition?.contracts),
-        amountText: marketAmountText(engine, symbol, rawPosition?.contracts),
-        remaining: numberOrZero(rawPosition?.contracts),
-        remainingText: marketAmountText(engine, symbol, rawPosition?.contracts),
-        level: null,
-        orderType: order.kind,
-        entryComparison: order.kind === 'TAKE_PROFIT' ? 'Take profit scalper' : 'Stop loss scalper',
-        isAlgo: true,
-      }))
-    : orders;
-  const dashboardTradingEnabled = handoffActive
-    ? scalperTradingEnabled
+  const scalperView = buildDashboardView({
+    environment: process.env,
+    symbolState: scalperSymbolState,
+    positionSide: selectedPositionSide,
+    rawPosition,
+    algoOrderResult,
+    longSymbols,
+    shortSymbols,
+    formatPrice: value => marketPriceText(engine, symbol, value),
+    formatAmount: value => marketAmountText(engine, symbol, value),
+  });
+  const displayedOrders = scalperView.displayedOrders || orders;
+  const dashboardTradingEnabled = scalperView.handoffActive
+    ? scalperView.tradingEnabled
     : selectedRunning && engine.canPlaceNewOrders() && selectedEntryGridEnabled;
   return {
     generatedAt: new Date().toISOString(), refreshSeconds, dashboardAuthEnabled: authEnabled,
@@ -827,33 +769,9 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedS
     positionSides: ['LONG', 'SHORT'], selectedPositionSide,
     sideAvailable: selectedPositionSide === 'SHORT' ? shortAvailable : longAvailable,
     scalper: {
-      enabled: scalperEnabled,
-      tradingEnabled: scalperTradingEnabled,
-      configuredTradingEnabled: booleanValue(process.env.SCALPER_TRADING_ENABLED, true),
-      paused: Boolean(pauseReason),
-      pauseReason,
-      handoffActive,
-      phase: handoffActive ? (rawPosition ? 'POSITION_ACTIVE' : 'READY') : 'LEGACY_EXIT',
-      selectedSide: selectedPositionSide,
-      sideEnabled: scalperSideEnabled,
-      longEnabled: booleanValue(process.env.SCALPER_LONG_ENABLED, true),
-      shortEnabled: booleanValue(process.env.SCALPER_SHORT_ENABLED, false),
-      timeframe: String(process.env.SCALPER_TIMEFRAME || '15m'),
-      strategy: 'VOLUME_DELTA_REVERSAL',
-      pairCount: scalperPairCount,
-      allocationPct: scalperLongAllocationPct + scalperShortAllocationPct,
-      longAllocationPct: scalperLongAllocationPct,
-      shortAllocationPct: scalperShortAllocationPct,
-      takeProfitPct: numberOrZero(process.env.SCALPER_TAKE_PROFIT_PCT || 2),
-      stopLossPct: numberOrZero(process.env.SCALPER_STOP_LOSS_PCT || 1),
-      maxHoldMinutes: numberOrZero(process.env.SCALPER_MAX_HOLD_MINUTES || 240),
+      ...scalperView.snapshot,
       legacyLongOpen: Boolean(long),
       legacyShortOpen: Boolean(short),
-      activatedAt: scalperSymbolState?.activatedAt || null,
-      cooldownUntil: numberOrZero(scalperSymbolState?.cooldownUntil?.[selectedPositionSide]) || null,
-      signal: scalperSignal,
-      trackedPosition: trackedScalperPosition,
-      protection: selectedProtection,
     },
     comparison: {
       scope: 'selected-pair',

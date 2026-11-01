@@ -4,98 +4,18 @@ const fs = require('fs');
 const path = require('path');
 const ccxt = require('ccxt');
 const { buildIndicators, entrySignal, exitSignal } = require('./micro-scalper-strategy');
-const { ScalperTelegramNotifier, formatNumber } = require('./scalper-telegram');
-const {
-  canActivateHandoff,
-  hasPosition,
-  loadState,
-  protectionPrices,
-  saveState,
-} = require('./scalper-handoff');
+const { targetNotional, walletBalance } = require('./scalper/allocation');
+const { buildScalperConfig } = require('./scalper/config');
+const { normalizeAlgoOrders, scalperOrdersForSide } = require('./scalper/order-inspection');
+const { canActivateHandoff, positionForSide, protectionPrices } = require('./scalper/position-policy');
+const { loadState, saveState } = require('./scalper/state-store');
+const { ScalperTelegramNotifier, formatNumber } = require('./scalper/telegram-notifier');
 
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
-function numberEnv(environment, name, fallback) {
-  const value = Number(environment[name]);
-  return Number.isFinite(value) ? value : fallback;
-}
-
-function booleanEnv(environment, name, fallback = false) {
-  const value = environment[name];
-  if (value === undefined || value === '') return fallback;
-  return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
-}
-
-function buildConfig(environment = process.env) {
-  const symbols = String(environment.SYMBOLS || '')
-    .split(',').map(value => value.trim()).filter(Boolean);
-  const totalAllocationPct = numberEnv(environment, 'SCALPER_ALLOCATION_PCT', 70);
-  const strategy = side => ({
-    side,
-    entryMode: 'VOLUME_DELTA_REVERSAL',
-    useFlowFilter: true,
-    flowWindow: side === 'LONG' ? 1 : 4,
-    flowThreshold: 0,
-    flowExitThreshold: side === 'LONG' ? 0 : -0.2,
-    emaFast: 8,
-    emaSlow: 21,
-    momentumWindow: side === 'LONG' ? 16 : 4,
-    atrPeriod: 14,
-    minAtrPct: 0.03,
-    maxAtrPct: 2,
-    minTrendPct: 0,
-    minMomentumPct: side === 'LONG' ? 3 : 2,
-    takeProfitPct: numberEnv(environment, 'SCALPER_TAKE_PROFIT_PCT', 2),
-    stopLossPct: numberEnv(environment, 'SCALPER_STOP_LOSS_PCT', 1),
-    maxHoldMinutes: numberEnv(environment, 'SCALPER_MAX_HOLD_MINUTES', 240),
-    cooldownMinutes: numberEnv(environment, 'SCALPER_COOLDOWN_MINUTES', 15),
-  });
-  const strategies = { LONG: strategy('LONG'), SHORT: strategy('SHORT') };
-  const activeSides = ['LONG', 'SHORT'].filter(side =>
-    booleanEnv(environment, `SCALPER_${side}_ENABLED`, side === 'LONG'));
-  return {
-    symbols,
-    enabled: booleanEnv(environment, 'SCALPER_ENABLED', true),
-    tradingEnabled: booleanEnv(environment, 'SCALPER_TRADING_ENABLED', true),
-    intervalMs: Math.max(5000, numberEnv(environment, 'SCALPER_INTERVAL_MS', 15000)),
-    timeframe: String(environment.SCALPER_TIMEFRAME || '15m'),
-    allocationPct: totalAllocationPct,
-    allocations: {
-      LONG: numberEnv(environment, 'SCALPER_LONG_ALLOCATION_PCT', totalAllocationPct / 2),
-      SHORT: numberEnv(environment, 'SCALPER_SHORT_ALLOCATION_PCT', totalAllocationPct / 2),
-    },
-    leverage: numberEnv(environment, 'LEVERAGE', 5),
-    stopTrading: booleanEnv(environment, 'STOP_TRADING', false),
-    killSwitchEnabled: booleanEnv(environment, 'KILL_SWITCH_ENABLED', true),
-    killSwitchPath: path.resolve(environment.KILL_SWITCH_FILE || 'bot-paused.flag'),
-    statePath: path.resolve(environment.SCALPER_STATE_FILE || 'futures-scalper-state.json'),
-    strategies,
-    strategy: strategies.SHORT,
-    activeSides,
-  };
-}
-
-function normalizeAlgoOrders(response) {
-  if (Array.isArray(response)) return response;
-  if (Array.isArray(response?.orders)) return response.orders;
-  return [];
-}
-
-function positionForSide(positions, symbol, side) {
-  return positions.find(position => position.symbol === symbol &&
-    String(position.side || position.info?.positionSide).toUpperCase() === side && hasPosition(position));
-}
-
-function targetNotional(walletBalance, allocationPct, leverage, pairCount) {
-  const wallet = Number(walletBalance);
-  const pairs = Number(pairCount);
-  if (!(wallet > 0) || !(pairs > 0)) return 0;
-  return wallet * Number(allocationPct) / 100 * Number(leverage) / pairs;
-}
-
 class FuturesScalperEngine {
   constructor({ exchange, environment = process.env, notifier } = {}) {
-    this.config = buildConfig(environment);
+    this.config = buildScalperConfig(environment);
     this.exchange = exchange || new ccxt.binanceusdm({
       apiKey: environment.EXCHANGE_API_KEY,
       secret: environment.EXCHANGE_SECRET,
@@ -221,18 +141,7 @@ class FuturesScalperEngine {
   }
 
   scalperAlgoOrders(orders, side = null) {
-    const scalperOrders = orders.filter(order =>
-      String(order.clientAlgoId || order.clientOrderId || '').startsWith('scalp-'));
-    if (!side) return scalperOrders;
-    const expected = String(side).toUpperCase();
-    return scalperOrders.filter(order => {
-      const positionSide = String(order.positionSide || order.info?.positionSide || '').toUpperCase();
-      if (positionSide) return positionSide === expected;
-      const clientId = String(order.clientAlgoId || order.clientOrderId || '');
-      if (clientId.startsWith('scalp-l-')) return expected === 'LONG';
-      if (clientId.startsWith('scalp-s-')) return expected === 'SHORT';
-      return expected === 'SHORT';
-    });
+    return scalperOrdersForSide(orders, side);
   }
 
   async cancelScalperAlgoOrders(symbol, side, orders = null) {
@@ -294,15 +203,6 @@ class FuturesScalperEngine {
         indicator: indicators[index],
       }];
     }));
-  }
-
-  walletBalance(balance) {
-    const candidates = [
-      balance?.info?.totalWalletBalance,
-      balance?.total?.USDT,
-      balance?.USDT?.total,
-    ].map(Number).filter(Number.isFinite);
-    return candidates.find(value => value > 0) || 0;
   }
 
   async placeProtections(symbol, position, side) {
@@ -414,7 +314,7 @@ class FuturesScalperEngine {
 
   async enterPosition(symbol, currentPrice, side) {
     const balance = await this.exchange.fetchBalance();
-    const wallet = this.walletBalance(balance);
+    const wallet = walletBalance(balance);
     const notional = targetNotional(
       wallet,
       this.config.allocations[side],
@@ -618,7 +518,7 @@ class FuturesScalperEngine {
 
 module.exports = {
   FuturesScalperEngine,
-  buildConfig,
+  buildConfig: buildScalperConfig,
   normalizeAlgoOrders,
   positionForSide,
   targetNotional,
