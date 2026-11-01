@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const { canActivateHandoff, protectionPrices } = require('../src/scalper-handoff');
+const { formatScalperMessage, scalperProtectionSnapshot } = require('../src/scalper-telegram');
 const {
   FuturesScalperEngine,
   buildConfig,
@@ -69,6 +71,49 @@ test('position lookup respects Hedge Mode side', () => {
 
 test('70 percent margin allocation is leveraged and divided equally across three pairs', () => {
   assert.equal(Number(targetNotional(100, 70, 5, 3).toFixed(6)), 116.666667);
+});
+
+test('Telegram kill switch pauses new scalper entries without disabling position management', () => {
+  const killSwitchPath = `/tmp/ai-bot-scalper-pause-${process.pid}.flag`;
+  try { fs.unlinkSync(killSwitchPath); } catch {}
+  const engine = new FuturesScalperEngine({
+    exchange: {},
+    notifier: { send: async () => {} },
+    environment: {
+      SYMBOLS: 'DOGE/USDT:USDT',
+      KILL_SWITCH_ENABLED: 'true',
+      KILL_SWITCH_FILE: killSwitchPath,
+      SCALPER_TRADING_ENABLED: 'true',
+      SCALPER_STATE_FILE: `/tmp/ai-bot-scalper-pause-state-${process.pid}.json`,
+    },
+  });
+  assert.equal(engine.canEnterNewPositions(), true);
+  fs.writeFileSync(killSwitchPath, 'paused\n');
+  assert.equal(engine.canEnterNewPositions(), false);
+  assert.match(engine.pauseReason(), /kill switch/i);
+  fs.unlinkSync(killSwitchPath);
+  assert.equal(engine.canEnterNewPositions(), true);
+});
+
+test('scalper protection snapshot requires both side-specific TP and SL', () => {
+  const orders = [
+    { algoId: '1', clientAlgoId: 'scalp-l-tp-a', positionSide: 'LONG', orderType: 'TAKE_PROFIT_MARKET', triggerPrice: '102', side: 'SELL', closePosition: 'true' },
+    { algoId: '2', clientAlgoId: 'scalp-l-sl-a', positionSide: 'LONG', orderType: 'STOP_MARKET', triggerPrice: '99', side: 'SELL', closePosition: 'true' },
+    { algoId: '3', clientAlgoId: 'scalp-s-sl-a', positionSide: 'SHORT', orderType: 'STOP_MARKET', triggerPrice: '101', side: 'BUY', closePosition: 'true' },
+  ];
+  const long = scalperProtectionSnapshot(orders, 'LONG', true);
+  const short = scalperProtectionSnapshot(orders, 'SHORT', true);
+  assert.equal(long.status, 'PROTECTED');
+  assert.equal(long.takeProfit.triggerPrice, 102);
+  assert.equal(long.stopLoss.triggerPrice, 99);
+  assert.equal(short.status, 'INCOMPLETE');
+});
+
+test('scalper Telegram messages use a readable sectioned layout', () => {
+  assert.equal(formatScalperMessage('SCALPER ENTRY', [
+    ['Pair', 'DOGE/USDT:USDT'],
+    ['Sisi', 'LONG'],
+  ]), '[SCALPER ENTRY]\n\nPair: DOGE/USDT:USDT\nSisi: LONG');
 });
 
 test('LONG protection never cancels SHORT protection and uses sell exits', async () => {

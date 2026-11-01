@@ -8,6 +8,7 @@ const { incomeMetrics } = require('./futures-income');
 const { sellEntryLabel } = require('./futures-display');
 const { resolveAppliedDirection } = require('./fibonacci-direction-analyzer');
 const { timeframeToMs } = require('./fibonacci-range-advisor');
+const { normalizeAlgoOrders, scalperProtectionSnapshot } = require('./scalper-telegram');
 const {
   marketPrice,
   marketPriceText,
@@ -147,6 +148,31 @@ function booleanValue(value, fallback = false) {
   if (TRUE_VALUES.has(normalized)) return true;
   if (FALSE_VALUES.has(normalized)) return false;
   return fallback;
+}
+
+function scalperPauseReason() {
+  if (!booleanValue(process.env.SCALPER_TRADING_ENABLED, true)) return 'Trading scalper dimatikan dari konfigurasi';
+  if (booleanValue(process.env.STOP_TRADING, false)) return 'STOP_TRADING aktif';
+  if (!booleanValue(process.env.KILL_SWITCH_ENABLED, true)) return null;
+  const killSwitchPath = path.resolve(process.env.KILL_SWITCH_FILE || 'bot-paused.flag');
+  try {
+    return fs.existsSync(killSwitchPath) ? 'Kill switch Telegram aktif' : null;
+  } catch {
+    return 'Status kill switch tidak dapat diperiksa';
+  }
+}
+
+async function fetchScalperAlgoOrders(exchange, symbol) {
+  if (typeof exchange.fapiPrivateGetOpenAlgoOrders !== 'function') {
+    return { available: false, orders: [], error: 'API algo order tidak tersedia' };
+  }
+  try {
+    const marketId = typeof exchange.market === 'function' ? exchange.market(symbol)?.id : null;
+    const response = await exchange.fapiPrivateGetOpenAlgoOrders({ symbol: marketId || symbol });
+    return { available: true, orders: normalizeAlgoOrders(response), error: null };
+  } catch (error) {
+    return { available: false, orders: [], error: error.message };
+  }
 }
 
 function volumeDeltaFromState(symState, positionSide) {
@@ -658,12 +684,13 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedS
   const longState = longAvailable ? engine.state.getSymbol(symbol) : emptySymbolState();
   const selectedShortState = shortAvailable ? shortState.symbols[symbol] : emptySymbolState();
   const symState = selectedPositionSide === 'SHORT' ? selectedShortState : longState;
-  const [ticker, exchangeOrders, candles, balance, positions] = await Promise.all([
+  const [ticker, exchangeOrders, candles, balance, positions, algoOrderResult] = await Promise.all([
     retry(() => engine.exchange.fetchTicker(symbol)),
     retry(() => engine.exchange.fetchOpenOrders(symbol)),
     retry(() => engine.exchange.fetchOHLCV(symbol, timeframe, undefined, chartLimit)),
     retry(() => engine.exchange.fetchBalance()),
     retry(() => engine.exchange.fetchPositions([symbol])),
+    fetchScalperAlgoOrders(engine.exchange, symbol),
   ]);
   const longOrders = longAvailable ? managedOrders(engine, symbol, exchangeOrders, longState, 'LONG') : [];
   const shortOrders = shortAvailable ? managedOrders(engine, symbol, exchangeOrders, selectedShortState, 'SHORT') : [];
@@ -750,29 +777,83 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedS
   const scalperShortAllocationPct = numberOrZero(
     process.env.SCALPER_SHORT_ALLOCATION_PCT || scalperAllocationPct / 2
   );
+  const scalperEnabled = booleanValue(process.env.SCALPER_ENABLED, true);
+  const scalperSideEnabled = booleanValue(
+    process.env[`SCALPER_${selectedPositionSide}_ENABLED`],
+    selectedPositionSide === 'LONG'
+  );
+  const pauseReason = scalperPauseReason();
+  const scalperTradingEnabled = scalperEnabled && handoffActive && scalperSideEnabled && !pauseReason;
+  const selectedProtection = scalperProtectionSnapshot(
+    algoOrderResult.orders,
+    selectedPositionSide,
+    Boolean(rawPosition)
+  );
+  selectedProtection.available = algoOrderResult.available;
+  selectedProtection.error = algoOrderResult.error;
+  if (rawPosition && !algoOrderResult.available) {
+    selectedProtection.status = 'UNKNOWN';
+    selectedProtection.covered = false;
+  }
+  const trackedScalperPosition = scalperSymbolState?.positions?.[selectedPositionSide] || null;
+  const scalperSignal = scalperSymbolState?.signals?.[selectedPositionSide] || null;
+  const scalperPairCount = new Set([...longSymbols, ...shortSymbols]).size || longSymbols.length || shortSymbols.length;
+  const displayedOrders = handoffActive
+    ? selectedProtection.orders.map(order => ({
+        id: order.id,
+        side: order.side,
+        price: numberOrZero(order.triggerPrice),
+        priceText: marketPriceText(engine, symbol, order.triggerPrice),
+        amount: numberOrZero(rawPosition?.contracts),
+        amountText: marketAmountText(engine, symbol, rawPosition?.contracts),
+        remaining: numberOrZero(rawPosition?.contracts),
+        remainingText: marketAmountText(engine, symbol, rawPosition?.contracts),
+        level: null,
+        orderType: order.kind,
+        entryComparison: order.kind === 'TAKE_PROFIT' ? 'Take profit scalper' : 'Stop loss scalper',
+        isAlgo: true,
+      }))
+    : orders;
+  const dashboardTradingEnabled = handoffActive
+    ? scalperTradingEnabled
+    : selectedRunning && engine.canPlaceNewOrders() && selectedEntryGridEnabled;
   return {
     generatedAt: new Date().toISOString(), refreshSeconds, dashboardAuthEnabled: authEnabled,
     source: 'Binance USDⓈ-M Futures',
     mode: process.env.EXCHANGE_MODE || 'testnet', running: selectedRunning,
-    tradingEnabled: selectedRunning && engine.canPlaceNewOrders() && selectedEntryGridEnabled,
+    tradingEnabled: dashboardTradingEnabled,
     entryGridEnabled: selectedEntryGridEnabled,
     symbols, selectedSymbol: symbol,
     positionSides: ['LONG', 'SHORT'], selectedPositionSide,
     sideAvailable: selectedPositionSide === 'SHORT' ? shortAvailable : longAvailable,
     scalper: {
-      enabled: booleanValue(process.env.SCALPER_ENABLED, true),
-      tradingEnabled: booleanValue(process.env.SCALPER_TRADING_ENABLED, true),
+      enabled: scalperEnabled,
+      tradingEnabled: scalperTradingEnabled,
+      configuredTradingEnabled: booleanValue(process.env.SCALPER_TRADING_ENABLED, true),
+      paused: Boolean(pauseReason),
+      pauseReason,
       handoffActive,
-      phase: handoffActive ? (short ? 'POSITION_ACTIVE' : 'READY') : 'LEGACY_EXIT',
+      phase: handoffActive ? (rawPosition ? 'POSITION_ACTIVE' : 'READY') : 'LEGACY_EXIT',
+      selectedSide: selectedPositionSide,
+      sideEnabled: scalperSideEnabled,
+      longEnabled: booleanValue(process.env.SCALPER_LONG_ENABLED, true),
+      shortEnabled: booleanValue(process.env.SCALPER_SHORT_ENABLED, false),
+      timeframe: String(process.env.SCALPER_TIMEFRAME || '15m'),
+      strategy: 'VOLUME_DELTA_REVERSAL',
+      pairCount: scalperPairCount,
       allocationPct: scalperLongAllocationPct + scalperShortAllocationPct,
       longAllocationPct: scalperLongAllocationPct,
       shortAllocationPct: scalperShortAllocationPct,
-      takeProfitPct: numberOrZero(process.env.SCALPER_TAKE_PROFIT_PCT || 2.5),
+      takeProfitPct: numberOrZero(process.env.SCALPER_TAKE_PROFIT_PCT || 2),
       stopLossPct: numberOrZero(process.env.SCALPER_STOP_LOSS_PCT || 1),
-      maxHoldMinutes: numberOrZero(process.env.SCALPER_MAX_HOLD_MINUTES || 120),
+      maxHoldMinutes: numberOrZero(process.env.SCALPER_MAX_HOLD_MINUTES || 240),
       legacyLongOpen: Boolean(long),
       legacyShortOpen: Boolean(short),
       activatedAt: scalperSymbolState?.activatedAt || null,
+      cooldownUntil: numberOrZero(scalperSymbolState?.cooldownUntil?.[selectedPositionSide]) || null,
+      signal: scalperSignal,
+      trackedPosition: trackedScalperPosition,
+      protection: selectedProtection,
     },
     comparison: {
       scope: 'selected-pair',
@@ -814,9 +895,11 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedS
     advisor: symState.config?.rangeAdvisor || null,
     intelligence,
     orders: {
-      active: orders, buyCount: orders.filter(order => order.side === 'buy').length, sellCount: orders.filter(order => order.side === 'sell').length,
-      buyValue: orders.filter(order => order.side === 'buy').reduce((sum, order) => sum + order.price * order.remaining, 0),
-      sellValue: orders.filter(order => order.side === 'sell').reduce((sum, order) => sum + order.price * order.remaining, 0),
+      active: displayedOrders,
+      buyCount: displayedOrders.filter(order => order.side === 'buy').length,
+      sellCount: displayedOrders.filter(order => order.side === 'sell').length,
+      buyValue: displayedOrders.filter(order => order.side === 'buy').reduce((sum, order) => sum + order.price * order.remaining, 0),
+      sellValue: displayedOrders.filter(order => order.side === 'sell').reduce((sum, order) => sum + order.price * order.remaining, 0),
     },
     profit: {
       realized: numberOrZero(symState.realizedGridProfit) + numberOrZero(symState.realizedExitProfit),

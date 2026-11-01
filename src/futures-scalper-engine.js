@@ -1,8 +1,10 @@
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
 const ccxt = require('ccxt');
 const { buildIndicators, entrySignal, exitSignal } = require('./micro-scalper-strategy');
+const { ScalperTelegramNotifier, formatNumber } = require('./scalper-telegram');
 const {
   canActivateHandoff,
   hasPosition,
@@ -63,6 +65,9 @@ function buildConfig(environment = process.env) {
       SHORT: numberEnv(environment, 'SCALPER_SHORT_ALLOCATION_PCT', totalAllocationPct / 2),
     },
     leverage: numberEnv(environment, 'LEVERAGE', 5),
+    stopTrading: booleanEnv(environment, 'STOP_TRADING', false),
+    killSwitchEnabled: booleanEnv(environment, 'KILL_SWITCH_ENABLED', true),
+    killSwitchPath: path.resolve(environment.KILL_SWITCH_FILE || 'bot-paused.flag'),
     statePath: path.resolve(environment.SCALPER_STATE_FILE || 'futures-scalper-state.json'),
     strategies,
     strategy: strategies.SHORT,
@@ -89,7 +94,7 @@ function targetNotional(walletBalance, allocationPct, leverage, pairCount) {
 }
 
 class FuturesScalperEngine {
-  constructor({ exchange, environment = process.env } = {}) {
+  constructor({ exchange, environment = process.env, notifier } = {}) {
     this.config = buildConfig(environment);
     this.exchange = exchange || new ccxt.binanceusdm({
       apiKey: environment.EXCHANGE_API_KEY,
@@ -102,6 +107,7 @@ class FuturesScalperEngine {
         fetchCurrencies: false,
       },
     });
+    this.notifier = notifier || new ScalperTelegramNotifier(environment);
     this.state = loadState(this.config.statePath);
     this.running = false;
   }
@@ -113,6 +119,7 @@ class FuturesScalperEngine {
       lastExitSignalCandle: { LONG: 0, SHORT: 0 },
       cooldownUntil: { LONG: 0, SHORT: 0 },
       positions: { LONG: null, SHORT: null },
+      signals: { LONG: null, SHORT: null },
     };
     const state = this.state.symbols[symbol];
     if (!state.positions) {
@@ -126,6 +133,7 @@ class FuturesScalperEngine {
       state.cooldownUntil = { LONG: 0, SHORT: Number(state.cooldownUntil) || 0 };
     }
     state.lastExitSignalCandle ||= { LONG: 0, SHORT: 0 };
+    state.signals ||= { LONG: null, SHORT: null };
     state.positions.LONG ??= null;
     state.positions.SHORT ??= null;
     state.lastSignalCandle.LONG ||= 0;
@@ -134,7 +142,69 @@ class FuturesScalperEngine {
     state.lastExitSignalCandle.SHORT ||= 0;
     state.cooldownUntil.LONG ||= 0;
     state.cooldownUntil.SHORT ||= 0;
+    state.signals.LONG ??= null;
+    state.signals.SHORT ??= null;
     return state;
+  }
+
+  pauseReason() {
+    if (!this.config.tradingEnabled) return 'SCALPER_TRADING_ENABLED=false';
+    if (this.config.stopTrading) return 'STOP_TRADING=true';
+    if (this.config.killSwitchEnabled) {
+      try {
+        if (fs.existsSync(this.config.killSwitchPath)) return `kill switch ${path.basename(this.config.killSwitchPath)} aktif`;
+      } catch (error) {
+        return `kill switch tidak dapat diperiksa: ${error.message}`;
+      }
+    }
+    return null;
+  }
+
+  canEnterNewPositions() {
+    return this.pauseReason() === null;
+  }
+
+  async notify(title, rows) {
+    try {
+      await this.notifier.send(title, rows);
+    } catch (error) {
+      console.warn(`[SCALPER TELEGRAM] ${error.message}`);
+    }
+  }
+
+  async closedTradeSummary(symbol, side, since) {
+    if (typeof this.exchange.fetchMyTrades !== 'function') return null;
+    try {
+      const trades = await this.exchange.fetchMyTrades(symbol, Number(since) || undefined, 100);
+      const exitSide = side === 'LONG' ? 'sell' : 'buy';
+      const sideTrades = trades.filter(trade => {
+        const positionSide = String(trade.info?.positionSide || side).toUpperCase();
+        return positionSide === side;
+      });
+      const exits = sideTrades.filter(trade =>
+        String(trade.side || trade.info?.side || '').toLowerCase() === exitSide);
+      if (!exits.length) return null;
+      const amount = exits.reduce((sum, trade) => sum + Math.abs(Number(trade.amount) || 0), 0);
+      const quoteValue = exits.reduce((sum, trade) =>
+        sum + Math.abs(Number(trade.cost) || (Number(trade.amount) || 0) * (Number(trade.price) || 0)), 0);
+      const realizedPnl = sideTrades.reduce((sum, trade) =>
+        sum + (Number(trade.info?.realizedPnl ?? trade.info?.realizedProfit) || 0), 0);
+      const fees = sideTrades.reduce((sum, trade) => {
+        const currency = String(trade.fee?.currency || trade.info?.commissionAsset || 'USDT').toUpperCase();
+        return currency === 'USDT'
+          ? sum + Math.abs(Number(trade.fee?.cost ?? trade.info?.commission) || 0)
+          : sum;
+      }, 0);
+      return {
+        exitPrice: amount > 0 ? quoteValue / amount : null,
+        realizedPnl,
+        fees,
+        netPnl: realizedPnl - fees,
+      };
+    } catch (error) {
+      console.warn(`[SCALPER] ${symbol} could not read closing trades: ${error.message}`);
+      return null;
+    }
   }
 
   save() {
@@ -191,6 +261,11 @@ class FuturesScalperEngine {
     state.cooldownUntil.SHORT = Date.now() + this.config.intervalMs * 2;
     this.save();
     console.log(`[SCALPER HANDOFF] ${symbol} is flat; grid ownership released`);
+    await this.notify('SCALPER PAIR SIAP', [
+      ['Pair', symbol],
+      ['Status', 'Posisi dan order strategi lama sudah kosong'],
+      ['Sisi aktif', this.config.activeSides.join(' + ') || 'Tidak ada'],
+    ]);
     return true;
   }
 
@@ -270,7 +345,30 @@ class FuturesScalperEngine {
       positionSide: side,
       newClientOrderId: `scalp-${sideCode}-close-${Date.now().toString(36)}`.slice(0, 32),
     });
+    const state = this.symbolState(symbol);
+    const tracked = state.positions[side] || {};
+    const heldMinutes = tracked.enteredAt ? Math.max(0, (Date.now() - Number(tracked.enteredAt)) / 60_000) : null;
+    state.positions[side] = {
+      ...tracked,
+      closing: { reason, submittedAt: Date.now() },
+    };
+    this.save();
     console.log(`[SCALPER EXIT] ${symbol} ${side} ${reason} amount=${amount}`);
+    const safetyClose = /protection|invalid|failed/i.test(reason);
+    if (safetyClose) {
+      await this.notify('SCALPER SAFETY CLOSE', [
+        ['Pair', symbol],
+        ['Sisi', side],
+        ['Alasan', reason],
+        ['Jumlah', formatNumber(amount)],
+        ['Harga entry', formatNumber(position.entryPrice)],
+        ['Mark terakhir', formatNumber(position.markPrice ?? position.info?.markPrice)],
+        ['PnL berjalan terakhir', Number.isFinite(Number(position.unrealizedPnl))
+          ? `${formatNumber(position.unrealizedPnl, 4)} USDT`
+          : null],
+        ['Durasi', heldMinutes === null ? null : `${formatNumber(heldMinutes, 1)} menit`],
+      ]);
+    }
   }
 
   async ensureManagedPosition(symbol, position, side, algoOrders) {
@@ -282,6 +380,18 @@ class FuturesScalperEngine {
         adoptedAfterRestart: true,
       };
       this.save();
+    }
+    const closing = state.positions[side]?.closing;
+    if (closing) {
+      const closingAge = Date.now() - Number(closing.submittedAt || 0);
+      if (closingAge < this.config.intervalMs * 2) return true;
+      delete state.positions[side].closing;
+      this.save();
+      await this.notify('SCALPER CLOSE RETRY', [
+        ['Pair', symbol],
+        ['Sisi', side],
+        ['Status', 'Posisi masih terbuka setelah market close. Proteksi dipasang kembali.'],
+      ]);
     }
     if (this.scalperAlgoOrders(algoOrders, side).length < 2) {
       try {
@@ -340,6 +450,18 @@ class FuturesScalperEngine {
       throw error;
     }
     console.log(`[SCALPER ENTRY] ${symbol} ${side} amount=${amount} notional=${notional.toFixed(2)}`);
+    const protection = state.positions[side].protection;
+    await this.notify('SCALPER ENTRY', [
+      ['Pair', symbol],
+      ['Sisi', side],
+      ['Harga entry', formatNumber(position.entryPrice)],
+      ['Jumlah', formatNumber(amount)],
+      ['Notional', `${formatNumber(notional, 2)} USDT`],
+      ['Take profit', formatNumber(protection.takeProfit)],
+      ['Stop loss', formatNumber(protection.stopLoss)],
+      ['Jatah sisi', `${formatNumber(this.config.allocations[side], 2)}% dibagi ${this.config.symbols.length} pair`],
+      ['Sinyal', `Volume delta reversal ${this.config.timeframe}`],
+    ]);
   }
 
   async cycleSymbol(symbol) {
@@ -361,12 +483,28 @@ class FuturesScalperEngine {
         continue;
       }
       if (state.positions[side]) {
+        const previous = state.positions[side];
         await this.cancelScalperAlgoOrders(symbol, side, algoOrders);
+        const heldMinutes = previous.enteredAt
+          ? Math.max(0, (Date.now() - Number(previous.enteredAt)) / 60_000)
+          : null;
+        const trade = await this.closedTradeSummary(symbol, side, previous.enteredAt);
+        await this.notify(previous.closing ? 'SCALPER EXIT CONFIRMED' : 'SCALPER POSITION CLOSED', [
+          ['Pair', symbol],
+          ['Sisi', side],
+          ['Status', 'Posisi sudah tertutup di Binance'],
+          ['Alasan', previous.closing?.reason || 'Take profit, stop loss, atau penutupan manual'],
+          ['Harga entry', formatNumber(previous.entryPrice)],
+          ['Harga exit', trade?.exitPrice ? formatNumber(trade.exitPrice) : null],
+          ['PnL bersih', trade ? `${formatNumber(trade.netPnl, 4)} USDT` : null],
+          ['Fee exit', trade ? `${formatNumber(trade.fees, 4)} USDT` : null],
+          ['Durasi', heldMinutes === null ? null : `${formatNumber(heldMinutes, 1)} menit`],
+        ]);
         state.positions[side] = null;
         state.cooldownUntil[side] = Date.now() + this.config.strategies[side].cooldownMinutes * 60_000;
         this.save();
       }
-      if (this.config.tradingEnabled && this.config.activeSides.includes(side) &&
+      if (this.canEnterNewPositions() && this.config.activeSides.includes(side) &&
         Date.now() >= Number(state.cooldownUntil[side] || 0)) {
         flatSides.push(side);
       }
@@ -374,6 +512,30 @@ class FuturesScalperEngine {
     const signalSides = [...new Set([...openSides.map(item => item.side), ...flatSides])];
     if (!signalSides.length) return;
     const signals = await this.signals(symbol, signalSides);
+    for (const side of signalSides) {
+      const signal = signals[side];
+      state.signals[side] = {
+        candleTimestamp: signal.candleTimestamp,
+        evaluatedAt: new Date().toISOString(),
+        available: Boolean(signal.candle && signal.indicator),
+        allow: Boolean(signal.allow),
+        exit: Boolean(signal.exit),
+        close: Number(signal.candle?.close) || null,
+        flowDeltaRatio: Number.isFinite(Number(signal.indicator?.flowDeltaRatio))
+          ? Number(signal.indicator.flowDeltaRatio)
+          : null,
+        momentumPct: Number.isFinite(Number(signal.indicator?.momentumRatio))
+          ? Number(signal.indicator.momentumRatio) * 100
+          : null,
+        atrPct: Number.isFinite(Number(signal.indicator?.atrPct))
+          ? Number(signal.indicator.atrPct)
+          : null,
+        emaSlow: Number.isFinite(Number(signal.indicator?.emaSlow))
+          ? Number(signal.indicator.emaSlow)
+          : null,
+      };
+    }
+    this.save();
     for (const { side, position } of openSides) {
       const signal = signals[side];
       if (!signal.exit || !signal.candleTimestamp ||
@@ -400,6 +562,19 @@ class FuturesScalperEngine {
           await this.cycleSymbol(symbol);
         } catch (error) {
           console.error(`[SCALPER] ${symbol}: ${error.stack || error.message}`);
+          const state = this.symbolState(symbol);
+          const key = String(error.message || error);
+          const now = Date.now();
+          if (state.lastErrorKey !== key || now - Number(state.lastErrorNotifiedAt || 0) >= 15 * 60_000) {
+            state.lastErrorKey = key;
+            state.lastErrorNotifiedAt = now;
+            this.save();
+            await this.notify('SCALPER ERROR', [
+              ['Pair', symbol],
+              ['Masalah', key],
+              ['Tindakan', 'Bot akan mencoba lagi. Posisi terbuka tetap diperiksa pada siklus berikutnya.'],
+            ]);
+          }
         }
       }
     } finally {
@@ -427,6 +602,13 @@ class FuturesScalperEngine {
       `allocation=LONG ${this.config.allocations.LONG}% + SHORT ${this.config.allocations.SHORT}% ` +
       `across ${this.config.symbols.length} pairs`
     );
+    await this.notify('SCALPER STARTED', [
+      ['Mode', this.config.activeSides.join(' + ') || 'EXIT-ONLY'],
+      ['Strategi', `${this.config.timeframe} volume-delta reversal`],
+      ['Trading', this.pauseReason() || 'Aktif'],
+      ['Alokasi', `LONG ${formatNumber(this.config.allocations.LONG, 2)}% + SHORT ${formatNumber(this.config.allocations.SHORT, 2)}%`],
+      ['Proteksi', `TP ${formatNumber(this.config.strategy.takeProfitPct, 2)}% / SL ${formatNumber(this.config.strategy.stopLossPct, 2)}%`],
+    ]);
     while (true) {
       await this.cycle();
       await sleep(this.config.intervalMs);

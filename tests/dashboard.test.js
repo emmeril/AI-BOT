@@ -155,6 +155,73 @@ test('futures dashboard reports fill counts for the selected symbol', async () =
   assert.equal(accounted.profit.gridPairProfit, 999);
 });
 
+test('futures dashboard exposes live scalper signal and conditional TP/SL orders', async () => {
+  class TestEngine {}
+  TestEngine.SYMBOLS = ['DOGE/USDT:USDT'];
+  const engine = new TestEngine();
+  engine.state = {
+    data: {},
+    getSymbol: () => ({ config: { entryGridEnabled: false }, orders: {}, lastBuyByLevel: {} }),
+  };
+  engine.exposureLimits = { symbol: 0, total: 0 };
+  engine.circuitAllows = () => true;
+  engine.canPlaceNewOrders = () => false;
+  engine.getBotOrderLevel = () => null;
+  engine.exchange = {
+    market: () => ({ id: 'DOGEUSDT' }),
+    fetchTicker: async () => ({ last: 0.1, high: 0.11, low: 0.09 }),
+    fetchOpenOrders: async () => [],
+    fetchOHLCV: async () => [],
+    fetchBalance: async () => ({ total: { USDT: 100 }, free: { USDT: 90 }, info: { totalWalletBalance: '100' } }),
+    fetchPositions: async () => [{
+      symbol: 'DOGE/USDT:USDT', side: 'long', contracts: 100,
+      entryPrice: 0.1, markPrice: 0.101, notional: 10, unrealizedPnl: 0.1,
+    }],
+    fapiPrivateGetOpenAlgoOrders: async () => ({ orders: [
+      { algoId: 'tp', clientAlgoId: 'scalp-l-tp-x', positionSide: 'LONG', orderType: 'TAKE_PROFIT_MARKET', triggerPrice: '0.102', side: 'SELL', closePosition: 'true' },
+      { algoId: 'sl', clientAlgoId: 'scalp-l-sl-x', positionSide: 'LONG', orderType: 'STOP_MARKET', triggerPrice: '0.099', side: 'SELL', closePosition: 'true' },
+    ] }),
+    priceToPrecision: (_symbol, value) => String(value || 0),
+    amountToPrecision: (_symbol, value) => String(value || 0),
+  };
+  const previous = {
+    enabled: process.env.SCALPER_ENABLED,
+    trading: process.env.SCALPER_TRADING_ENABLED,
+    long: process.env.SCALPER_LONG_ENABLED,
+    stop: process.env.STOP_TRADING,
+  };
+  process.env.SCALPER_ENABLED = 'true';
+  process.env.SCALPER_TRADING_ENABLED = 'true';
+  process.env.SCALPER_LONG_ENABLED = 'true';
+  process.env.STOP_TRADING = 'false';
+  try {
+    const snapshot = await buildFuturesDashboardSnapshot(
+      engine,
+      'DOGE/USDT:USDT',
+      'LONG',
+      { scalperState: { symbols: { 'DOGE/USDT:USDT': {
+        handoffActive: true,
+        cooldownUntil: { LONG: 0, SHORT: 0 },
+        positions: { LONG: { enteredAt: 1, entryPrice: 0.1 }, SHORT: null },
+        signals: { LONG: { available: true, allow: true, flowDeltaRatio: 0.12 }, SHORT: null },
+      } } } }
+    );
+    assert.equal(snapshot.tradingEnabled, true);
+    assert.equal(snapshot.scalper.phase, 'POSITION_ACTIVE');
+    assert.equal(snapshot.scalper.signal.flowDeltaRatio, 0.12);
+    assert.equal(snapshot.scalper.protection.status, 'PROTECTED');
+    assert.equal(snapshot.scalper.protection.takeProfit.triggerPrice, 0.102);
+    assert.equal(snapshot.scalper.protection.stopLoss.triggerPrice, 0.099);
+    assert.equal(snapshot.orders.active.length, 2);
+    assert.deepEqual(snapshot.orders.active.map(order => order.orderType).sort(), ['STOP_LOSS', 'TAKE_PROFIT']);
+  } finally {
+    if (previous.enabled === undefined) delete process.env.SCALPER_ENABLED; else process.env.SCALPER_ENABLED = previous.enabled;
+    if (previous.trading === undefined) delete process.env.SCALPER_TRADING_ENABLED; else process.env.SCALPER_TRADING_ENABLED = previous.trading;
+    if (previous.long === undefined) delete process.env.SCALPER_LONG_ENABLED; else process.env.SCALPER_LONG_ENABLED = previous.long;
+    if (previous.stop === undefined) delete process.env.STOP_TRADING; else process.env.STOP_TRADING = previous.stop;
+  }
+});
+
 test('futures dashboard compares isolated LONG and SHORT exposure and PnL on one pair', async () => {
   class TestEngine {}
   TestEngine.SYMBOLS = ['TEST/USDT:USDT'];

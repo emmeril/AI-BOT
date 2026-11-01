@@ -35,7 +35,12 @@ const {
 } = require('./src/futures-exposure-budget');
 const { displayNumber, signedUsdt, sellOverview, sellFillMessage } = require('./src/futures-display');
 const { CrossProcessMutex } = require('./src/cross-process-mutex');
-const { isHandoffActive } = require('./src/scalper-handoff');
+const { isHandoffActive, loadState: loadScalperState } = require('./src/scalper-handoff');
+const {
+  formatNumber: formatScalperNumber,
+  normalizeAlgoOrders,
+  scalperProtectionSnapshot,
+} = require('./src/scalper-telegram');
 const {
   VolumeDeltaAnalyzer,
   evaluateVolumeDeltaEntry,
@@ -6378,6 +6383,84 @@ class FuturesGridEngine {
     }
   }
 
+  async fetchScalperAlgoOrders(symbol) {
+    if (typeof this.exchange.fapiPrivateGetOpenAlgoOrders !== 'function') return [];
+    const marketId = typeof this.exchange.market === 'function' ? this.exchange.market(symbol)?.id : null;
+    const response = await retry(() => this.exchange.fapiPrivateGetOpenAlgoOrders({
+      symbol: marketId || symbol,
+    }));
+    return normalizeAlgoOrders(response);
+  }
+
+  async buildScalperTelegramStatusMessage() {
+    const positions = await retry(() => this.exchange.fetchPositions(SYMBOLS));
+    const scalperState = loadScalperState(scalperHandoffStatePath);
+    const paused = killSwitchActive();
+    const configured = Config.boolean('SCALPER_TRADING_ENABLED', true);
+    const lines = [
+      '[STATUS SCALPER FUTURES]',
+      '',
+      `Trading: ${configured && !paused ? 'AKTIF' : 'DIJEDA'}`,
+      `Strategi: Volume delta reversal ${Config.get('SCALPER_TIMEFRAME', '15m')}`,
+      `Alokasi: LONG ${Config.number('SCALPER_LONG_ALLOCATION_PCT', 35)}% + SHORT ${Config.number('SCALPER_SHORT_ALLOCATION_PCT', 35)}%`,
+    ];
+    for (const symbol of SYMBOLS) {
+      const algoOrders = await this.fetchScalperAlgoOrders(symbol);
+      const symbolState = scalperState.symbols?.[symbol] || {};
+      lines.push('', symbol, `Handoff: ${symbolState.handoffActive ? 'SIAP' : 'MENYELESAIKAN POSISI LAMA'}`);
+      for (const side of ['LONG', 'SHORT']) {
+        const position = positions.find(item => item.symbol === symbol &&
+          String(item.side || item.info?.positionSide || '').toUpperCase() === side &&
+          Math.abs(Number(item.contracts ?? item.info?.positionAmt) || 0) > 0);
+        const protection = scalperProtectionSnapshot(algoOrders, side, Boolean(position));
+        const signal = symbolState.signals?.[side];
+        const signalText = !signal?.available
+          ? 'menunggu candle'
+          : signal.allow
+            ? 'ENTRY'
+            : 'menunggu';
+        if (!position) {
+          lines.push(`${side}: kosong | Sinyal ${signalText}`);
+          continue;
+        }
+        lines.push(
+          `${side}: ${formatScalperNumber(position.contracts)} kontrak @ ${formatScalperNumber(position.entryPrice)}`,
+          `TP/SL ${side}: ${protection.covered ? 'LENGKAP' : 'PERLU DIPERIKSA'} | PnL ${formatScalperNumber(position.unrealizedPnl, 4)} USDT`
+        );
+      }
+    }
+    return lines.join('\n').slice(0, 3900);
+  }
+
+  async buildScalperTelegramOrdersMessage() {
+    const positions = await retry(() => this.exchange.fetchPositions(SYMBOLS));
+    const lines = ['[ORDER SCALPER FUTURES]'];
+    for (const symbol of SYMBOLS) {
+      const [regularOrders, algoOrders] = await Promise.all([
+        retry(() => this.exchange.fetchOpenOrders(symbol)),
+        this.fetchScalperAlgoOrders(symbol),
+      ]);
+      lines.push('', symbol);
+      let count = 0;
+      for (const side of ['LONG', 'SHORT']) {
+        const position = positions.find(item => item.symbol === symbol &&
+          String(item.side || item.info?.positionSide || '').toUpperCase() === side &&
+          Math.abs(Number(item.contracts ?? item.info?.positionAmt) || 0) > 0);
+        const protection = scalperProtectionSnapshot(algoOrders, side, Boolean(position));
+        for (const order of protection.orders) {
+          count += 1;
+          lines.push(`${side} ${order.kind}: ${formatScalperNumber(order.triggerPrice)} | close position`);
+        }
+      }
+      for (const order of regularOrders) {
+        count += 1;
+        lines.push(`${String(order.side || '').toUpperCase()} REGULAR: ${formatScalperNumber(order.amount)} @ ${formatScalperNumber(order.price)}`);
+      }
+      if (!count) lines.push('Tidak ada order aktif');
+    }
+    return lines.join('\n').slice(0, 3900);
+  }
+
   buildTelegramStatusMessage() {
     const lines = [
       '[Ringkasan futures]',
@@ -6414,10 +6497,17 @@ class FuturesGridEngine {
       }
       const name = String(command?.command || '').toLowerCase();
       if (name === '/futures_status') {
-        await this.sendAlert(this.buildTelegramStatusMessage());
+        const message = Config.boolean('SCALPER_ENABLED', true)
+          ? await this.buildScalperTelegramStatusMessage()
+          : this.buildTelegramStatusMessage();
+        await this.sendAlert(message);
         return;
       }
       if (name === '/futures_orders') {
+        if (Config.boolean('SCALPER_ENABLED', true)) {
+          await this.sendAlert(await this.buildScalperTelegramOrdersMessage());
+          return;
+        }
         const lines = ['[FUTURES ORDERS]'];
         for (const symbol of SYMBOLS) {
           const orders = await retry(() => this.exchange.fetchOpenOrders(symbol));
@@ -6440,13 +6530,14 @@ class FuturesGridEngine {
           await fs.promises.writeFile(KILL_SWITCH_PATH, `paused by telegram at ${new Date().toISOString()}\n`);
           await this.sendAlert(this.formatFuturesTelegramMessage('FUTURES PAUSED', [
             ['File', KILL_SWITCH_FILE],
-            ['Trading', 'new orders paused'],
+            ['Trading', 'entry grid dan scalper dijeda'],
+            ['Posisi terbuka', 'tetap dipantau dan dilindungi'],
           ]));
         } else {
           try { await fs.promises.unlink(KILL_SWITCH_PATH); } catch (err) { if (err.code !== 'ENOENT') throw err; }
           await this.sendAlert(this.formatFuturesTelegramMessage('FUTURES RESUMED', [
             ['File', `${KILL_SWITCH_FILE} removed`],
-            ['Trading', 'active'],
+            ['Trading', 'entry grid dan scalper aktif'],
           ]));
         }
         return;
@@ -6456,9 +6547,9 @@ class FuturesGridEngine {
           '[FUTURES COMMANDS]',
           '',
           '/futures_status - futures summary',
-          '/futures_orders - active futures orders',
-          '/futures_pause - pause new futures orders',
-          '/futures_resume - resume futures orders',
+          '/futures_orders - order regular dan TP/SL scalper',
+          '/futures_pause - jeda entry baru',
+          '/futures_resume - aktifkan entry baru',
           '/futures_help - command list',
         ].join('\n'));
       }

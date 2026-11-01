@@ -445,13 +445,11 @@ html:not([data-motion=on]) .loading-bar::after { animation: none; width: 100%; }
 .allocation-segment:last-child { border-right: 0; }
 .allocation-segment.long, .legend-key.long { background: var(--accent); }
 .allocation-segment.short, .legend-key.short { background: var(--short); }
-.allocation-segment.rescue-long, .legend-key.rescue-long { background: #8fa099; }
-.allocation-segment.rescue-short, .legend-key.rescue-short { background: #667a72; }
 .allocation-segment.buffer, .legend-key.buffer { background: #e5ebe8; }
 
 .portfolio-legend {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   margin: 16px 0 0;
 }
@@ -685,7 +683,7 @@ html:not([data-motion=on]) .loading-bar::after { animation: none; width: 100%; }
 .node-title { display: block; margin-top: 16px; color: var(--muted); font-size: .72rem; }
 .node-status { display: block; margin-top: 7px; font-size: .78rem; overflow-wrap: anywhere; }
 .node-value { display: block; margin-top: 12px; font-size: clamp(.9rem, 1.2vw, 1.12rem); line-height: 1.15; overflow-wrap: anywhere; }
-.node-fibonacci .node-value{white-space:nowrap;overflow-wrap:normal;font-size:clamp(.72rem,.8vw,.9rem)}
+.node-fibonacci .node-value{font-size:clamp(.82rem,1vw,1rem)}
 .node-meta { display: block; margin-top: 7px; color: var(--muted); font-size: .68rem; line-height: 1.4; }
 .flow-signal path { stroke-width: 3; stroke-linecap: round; opacity: 0; }
 .flow-signal path[data-state=active]{stroke:var(--accent);opacity:.9}
@@ -771,7 +769,7 @@ tbody tr:hover { background: var(--surface); }
   .plain-overview { grid-template-columns: 1fr; }
   .strategy-summary { grid-template-columns: 1fr; }
   .health-summary { border-right: 0; border-bottom: 1px solid var(--line); }
-  .portfolio-legend { grid-template-columns: repeat(5, minmax(100px, 1fr)); overflow-x: auto; padding-bottom: 4px; }
+  .portfolio-legend { grid-template-columns: repeat(3, minmax(100px, 1fr)); overflow-x: auto; padding-bottom: 4px; }
   .command-strip { grid-template-columns: repeat(3, 1fr); }
   .command-lead { grid-column: 1 / -1; }
   .command-metric { border-top: 1px solid var(--line); }

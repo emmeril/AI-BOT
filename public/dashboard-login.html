@@ -212,6 +212,7 @@
       font-size: clamp(27px, 3vw, 36px);
       line-height: 1.12;
       letter-spacing: -.035em;
+      overflow-wrap: anywhere;
     }
 
     .login-header p:last-child {
@@ -411,15 +412,14 @@
       </div>
 
       <div class="intro">
-        <p class="eyebrow">Access node</p>
         <h1 id="access-title">Masuk ke kontrol bot.</h1>
-        <p>Pantau perpindahan posisi lama, sinyal tren LONG dan SHORT, serta perlindungan exit per sisi.</p>
+        <p>Pantau sinyal volume delta, posisi LONG dan SHORT, serta take profit dan stop loss setiap pair.</p>
       </div>
 
       <ol class="flow" aria-label="Alur kerja dashboard">
         <li><span class="flow-node">01</span><span class="flow-step">Market data</span></li>
-        <li><span class="flow-node">02</span><span class="flow-step">Trend EMA</span></li>
-        <li><span class="flow-node">03</span><span class="flow-step">Entry SHORT</span></li>
+        <li><span class="flow-node">02</span><span class="flow-step">Volume delta 15m</span></li>
+        <li><span class="flow-node">03</span><span class="flow-step">Sinyal LONG / SHORT</span></li>
         <li><span class="flow-node">04</span><span class="flow-step">TP dan stop</span></li>
       </ol>
     </section>

@@ -5,7 +5,7 @@ const path = require('node:path');
 
 const publicFile = name => fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8');
 
-test('dashboard pipeline shows only the active deterministic execution flow', () => {
+test('dashboard pipeline shows the active volume-delta scalper flow', () => {
   const html = publicFile('dashboard.html');
   const css = publicFile('dashboard.css');
   const script = publicFile('dashboard.js');
@@ -24,12 +24,14 @@ test('dashboard pipeline shows only the active deterministic execution flow', ()
   assert.doesNotMatch(css, /data-state=safety/);
   assert.match(css, /\.flow-signal path\[data-state=error\]\{stroke:var\(--negative\)/);
   assert.match(css, /\.flow-signal path\[data-state=active\]\{stroke:var\(--accent\);opacity:\.9\}/);
-  assert.match(script, /setFlowEdge\('fibonacci', 'supervisor', gate\.available/);
-  assert.match(script, /setFlowEdge\('supervisor', 'buy', entryCount > 0/);
-  assert.match(script, /setFlowEdge\('position', 'sell', exitNeedsAttention/);
+  assert.match(script, /setFlowEdge\('fibonacci', 'supervisor', signal\.available/);
+  assert.match(script, /setFlowEdge\('supervisor', 'buy', positionAvailable/);
+  assert.match(script, /setFlowEdge\('position', 'sell', protectionError/);
   assert.match(css, /\.flow-grid\{[^}]*grid-template-columns:repeat\(6/);
-  assert.match(css, /\.node-fibonacci \.node-value\{[^}]*white-space:nowrap;overflow-wrap:normal/);
-  assert.match(script, /`\$\{price\(range\.lower\)\}–\$\{price\(range\.upper\)\}`/);
+  assert.match(html, /Volume delta/);
+  assert.match(html, /Take profit dan stop loss/);
+  assert.match(script, /function signalView\(scalper = \{\}\)/);
+  assert.match(script, /protection\.status === 'PROTECTED'/);
 });
 
 test('dashboard explains the safe migration from legacy exits to dual scalper', () => {
@@ -37,8 +39,8 @@ test('dashboard explains the safe migration from legacy exits to dual scalper', 
   const script = publicFile('dashboard.js');
   assert.match(html, /Strategi production/);
   assert.match(script, /Posisi lama sedang diselesaikan/);
-  assert.match(script, /Grid tidak boleh entry lagi/);
-  assert.match(script, /Scalper LONG \+ SHORT aktif/);
+  assert.match(script, /Grid lama tidak menerima entry baru/);
+  assert.match(script, /Scalper volume delta aktif/);
 });
 
 test('futures dashboard switches between LONG and SHORT operating surfaces', () => {
@@ -58,8 +60,7 @@ test('futures dashboard switches between LONG and SHORT operating surfaces', () 
   assert.match(html, /id="portfolio-track"/);
   assert.match(html, /id="plan-long-pct">35%/);
   assert.match(html, /id="plan-short-pct">35%/);
-  assert.match(html, /id="plan-rescue-long-pct">0%/);
-  assert.match(html, /id="plan-rescue-short-pct">0%/);
+  assert.doesNotMatch(html, /Rescue LONG|Rescue SHORT/);
   assert.match(html, /id="plan-buffer-pct">30%/);
   assert.match(html, /<details class="technical-details" id="technical-details">/);
   assert.match(html, /id="allocation-pair-list"/);
@@ -86,37 +87,23 @@ test('futures dashboard switches between LONG and SHORT operating surfaces', () 
   assert.match(script, /persistSelectedSymbol\(event\.target\.value, state\.positionSide\)/);
   assert.match(script, /persistSelectedSymbol\(data\.selectedSymbol, state\.positionSide\)/);
   assert.match(script, /load\(\{ positionSide: state\.positionSide, symbol: savedSelectedSymbol\(state\.positionSide\) \}\)/);
-  assert.match(script, /rescuePerPairPct/);
-  assert.match(script, /Menunggu penyesuaian/);
-  assert.match(script, /budget\.status === 'UNCHANGED' \|\| budget\.status === 'APPLIED'/);
-  assert.match(script, /budget\.autoRampAction === 'PROMOTED'/);
-  assert.match(script, /Naik lagi saat aman/);
-  assert.match(script, /autoRampPromotionConfirmations/);
+  assert.match(script, /const perPairPct = sidePct \/ pairCount/);
+  assert.match(script, /Jatah margin \$\{side\}/);
+  assert.match(script, /Batas posisi pair/);
   assert.match(css, /\.allocation-pair-list\s*\{\s*margin-top:\s*14px/);
   assert.match(html, /id="entry-signal-status"/);
-  assert.match(script, /function priceMomentumView\(momentum\)/);
-  assert.match(script, /function reversalInventoryView\(reversal\)/);
-  assert.match(script, /\['Kelola reversal', reversal\.management\]/);
-  assert.match(script, /\['Rescue', reversal\.rescue\]/);
-  assert.match(script, /Dikelola langsung/);
-  assert.match(script, /Menunggu kuota pair/);
-  assert.match(script, /Menunggu saldo tersedia/);
-  assert.match(script, /function entryGateView\(momentum\)/);
-  assert.doesNotMatch(script, /Volume Delta|EMA Trend|REPORT_ONLY|REPORT ONLY/);
-  assert.doesNotMatch(html, /Volume Delta|EMA Trend|REPORT_ONLY|REPORT ONLY/);
-  assert.match(script, /status = 'ENTRY BOLEH'/);
-  assert.match(script, /status = 'ENTRY DITAHAN'/);
+  assert.match(script, /function signalView\(scalper = \{\}\)/);
+  assert.doesNotMatch(script, /function priceMomentumView|function reversalInventoryView|Kelola reversal|Jatah rescue/);
+  assert.match(script, /status = 'SINYAL ENTRY'/);
+  assert.match(script, /status = 'MENUNGGU SINYAL'/);
   assert.match(html, /Funding Binance/);
-  assert.match(html, /batas aman/i);
+  assert.match(html, /Jatah per pair/i);
   assert.match(script, /Saldo tersedia/);
-  assert.match(script, /status: !position \? 'TIDAK PERLU'/);
-  assert.match(script, /status = 'ORDER DIJEDA'/);
-  assert.match(script, /status: 'TIDAK ADA ORDER'/);
-  assert.match(script, /Menunggu siklus order/);
-  assert.match(script, /setFlowNodeState\('buy', entryCount > 0/);
+  assert.match(script, /protection\.status === 'PROTECTED' \? 'LENGKAP' : 'PERLU CEK'/);
+  assert.match(script, /status = 'ENTRY DIJEDA'/);
+  assert.match(script, /setFlowNodeState\('buy', positionAvailable/);
   assert.match(script, /positionSide\(\) === 'SHORT' \? 'SELL' : 'BUY'/);
-  assert.match(script, /SHORT aktif/);
-  assert.match(script, /Sementara \$\{percent\(temporaryReserve, 0\)\} tetap di cadangan/);
+  assert.match(script, /LONG dan SHORT berjalan independen/);
 });
 
 test('dashboard motion preference can override or follow reduced motion', () => {
@@ -124,15 +111,16 @@ test('dashboard motion preference can override or follow reduced motion', () => 
   const css = publicFile('dashboard.css');
   const script = publicFile('dashboard.js');
 
-  assert.match(html, /<html lang="id" data-motion="on">/);
+  assert.match(html, /<html lang="id" data-motion="system">/);
   assert.match(html, /id="motion-select"/);
   assert.match(html, /value="on">Aktif/);
-  assert.match(html, /value="system">Ikuti perangkat/);
+  assert.match(html, /value="system" selected>Ikuti perangkat/);
   assert.match(html, /value="off">Mati/);
   assert.match(css, /\.motion-control option\{color:var\(--text\);background:var\(--surface\)\}/);
   assert.match(css, /html:not\(\[data-motion=on\]\) \.flow-signal\{display:none\}/);
   assert.match(css, /html\[data-motion=on\] \.refresh-icon\.fa-spin\s*\{\s*animation:\s*refresh-turn/);
   assert.match(script, /localStorage\.setItem\(MOTION_STORAGE_KEY, preference\)/);
+  assert.match(script, /\? value : 'system'/);
 });
 
 test('dashboard refresh has Font Awesome and a visible loading state', () => {
@@ -161,7 +149,8 @@ test('dashboard omits inactive Gemini and learning surfaces from the operator vi
 
   assert.doesNotMatch(html, /Gemini|Adaptive learning|learning-panel/);
   assert.doesNotMatch(login, /Gemini/);
-  assert.match(login, /sinyal tren LONG dan SHORT/);
+  assert.match(login, /sinyal volume delta/);
+  assert.match(login, /Sinyal LONG \/ SHORT/);
   assert.doesNotMatch(html, /Adaptive supervisor|Profil BUY|profil adaptive/i);
   assert.doesNotMatch(login, /Adaptive Supervisor|Adaptive decision/i);
   assert.doesNotMatch(script, /renderLearning|trustPolicyView|setNode\('gemini'|setNode\('trust'/);

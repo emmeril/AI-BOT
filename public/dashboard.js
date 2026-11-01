@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const state = { data: null, positionSide: 'LONG', activeNode: 'supervisor', timer: null, controller: null, requestId: 0, loading: true, refreshSpinTimer: null, flowLayoutFrame: null, motionPreference: 'on' };
+  const state = { data: null, positionSide: 'LONG', activeNode: 'supervisor', timer: null, controller: null, requestId: 0, loading: true, refreshSpinTimer: null, flowLayoutFrame: null, motionPreference: 'system' };
   const MOTION_STORAGE_KEY = 'grid-flow-motion';
   const SYMBOL_STORAGE_KEY = 'grid-flow-futures-symbol';
   const POSITION_SIDE_STORAGE_KEY = 'grid-flow-futures-position-side';
@@ -103,8 +103,8 @@
   function savedMotionPreference() {
     try {
       const value = localStorage.getItem(MOTION_STORAGE_KEY);
-      return ['on', 'system', 'off'].includes(value) ? value : 'on';
-    } catch { return 'on'; }
+      return ['on', 'system', 'off'].includes(value) ? value : 'system';
+    } catch { return 'system'; }
   }
   function savedPositionSide() {
     try { return normalizePositionSide(localStorage.getItem(POSITION_SIDE_STORAGE_KEY)); } catch { return 'LONG'; }
@@ -127,145 +127,58 @@
     } catch {}
   }
   function applyMotionPreference(value, { persist = false } = {}) {
-    const preference = ['on', 'system', 'off'].includes(value) ? value : 'on';
+    const preference = ['on', 'system', 'off'].includes(value) ? value : 'system';
     state.motionPreference = preference; document.documentElement.dataset.motion = preference;
     byId('motion-select').value = preference;
     const description = preference === 'on' ? 'Animasi dashboard aktif.' : preference === 'off' ? 'Animasi dashboard dimatikan.' : `Animasi mengikuti sistem dan saat ini ${reducedMotion.matches ? 'mati' : 'aktif'}.`;
     text('motion-state', description); byId('motion-control').title = description;
     if (persist) { try { localStorage.setItem(MOTION_STORAGE_KEY, preference); } catch {} }
   }
-  function priceMomentumView(momentum) {
-    const side = normalizePositionSide(momentum.positionSide || positionSide());
-    const windowHours = num(momentum.windowMinutes) / 60;
-    const label = windowHours > 0 ? `Momentum ${money(windowHours, 0)}J` : 'Momentum';
-    if (!momentum.enabled) return { label, status: 'MENUNGGU', tone: '', value: 'Belum aktif', reason: 'Data strategi belum tersedia.' };
-    if (!momentum.available) {
-      return {
-        label,
-        status: momentum.allow ? 'ENTRY BOLEH' : 'ENTRY DITAHAN',
-        tone: momentum.allow ? 'positive' : 'negative',
-        value: 'Data belum cukup',
-        reason: 'Menunggu candle tertutup.',
-      };
-    }
-    const returnPct = num(momentum.returnRatio) * 100;
-    return {
-      label,
-      status: momentum.allow ? 'ENTRY BOLEH' : 'ENTRY DITAHAN',
-      tone: momentum.allow ? 'positive' : 'negative',
-      value: `${signed(returnPct, 2)}% · ${momentum.direction || 'NEUTRAL'}`,
-      reason: momentum.allow
-        ? `Momentum searah ${side}.`
-        : `Momentum berlawanan dengan ${side}.`,
-    };
-  }
-
-  function reversalInventoryView(reversal) {
-    if (!reversal.enabled) {
-      return {
-        label: 'REVERSAL MATI',
-        management: 'Tidak aktif',
-        rescue: 'Tidak aktif',
-        summary: 'Pengelolaan reversal tidak aktif.',
-      };
-    }
-    const labels = {
-      MONITORING: 'MONITORING',
-      RESCUE: 'RESCUE',
-      PROFIT_BANK: 'PROFIT BANK',
-      GRANDFATHERED: 'POSISI LAMA',
-    };
-    const management = reversal.grandfathered
-      ? 'Menunggu transisi arah'
-      : reversal.applyToExisting
-        ? 'Dikelola langsung'
-        : 'Dikelola setelah transisi';
-    let rescue = 'Siap saat syarat terpenuhi';
-    let summary = 'Posisi dipantau untuk reversal.';
-    if (reversal.rescueStatus === 'FILLED') {
-      rescue = 'Sudah terisi';
-      summary = 'Rescue sudah terisi dan posisi tetap dipantau.';
-    } else if (reversal.rescueStatus === 'PENDING') {
-      rescue = reversal.rescueOrder?.price > 0
-        ? `Menunggu di ${price(reversal.rescueOrder.price)} ${quote()}`
-        : 'Menunggu terisi';
-      summary = 'Order rescue sedang aktif.';
-    } else if (reversal.rescueStatus === 'WAITING_BUDGET') {
-      rescue = 'Menunggu kuota pair';
-      summary = 'Kuota rescue pair dihitung otomatis dari balance.';
-    } else if (reversal.rescueStatus === 'WAITING_BALANCE') {
-      rescue = 'Menunggu saldo tersedia';
-      summary = 'Saldo bebas belum cukup untuk memasang order rescue.';
-    } else if (reversal.rescueStatus === 'WAITING_MINIMUM') {
-      rescue = 'Menunggu ukuran minimum';
-      summary = 'Kuota rescue belum cukup untuk memenuhi minimum order Binance.';
-    } else if (reversal.rescueStatus === 'USED') {
-      rescue = 'Menunggu sinkronisasi';
-      summary = 'Order rescue lama tidak aktif dan jatahnya sedang dipulihkan.';
-    } else if (reversal.grandfathered) {
-      summary = 'Posisi lama menunggu transisi arah sebelum rescue aktif.';
-    }
-    return {
-      label: labels[reversal.mode] || String(reversal.mode || 'MONITORING').replaceAll('_', ' '),
-      management,
-      rescue,
-      summary,
-    };
-  }
-
-  function entryGateView(momentum) {
-    const selectedEntrySide = entrySide();
-    if (momentum.enabled === undefined) {
-      return {
-        allowed: false, available: false, blocked: false, entrySide: selectedEntrySide,
-        status: 'MENUNGGU', summary: 'Menunggu data Momentum.', tone: 'warning',
-      };
-    }
-    const available = Boolean(state.data?.running && momentum.enabled);
-    const blocked = momentum.allow === false;
-    const tradingEnabled = Boolean(state.data?.tradingEnabled);
-    const allowed = Boolean(available && tradingEnabled && !blocked);
-    let status = 'MENUNGGU';
+  function signalView(scalper = {}) {
+    const signal = scalper.signal || {};
+    const flowPct = nullable(signal.flowDeltaRatio) === null ? null : num(signal.flowDeltaRatio) * 100;
+    const cooldownMs = Math.max(0, num(scalper.cooldownUntil) - Date.now());
+    const cooldownMinutes = Math.ceil(cooldownMs / 60_000);
+    let status = 'MENUNGGU CANDLE';
     let tone = 'accent';
-    let summary = `Entry ${selectedEntrySide} menunggu Momentum.`;
-    if (available && !blocked && !tradingEnabled) {
-      status = 'ORDER DIJEDA';
+    let summary = `Bot menunggu candle ${scalper.timeframe || '15m'} yang selesai.`;
+    if (!scalper.handoffActive) {
+      status = 'TRANSISI';
       tone = 'warning';
-      summary = `Momentum mendukung ${selectedEntrySide}, tetapi order baru sedang dijeda.`;
-    } else if (available && blocked) {
-      status = 'ENTRY DITAHAN';
-      tone = 'negative';
-      summary = `Momentum belum mendukung entry ${selectedEntrySide}.`;
-    } else if (allowed) {
-      status = 'ENTRY BOLEH';
+      summary = 'Bot menyelesaikan posisi dan order strategi lama sebelum menerima entry baru.';
+    } else if (!scalper.sideEnabled) {
+      status = 'SISI NONAKTIF';
+      tone = 'warning';
+      summary = `${positionSide()} tidak diaktifkan pada konfigurasi scalper.`;
+    } else if (scalper.paused || !scalper.tradingEnabled) {
+      status = 'ENTRY DIJEDA';
+      tone = 'warning';
+      summary = scalper.pauseReason || 'Entry baru sedang dijeda. Posisi terbuka tetap dilindungi.';
+    } else if (cooldownMinutes > 0) {
+      status = 'COOLDOWN';
+      tone = 'warning';
+      summary = `Bot menunggu ${cooldownMinutes} menit sebelum entry berikutnya.`;
+    } else if (signal.available && signal.allow) {
+      status = 'SINYAL ENTRY';
       tone = 'positive';
-      summary = `Momentum mendukung entry ${selectedEntrySide}.`;
-    }
-    return { allowed, available, blocked, entrySide: selectedEntrySide, status, summary, tone };
-  }
-
-  function entryOrderView(gate, entryCount, entrySide) {
-    if (entryCount > 0) {
-      return {
-        status: `${entryCount} ORDER AKTIF`,
-        tone: entrySide === 'BUY' ? 'positive' : 'warning',
-        summary: `${entryCount} order ${entrySide} entry sedang aktif di Binance.`,
-        meta: 'Order entry sudah terpasang',
-      };
-    }
-    if (gate.allowed) {
-      return {
-        status: 'TIDAK ADA ORDER',
-        tone: 'warning',
-        summary: `Momentum mendukung ${entrySide}, tetapi belum ada order aktif.`,
-        meta: 'Menunggu siklus order',
-      };
+      summary = `Volume delta dan pantulan harga memenuhi syarat entry ${positionSide()}.`;
+    } else if (signal.available) {
+      status = 'MENUNGGU SINYAL';
+      tone = 'accent';
+      summary = `Belum ada sinyal entry ${positionSide()} pada candle terakhir.`;
     }
     return {
-      status: 'DITAHAN GATE',
-      tone: 'accent',
-      summary: `Belum ada order ${entrySide} karena gate sinyal saat ini belum mengizinkan entry.`,
-      meta: 'Menunggu Momentum',
+      available: Boolean(signal.available),
+      allowed: Boolean(signal.available && signal.allow && scalper.tradingEnabled && cooldownMinutes === 0),
+      status,
+      tone,
+      summary,
+      flowPct,
+      momentumPct: nullable(signal.momentumPct),
+      atrPct: nullable(signal.atrPct),
+      candleTimestamp: signal.candleTimestamp || null,
+      value: flowPct === null ? 'Data belum tersedia' : `Delta ${signed(flowPct, 2)}%`,
+      reason: signal.exit ? 'Volume delta memberi sinyal keluar.' : summary,
     };
   }
 
@@ -279,35 +192,41 @@
 
   function renderPlainOverview() {
     const data = state.data;
-    const comparison = data.comparison || {};
     const allocation = data.exposureAllocation || {};
-    const execution = intel().execution || {};
+    const scalper = data.scalper || {};
     const selectedSide = positionSide();
     const position = data.futures?.position;
-    const uncovered = num(execution.uncovered);
-    const coverage = nullable(execution.exitCoveragePct ?? execution.sellCoveragePct);
-    const long = comparison.LONG || {};
-    const short = comparison.SHORT || {};
-    const workersOnline = Boolean(long.available && long.running && short.available && short.running);
-    const exitProtected = !position || (uncovered <= 0 && coverage !== null && coverage >= 99.999);
-    const healthState = !workersOnline ? 'error' : exitProtected ? 'safe' : 'attention';
+    const protection = scalper.protection || {};
+    const exitProtected = !position || protection.status === 'PROTECTED';
+    const botReady = Boolean(data.running && scalper.enabled && scalper.handoffActive);
+    const healthState = !botReady || (position && !exitProtected) ? 'attention' : 'safe';
 
     byId('health-mark').dataset.state = healthState;
-    text('plain-title', !workersOnline
-      ? 'Ada bot yang tidak aktif'
-      : exitProtected
-        ? 'Bot aktif dan exit aman'
-        : 'Order exit perlu diperiksa');
-    text('health-copy', !workersOnline
-      ? 'Salah satu sisi bot tidak terhubung. Periksa status LONG dan SHORT di bawah.'
-      : !position
-        ? `Bot ${selectedSide} aktif. Pair ini belum memiliki posisi yang perlu ditutup.`
-        : exitProtected
-          ? `Posisi ${selectedSide} pada pair ini sudah memiliki order exit untuk seluruh kontrak.`
-          : `${compact(uncovered)} kontrak ${selectedSide} belum memiliki order exit aktif.`);
-    text('health-long', !long.available ? 'Tidak tersedia' : long.running ? 'Aktif' : 'Offline');
-    text('health-short', !short.available ? 'Tidak tersedia' : short.running ? 'Aktif' : 'Offline');
-    text('health-exit', !position ? 'Tidak diperlukan' : exitProtected ? 'Terlindungi 100%' : 'Perlu perhatian');
+    text('plain-title', !scalper.handoffActive
+      ? 'Menyelesaikan strategi lama'
+      : scalper.paused
+        ? 'Entry baru sedang dijeda'
+        : position && !exitProtected
+          ? 'TP atau SL perlu diperiksa'
+          : position
+            ? 'Posisi aktif dan terlindungi'
+            : 'Bot aktif, menunggu sinyal');
+    text('health-copy', !scalper.handoffActive
+      ? 'Bot menjaga exit lama sampai pair kosong. Scalper mulai otomatis setelah transisi selesai.'
+      : scalper.paused
+        ? `${scalper.pauseReason || 'Entry baru dijeda.'} Posisi yang sudah terbuka tetap dipantau.`
+        : !position
+          ? `Pair ${data.selectedSymbol} belum memiliki posisi ${selectedSide}. Bot menunggu sinyal volume delta.`
+          : exitProtected
+            ? `Posisi ${selectedSide} memiliki take profit dan stop loss aktif di Binance.`
+            : 'Posisi aktif belum terdeteksi memiliki take profit dan stop loss lengkap.');
+    text('health-long', scalper.longEnabled ? 'Aktif' : 'Nonaktif');
+    text('health-short', scalper.shortEnabled ? 'Aktif' : 'Nonaktif');
+    text('health-exit', !position
+      ? 'Tidak diperlukan'
+      : protection.status === 'UNKNOWN'
+        ? 'Belum dapat diperiksa'
+        : exitProtected ? 'TP dan SL lengkap' : 'Perlu perhatian');
 
     const scalperPlan = Boolean(data.scalper?.enabled);
     const longTarget = scalperPlan
@@ -316,33 +235,19 @@
     const shortTarget = scalperPlan
       ? clamp(num(data.scalper.shortAllocationPct), 0, 100)
       : clamp(num(allocation.SHORT?.configuredSidePct ?? allocation.shortPct), 0, 100);
-    const rescueLong = scalperPlan ? 0 : clamp(num(allocation.rescue?.LONG?.configuredMarginPct), 0, 100);
-    const rescueShort = scalperPlan ? 0 : clamp(num(allocation.rescue?.SHORT?.configuredMarginPct), 0, 100);
-    const plannedBuffer = clamp(100 - longTarget - shortTarget - rescueLong - rescueShort, 0, 100);
-    const planTotal = longTarget + shortTarget + rescueLong + rescueShort + plannedBuffer;
+    const plannedBuffer = clamp(100 - longTarget - shortTarget, 0, 100);
+    const planTotal = longTarget + shortTarget + plannedBuffer;
 
     text('plan-long-pct', percent(longTarget, 0));
     text('plan-short-pct', percent(shortTarget, 0));
-    text('plan-rescue-long-pct', percent(rescueLong, 0));
-    text('plan-rescue-short-pct', percent(rescueShort, 0));
     text('plan-buffer-pct', percent(plannedBuffer, 0));
     text('portfolio-status', Math.abs(planTotal - 100) < .01 ? 'Total 100%' : `Total ${percent(planTotal, 0)}`);
     setAllocationSegment('segment-long', longTarget);
     setAllocationSegment('segment-short', shortTarget);
-    setAllocationSegment('segment-rescue-long', rescueLong);
-    setAllocationSegment('segment-rescue-short', rescueShort);
     setAllocationSegment('segment-buffer', plannedBuffer);
 
-    const shortCurrent = clamp(num(allocation.SHORT?.sidePct ?? allocation.shortPct), 0, 100);
-    const pairCount = Math.max(num(allocation.LONG?.pairCount), num(allocation.SHORT?.pairCount));
-    if (data.scalper?.enabled) {
-      text('ramp-message', `LONG ${percent(longTarget, 0)} dan SHORT ${percent(shortTarget, 0)} berjalan independen, dibagi rata ke ${pairCount || 'semua'} pair. Sisa ${percent(plannedBuffer, 0)} menjadi buffer.`);
-    } else if (allocation.SHORT?.autoRampEnabled && shortCurrent < shortTarget) {
-      const temporaryReserve = Math.max(0, shortTarget - shortCurrent);
-      text('ramp-message', `SHORT aktif ${percent(shortCurrent, 0)} dari target ${percent(shortTarget, 0)}. Bot akan menaikkannya otomatis saat kondisi aman. Sementara ${percent(temporaryReserve, 0)} tetap di cadangan.`);
-    } else {
-      text('ramp-message', `LONG dan SHORT sudah sesuai target. Setiap jatah dibagi rata ke ${pairCount || 'semua'} pair.`);
-    }
+    const pairCount = num(scalper.pairCount) || Math.max(num(allocation.LONG?.pairCount), num(allocation.SHORT?.pairCount));
+    text('ramp-message', `LONG dan SHORT berjalan independen. Masing-masing jatah dibagi rata ke ${pairCount || 'semua'} pair. Buffer ${percent(plannedBuffer, 0)} tidak dipakai untuk entry.`);
   }
 
   function renderStrategySummary() {
@@ -351,40 +256,14 @@
     if (!panel) return;
     const active = Boolean(scalper.handoffActive);
     panel.dataset.state = active ? 'active' : 'waiting';
-    text('strategy-title', active ? 'Scalper LONG + SHORT aktif' : 'Posisi lama sedang diselesaikan');
+    text('strategy-title', active ? 'Scalper volume delta aktif' : 'Posisi lama sedang diselesaikan');
     text('strategy-copy', active
-      ? 'Pair ini memakai dua sisi independen dalam Hedge Mode. LONG dan SHORT boleh terbuka bersamaan; masing-masing memiliki TP dan SL sendiri.'
-      : 'Grid tidak boleh entry lagi. Exit lama tetap dijaga 100%, lalu pair berpindah otomatis ke scalper dua sisi setelah LONG dan SHORT sama-sama kosong.');
+      ? `Bot membaca candle ${scalper.timeframe || '15m'}. LONG dan SHORT boleh berjalan bersamaan dan setiap posisi memiliki TP serta SL sendiri.`
+      : 'Grid lama tidak menerima entry baru. Bot tetap menjaga exit lama, lalu berpindah ke scalper setelah pair kosong.');
     text('strategy-mode', 'LONG + SHORT');
     text('strategy-risk', `${percent(scalper.takeProfitPct, 1)} / ${percent(scalper.stopLossPct, 1)}`);
-    text('strategy-hold', `${num(scalper.maxHoldMinutes) || 120} menit`);
+    text('strategy-hold', `${num(scalper.maxHoldMinutes) || 240} menit`);
     text('strategy-allocation', `${percent(scalper.longAllocationPct, 0)} + ${percent(scalper.shortAllocationPct, 0)}`);
-  }
-
-  function allocationStatusView(budget) {
-    if (!budget?.available) return { label: 'Data belum tersedia', tone: '' };
-    if (budget.status === 'EXIT_ONLY' || budget.entryGridEnabled === false) {
-      return { label: 'Hanya mengelola exit', tone: 'warning' };
-    }
-    if (budget.status === 'DEFERRED') {
-      return { label: 'Menunggu penyesuaian', tone: 'warning' };
-    }
-    if (budget.autoRampEnabled) {
-      if (budget.autoRampAction === 'PROMOTED') return { label: 'Jatah baru saja naik', tone: 'positive' };
-      if (budget.autoRampAction === 'REDUCED') return { label: 'Jatah diturunkan demi keamanan', tone: 'warning' };
-      if (budget.autoRampAction === 'CONFIRMING') {
-        return {
-          label: `Memeriksa keamanan ${num(budget.autoRampPromotionConfirmations)}/${num(budget.autoRampRequiredConfirmations)}`,
-          tone: 'warning',
-        };
-      }
-      if (num(budget.autoRampSafeMaximumPct) <= num(budget.sidePct)) {
-        return { label: 'Naik lagi saat aman', tone: 'warning' };
-      }
-      return { label: 'Kenaikan otomatis aktif', tone: 'positive' };
-    }
-    if (budget.status === 'UNCHANGED' || budget.status === 'APPLIED') return { label: 'Aktif', tone: 'positive' };
-    return { label: 'Menunggu', tone: '' };
   }
 
   function allocationPairCard(symbol, budget, side) {
@@ -401,16 +280,16 @@
     head.append(identity, status);
 
     const values = document.createElement('dl'); values.className = 'allocation-pair-budget';
-    for (const [label, share, cap] of [
-      [`Jatah entry ${side}`, budget.gridPct, budget.gridCap],
-      ['Jatah rescue', budget.rescuePct, budget.rescueCap],
+    for (const [label, main, note] of [
+      [`Jatah margin ${side}`, percent(budget.marginPct, 2), `Dari saldo wallet, dibagi rata ke ${budget.pairCount} pair`],
+      ['Batas posisi pair', `${money(budget.targetNotional, 2)} ${quote()}`, `Terpakai ${money(budget.currentExposure, 2)} ${quote()}`],
     ]) {
       const row = document.createElement('div');
       const term = document.createElement('dt'); term.textContent = label;
       const description = document.createElement('dd');
-      const percentValue = document.createElement('strong'); percentValue.textContent = percent(share, 2);
-      const capValue = document.createElement('small'); capValue.textContent = cap > 0 ? `Batas setelah leverage ${money(cap, 2)} ${quote()}` : 'Tidak dicadangkan';
-      description.append(percentValue, capValue); row.append(term, description); values.append(row);
+      const mainValue = document.createElement('strong'); mainValue.textContent = main;
+      const noteValue = document.createElement('small'); noteValue.textContent = note;
+      description.append(mainValue, noteValue); row.append(term, description); values.append(row);
     }
     article.append(head, values);
     return article;
@@ -418,35 +297,24 @@
 
   function renderAllocation() {
     const allocation = state.data.exposureAllocation || {};
+    const scalper = state.data.scalper || {};
     const side = positionSide();
-    const sidePct = clamp(num(allocation[side]?.sidePct ?? allocation.sidePct), 0, 100);
-    const bufferPct = clamp(num(allocation.bufferPct), 0, 100);
-    const budget = allocation[side] || {};
-    const rescue = allocation.rescue?.[side] || {};
-    const pairCount = Math.max(0, Math.trunc(num(budget.pairCount)));
-    const gridPerPairPct = pairCount > 0 ? sidePct / pairCount : 0;
-    const rescuePerPairPct = pairCount > 0 ? rescue.marginPct / pairCount : 0;
-    const targetPct = clamp(num(budget.configuredSidePct || budget.sidePct), 0, 100);
-    const safePct = budget.autoRampEnabled
-      ? clamp(num(budget.autoRampSafeMaximumPct), 0, 100)
-      : targetPct;
+    const sidePct = clamp(num(side === 'LONG' ? scalper.longAllocationPct : scalper.shortAllocationPct), 0, 100);
+    const bufferPct = clamp(100 - num(scalper.longAllocationPct) - num(scalper.shortAllocationPct), 0, 100);
+    const pairCount = Math.max(1, Math.trunc(num(scalper.pairCount)) || 1);
+    const perPairPct = sidePct / pairCount;
+    const targetNotional = num(allocation.walletBalance) * sidePct / 100 * num(allocation.leverage) / pairCount;
+    const currentExposure = num(state.data.comparison?.[side]?.exposure);
+    const usagePct = targetNotional > 0 ? currentExposure / targetNotional * 100 : 0;
     text('allocation-title', `Jatah ${side} untuk pair terpilih`);
-    text('allocation-mode', !allocation.enabled ? 'Tidak aktif' : budget.autoRampEnabled ? 'Naik otomatis' : `${side} aktif`);
+    text('allocation-mode', scalper.sideEnabled ? `${side} aktif` : `${side} nonaktif`);
     text('allocation-buffer-pct', percent(bufferPct, 0));
     text('allocation-active-pct', percent(sidePct, 0));
-    text('allocation-ramp-limit', budget.autoRampEnabled
-      ? `${percent(targetPct, 0)} / ${percent(safePct, 0)}`
-      : percent(targetPct, 0));
-    const rampCopy = budget.autoRampEnabled
-      ? ` Jatah aktif ${percent(sidePct, 0)} dari target ${percent(targetPct, 0)}. Batas aman sekarang ${percent(safePct, 0)}, pemeriksaan ${num(budget.autoRampPromotionConfirmations)}/${num(budget.autoRampRequiredConfirmations)}.`
-      : '';
-    text('allocation-copy', pairCount > 0
-      ? `Jatah ${side} dibagi rata ke ${pairCount} pair. Pair ini mendapat ${percent(gridPerPairPct, 2)} untuk entry dan ${percent(rescuePerPairPct, 2)} untuk rescue.${rampCopy}`
-      : 'Menunggu pair dan pembagian modal.');
+    text('allocation-ramp-limit', percent(perPairPct, 2));
+    text('allocation-copy', `Jatah ${side} ${percent(sidePct, 0)} dibagi rata ke ${pairCount} pair. Pair ini mendapat ${percent(perPairPct, 2)} dari margin wallet.`);
     text('allocation-wallet', `${money(allocation.walletBalance, 2)} ${quote()}`);
     text('allocation-leverage', `${money(allocation.leverage, 0)}x`);
-    text('allocation-pair-count', pairCount > 0 ? `${pairCount} pair` : 'N/A');
-    const view = allocationStatusView(budget);
+    text('allocation-pair-count', `${pairCount} pair`);
     const list = byId('allocation-pair-list');
     list.replaceChildren();
     const symbol = state.data.selectedSymbol;
@@ -454,34 +322,41 @@
       const empty = document.createElement('div'); empty.className = 'allocation-empty'; empty.textContent = `Belum ada pair ${side} yang dipilih.`; list.append(empty); return;
     }
     list.append(allocationPairCard(symbol, {
-      status: view,
-      gridPct: gridPerPairPct,
-      gridCap: budget.entryGridEnabled === false ? 0 : num(budget.symbolCap),
-      rescuePct: rescue.active ? rescuePerPairPct : 0,
-      rescueCap: rescue.active ? num(rescue.symbolCap) : 0,
+      status: {
+        label: scalper.paused ? 'Entry dijeda' : currentExposure > 0 ? 'Posisi aktif' : 'Menunggu sinyal',
+        tone: scalper.paused ? 'warning' : currentExposure > 0 ? 'positive' : '',
+      },
+      marginPct: perPairPct,
+      targetNotional,
+      currentExposure,
+      usagePct,
+      pairCount,
     }, side));
   }
 
   function renderOverview() {
     const data = state.data;
     const side = positionSide();
-    const adaptive = intel().adaptive || {};
-    const momentum = intel().priceMomentum || {};
-    const signal = priceMomentumView(momentum);
-    const gate = entryGateView(momentum);
+    const scalper = data.scalper || {};
+    const signal = signalView(scalper);
+    const targetPct = side === 'LONG' ? num(scalper.longAllocationPct) : num(scalper.shortAllocationPct);
+    const pairCount = Math.max(1, num(scalper.pairCount));
+    const targetNotional = num(data.exposureAllocation?.walletBalance) * targetPct / 100 *
+      num(data.exposureAllocation?.leverage) / pairCount;
+    const currentExposure = num(data.comparison?.[side]?.exposure);
     text('source-label', data.source || 'Binance');
     text('overview-title', `${data.selectedSymbol || 'Pair belum dipilih'} · ${side}`);
-    text('overview-copy', gate.summary);
+    text('overview-copy', signal.summary);
     text('market-price', `${data.market?.priceText || price(data.market?.price)} ${quote()}`);
     text('market-change', `Perubahan 24 jam: ${signed(data.market?.changePercent, 2)}%`);
-    text('entry-signal-label', signal.label.replace('Momentum', 'Arah harga'));
-    text('entry-signal-status', gate.status);
+    text('entry-signal-label', `Sinyal ${scalper.timeframe || '15m'}`);
+    text('entry-signal-status', signal.status);
     text('entry-signal-value', signal.value);
-    byId('entry-signal-status').className = `metric-value ${gate.tone}`.trim();
-    text('exposure-label', 'Jatah pair terpakai');
-    text('exposure-value', percent(adaptive.exposurePct));
-    text('exposure-note', adaptive.investmentCap > 0
-      ? `${money(adaptive.allocatedInvestment, 2)} dari ${money(adaptive.investmentCap, 2)} ${quote()}`
+    byId('entry-signal-status').className = `metric-value ${signal.tone}`.trim();
+    text('exposure-label', 'Posisi terhadap jatah pair');
+    text('exposure-value', targetNotional > 0 ? percent(currentExposure / targetNotional * 100, 0) : 'N/A');
+    text('exposure-note', targetNotional > 0
+      ? `${money(currentExposure, 2)} dari ${money(targetNotional, 2)} ${quote()}`
       : 'Batas pair belum tersedia');
     text('pnl-label', `Hasil ${side}`);
     text('net-pnl', `${signed(data.profit?.net, 4)} ${quote()}`);
@@ -492,68 +367,51 @@
     const data = state.data;
     const side = positionSide();
     byId('flow-map').dataset.running = String(Boolean(data.running));
-    const execution = intel().execution || {};
-    const momentum = intel().priceMomentum || {};
-    const reversal = reversalInventoryView(intel().reversalInventory || {});
-    const signal = priceMomentumView(momentum);
-    const range = data.range || {};
+    const scalper = data.scalper || {};
+    const signal = signalView(scalper);
     const position = data.futures?.position;
-    const coverage = execution.exitCoveragePct ?? execution.sellCoveragePct;
+    const protection = scalper.protection || {};
     const selectedEntrySide = entrySide();
     const selectedExitSide = exitSide();
-    const entryCount = num(execution.entryCount ?? data.orders?.[`${selectedEntrySide.toLowerCase()}Count`]);
-    const exitCount = num(execution.exitCount ?? data.orders?.[`${selectedExitSide.toLowerCase()}Count`]);
-    const entryValue = num(data.orders?.[`${selectedEntrySide.toLowerCase()}Value`]);
     const marketAvailable = Boolean(data.running && num(data.market?.price) > 0);
-    const fibonacciAvailable = Boolean(marketAvailable && num(range.lower) > 0 && num(range.upper) > 0);
-    const gate = entryGateView(momentum);
+    const volumeAvailable = Boolean(signal.available);
     const positionAvailable = Boolean(data.running && position && num(position.contracts) > 0);
-    const exitNeedsAttention = Boolean(positionAvailable && num(execution.uncovered) > 0);
-    const exitAvailable = Boolean(positionAvailable && !exitNeedsAttention && coverage !== null && coverage !== undefined && num(coverage) >= 99.999);
-    const entryView = entryOrderView(gate, entryCount, selectedEntrySide);
-    text('flow-title', `Harga ke exit ${selectedExitSide}`);
-    text('supervisor-node-title', `Entry ${side}`);
-    text('entry-node-title', `Grid ${selectedEntrySide}`);
+    const protectionReady = Boolean(positionAvailable && protection.status === 'PROTECTED');
+    const protectionError = Boolean(positionAvailable && ['INCOMPLETE', 'UNKNOWN'].includes(protection.status));
+    text('flow-title', `Dari candle ${scalper.timeframe || '15m'} sampai posisi ditutup`);
+    text('supervisor-node-title', `Sinyal ${side}`);
+    text('entry-node-title', `Market ${selectedEntrySide}`);
     text('position-node-title', side);
-    text('exit-node-title', `Exit ${selectedExitSide}`);
+    text('exit-node-title', 'Take profit dan stop loss');
     setNode('market', 'accent', String(data.mode || 'LIVE').toUpperCase(), `${data.market?.priceText || price(data.market?.price)} ${quote()}`, `${signed(data.market?.changePercent, 2)}% dalam 24 jam`);
-    setNode('fibonacci', fibonacciAvailable ? 'positive' : 'accent', fibonacciAvailable ? 'SIAP' : 'MENUNGGU', fibonacciAvailable ? `${price(range.lower)}–${price(range.upper)}` : 'Range belum tersedia', 'Level grid final');
-    setNode('supervisor', gate.tone, gate.status, signal.value, signal.reason);
-    setNode('buy', entryView.tone, entryView.status, `${money(entryValue, 2)} ${quote()}`, entryView.meta);
-    setNode('position', position ? (num(data.profit?.unrealizedPnl) >= 0 ? 'positive' : 'negative') : 'accent', position ? `${side} AKTIF` : 'TIDAK ADA POSISI', position ? compact(position.contracts) : '0', position ? `${reversal.label} · PnL ${signed(data.profit?.unrealizedPnl, 4)} ${quote()}` : 'Reversal menunggu posisi');
-    setNode('sell', coverage !== null && coverage !== undefined && coverage < 99.999 ? 'negative' : 'positive', `${exitCount} ORDER`, coverage == null ? 'Perlindungan N/A' : `Terlindungi ${percent(coverage, 0)}`, execution.uncovered > 0 ? `${compact(execution.uncovered)} kontrak belum memiliki exit` : 'Seluruh posisi memiliki exit');
+    setNode('fibonacci', volumeAvailable ? 'positive' : 'accent', volumeAvailable ? 'TERBACA' : 'MENUNGGU', signal.value, `Candle selesai ${time(signal.candleTimestamp)}`);
+    setNode('supervisor', signal.tone, signal.status, signal.allowed ? `Entry ${side}` : 'Belum entry', signal.reason);
+    setNode('buy', positionAvailable ? 'positive' : 'accent', positionAvailable ? 'SELESAI' : 'MENUNGGU', `${selectedEntrySide} market`, positionAvailable ? `Entry ${price(position.entryPrice)} ${quote()}` : 'Dikirim hanya saat sinyal valid');
+    setNode('position', position ? (num(data.profit?.unrealizedPnl) >= 0 ? 'positive' : 'negative') : 'accent', position ? `${side} AKTIF` : 'KOSONG', position ? compact(position.contracts) : '0', position ? `PnL ${signed(data.profit?.unrealizedPnl, 4)} ${quote()}` : 'Menunggu entry');
+    setNode('sell', protectionError ? 'negative' : protectionReady ? 'positive' : 'accent', !position ? 'TIDAK PERLU' : protectionReady ? 'LENGKAP' : 'PERLU CEK', !position ? 'Belum ada posisi' : `TP ${price(protection.takeProfit?.triggerPrice)} / SL ${price(protection.stopLoss?.triggerPrice)}`, !position ? 'Proteksi dipasang setelah entry' : protectionReady ? `Keduanya menutup posisi ${side}` : `Periksa ${selectedExitSide} conditional order`);
     setFlowNodeState('market', marketAvailable ? 'active' : 'waiting');
-    setFlowNodeState('fibonacci', fibonacciAvailable ? 'active' : 'waiting');
-    setFlowNodeState('supervisor', gate.allowed ? 'active' : gate.available && gate.blocked ? 'error' : 'waiting');
-    setFlowNodeState('buy', entryCount > 0 ? 'active' : 'waiting');
+    setFlowNodeState('fibonacci', volumeAvailable ? 'active' : 'waiting');
+    setFlowNodeState('supervisor', signal.allowed ? 'active' : 'waiting');
+    setFlowNodeState('buy', positionAvailable ? 'active' : 'waiting');
     setFlowNodeState('position', positionAvailable ? 'active' : 'waiting');
-    setFlowNodeState('sell', exitNeedsAttention ? 'error' : exitAvailable ? 'active' : 'waiting');
-    setFlowEdge('market', 'fibonacci', fibonacciAvailable ? 'active' : 'waiting');
-    setFlowEdge('fibonacci', 'supervisor', gate.available ? 'active' : 'waiting');
-    setFlowEdge('supervisor', 'buy', entryCount > 0 ? 'active' : 'waiting');
+    setFlowNodeState('sell', protectionError ? 'error' : protectionReady ? 'active' : 'waiting');
+    setFlowEdge('market', 'fibonacci', volumeAvailable ? 'active' : 'waiting');
+    setFlowEdge('fibonacci', 'supervisor', signal.available ? 'active' : 'waiting');
+    setFlowEdge('supervisor', 'buy', positionAvailable ? 'active' : 'waiting');
     setFlowEdge('buy', 'position', positionAvailable ? 'active' : 'waiting');
-    setFlowEdge('position', 'sell', exitNeedsAttention ? 'error' : exitAvailable ? 'active' : 'waiting');
+    setFlowEdge('position', 'sell', protectionError ? 'error' : protectionReady ? 'active' : 'waiting');
     queueFlowLayout();
   }
 
   function inspectorModel() {
     const data = state.data;
     const side = positionSide();
-    const adaptive = intel().adaptive || {};
-    const execution = intel().execution || {};
-    const momentum = intel().priceMomentum || {};
-    const reversal = reversalInventoryView(intel().reversalInventory || {});
-    const momentumView = priceMomentumView(momentum);
-    const gate = entryGateView(momentum);
+    const scalper = data.scalper || {};
+    const signal = signalView(scalper);
     const position = data.futures?.position;
+    const protection = scalper.protection || {};
     const selectedEntrySide = entrySide();
     const selectedExitSide = exitSide();
-    const entryCount = num(execution.entryCount ?? data.orders?.[`${selectedEntrySide.toLowerCase()}Count`]);
-    const exitCount = num(execution.exitCount ?? data.orders?.[`${selectedExitSide.toLowerCase()}Count`]);
-    const entryValue = num(data.orders?.[`${selectedEntrySide.toLowerCase()}Value`]);
-    const coverage = execution.exitCoveragePct ?? execution.sellCoveragePct;
-    const entryView = entryOrderView(gate, entryCount, selectedEntrySide);
-    const rangeReady = num(data.range?.lower) > 0 && num(data.range?.upper) > 0;
     return ({
       market: {
         title: 'Harga Binance', status: String(data.mode || 'LIVE').toUpperCase(), summary: 'Harga live yang dipakai bot.',
@@ -561,28 +419,28 @@
         details: [['Harga', `${data.market?.priceText || price(data.market?.price)} ${quote()}`], ['24 jam', `${signed(data.market?.changePercent, 2)}%`], ['High', `${data.market?.highText || price(data.market?.high)} ${quote()}`], ['Low', `${data.market?.lowText || price(data.market?.low)} ${quote()}`]],
       },
       fibonacci: {
-        title: 'Level Fibonacci', status: rangeReady ? 'SIAP' : 'MENUNGGU', summary: rangeReady ? 'Range final untuk order grid.' : 'Range belum tersedia.', tags: [],
-        details: [['Batas bawah', rangeReady ? `${price(data.range.lower)} ${quote()}` : 'N/A'], ['Batas atas', rangeReady ? `${price(data.range.upper)} ${quote()}` : 'N/A']],
+        title: 'Volume delta', status: signal.available ? 'TERBACA' : 'MENUNGGU', summary: 'Perbandingan tekanan beli dan jual pada candle yang sudah selesai.', tags: [scalper.timeframe || '15m'],
+        details: [['Delta', signal.flowPct === null ? 'N/A' : signed(signal.flowPct, 2) + '%'], ['Momentum', signal.momentumPct === null ? 'N/A' : signed(signal.momentumPct, 2) + '%'], ['ATR', signal.atrPct === null ? 'N/A' : percent(signal.atrPct, 2)], ['Candle', time(signal.candleTimestamp)]],
       },
       supervisor: {
-        title: `Entry ${side}`, status: gate.status, summary: gate.summary,
-        tags: momentum.available ? [momentumView.value] : [],
-        details: [['Momentum 12J', momentumView.value], ['Arah', momentum.direction || 'N/A'], ['Candle', momentum.enabled ? time(momentum.candleTimestamp) : 'N/A'], ['Keputusan', gate.status]],
+        title: `Sinyal ${side}`, status: signal.status, summary: signal.summary,
+        tags: signal.available ? [signal.value] : [],
+        details: [['Strategi', 'Volume delta reversal'], ['Timeframe', scalper.timeframe || '15m'], ['Keputusan', signal.status], ['Cooldown sampai', scalper.cooldownUntil ? time(scalper.cooldownUntil) : 'Tidak ada']],
       },
       buy: {
-        title: `Grid ${selectedEntrySide}`, status: entryView.status, summary: entryView.summary, tags: [gate.status],
-        details: [['Order aktif', entryCount], ['Nilai pending', `${money(entryValue, 4)} ${quote()}`], ['Jumlah level', num(execution.gridCount) || 'N/A'], ['Exposure pair', `${money(adaptive.allocatedInvestment, 4)} ${quote()}`], ['Cap pair', adaptive.symbolExposureCap > 0 ? `${money(adaptive.symbolExposureCap, 2)} ${quote()}` : 'N/A'], ['Sisi entry', selectedEntrySide]],
+        title: `Entry market ${selectedEntrySide}`, status: position ? 'SELESAI' : 'MENUNGGU', summary: position ? 'Order market sudah menjadi posisi aktif.' : 'Bot mengirim order market hanya setelah sinyal valid.', tags: [signal.status],
+        details: [['Sisi order', selectedEntrySide], ['Status posisi', position ? 'Aktif' : 'Kosong'], ['Harga entry', position ? `${price(position.entryPrice)} ${quote()}` : 'N/A'], ['Jumlah', position ? compact(position.contracts) : '0']],
       },
       position: {
-        title: `Posisi ${side}`, status: position ? 'AKTIF' : 'KOSONG', summary: position ? reversal.summary : `Tidak ada posisi ${side}.`,
-        tags: position ? [`${data.futures?.leverage || 0}x`, reversal.label] : [],
-        details: [['Kontrak', position ? compact(position.contracts) : '0'], ['Entry', position ? price(position.entryPrice) : 'N/A'], ['Mark', position ? price(position.markPrice) : 'N/A'], ['Likuidasi', position?.liquidationPrice > 0 ? price(position.liquidationPrice) : 'N/A'], ['PnL berjalan', `${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`], ['Kelola reversal', reversal.management], ['Rescue', reversal.rescue]],
+        title: `Posisi ${side}`, status: position ? 'AKTIF' : 'KOSONG', summary: position ? 'Posisi dipantau sampai TP, SL, sinyal keluar, atau batas waktu.' : `Tidak ada posisi ${side}.`,
+        tags: position ? [`${data.futures?.leverage || 0}x`, `Maks ${num(scalper.maxHoldMinutes)} menit`] : [],
+        details: [['Kontrak', position ? compact(position.contracts) : '0'], ['Entry', position ? price(position.entryPrice) : 'N/A'], ['Mark', position ? price(position.markPrice) : 'N/A'], ['Likuidasi', position?.liquidationPrice > 0 ? price(position.liquidationPrice) : 'N/A'], ['PnL berjalan', `${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`], ['Mulai', scalper.trackedPosition?.enteredAt ? time(scalper.trackedPosition.enteredAt) : 'N/A']],
       },
       sell: {
-        title: `Exit ${selectedExitSide}`, status: !position ? 'TIDAK PERLU' : execution.uncovered > 0 ? 'PERLU CEK' : 'TERLINDUNGI',
-        summary: !position ? 'Tidak ada posisi yang perlu ditutup.' : execution.uncovered > 0 ? 'Sebagian posisi belum memiliki exit.' : 'Posisi sudah memiliki order exit.',
-        tags: data.futures?.exits?.nearestLabel ? [data.futures.exits.nearestLabel] : [],
-        details: [['Order exit', exitCount], ['Kontrak', compact(execution.positionContracts)], ['Belum tertutup', compact(execution.uncovered)], ['Coverage', coverage == null ? 'N/A' : percent(coverage, 0)], ['Target terdekat', data.futures?.exits?.nearestPrice ? `${price(data.futures.exits.nearestPrice)} ${quote()}` : 'N/A']],
+        title: `Proteksi ${selectedExitSide}`, status: !position ? 'TIDAK PERLU' : protection.status === 'PROTECTED' ? 'LENGKAP' : 'PERLU CEK',
+        summary: !position ? 'Proteksi akan dipasang setelah entry.' : protection.status === 'PROTECTED' ? 'Take profit dan stop loss aktif di Binance.' : 'Take profit atau stop loss belum terdeteksi lengkap.',
+        tags: position ? [protection.status || 'UNKNOWN'] : [],
+        details: [['Take profit', protection.takeProfit?.triggerPrice ? `${price(protection.takeProfit.triggerPrice)} ${quote()}` : 'N/A'], ['Stop loss', protection.stopLoss?.triggerPrice ? `${price(protection.stopLoss.triggerPrice)} ${quote()}` : 'N/A'], ['Jumlah order', num(protection.count)], ['Close position', protection.covered ? 'Ya' : 'Belum lengkap']],
       },
     })[state.activeNode];
   }
@@ -608,43 +466,48 @@
     const profit = state.data.profit || {};
     const side = positionSide();
     text('ledger-title', `${state.data.selectedSymbol || 'Pair'} · ${side}`);
-    text('grid-profit-label', `Profit grid ${side}`);
-    for (const [id, value] of [['realized-pnl', profit.realized], ['funding-pnl', profit.accounting?.ready ? profit.funding : null], ['unrealized-pnl', profit.unrealizedPnl], ['grid-profit', profit.gridPairProfit], ['ledger-net', profit.net]]) { text(id, `${signed(value, 4)} ${quote()}`); pnlTone(byId(id), value); }
+    text('grid-profit-label', 'Hasil akun pair');
+    const realized = profit.accounting?.ready ? profit.accounting.realized : profit.realized;
+    const accountNet = profit.accounting?.ready ? profit.accountNet : profit.net;
+    for (const [id, value] of [['realized-pnl', realized], ['funding-pnl', profit.accounting?.ready ? profit.funding : null], ['unrealized-pnl', profit.unrealizedPnl], ['grid-profit', accountNet], ['ledger-net', accountNet]]) { text(id, `${signed(value, 4)} ${quote()}`); pnlTone(byId(id), value); }
     text('fees-value', `${money(profit.fees, 4)} ${quote()}`);
   }
   function renderRisk() {
-    const data = state.data; const adaptive = intel().adaptive || {}; const position = data.futures?.position;
-    const exposure = num(adaptive.exposurePct); const threshold = num(adaptive.exposureWarningPct ?? adaptive.riskExposurePct) || 90;
-    text('risk-title', `Exposure ${data.selectedSymbol || 'pair'}`);
-    const exitOnly = adaptive.entryGridEnabled === false;
-    text('risk-exposure', exitOnly ? 'EXIT-ONLY' : percent(adaptive.exposurePct));
-    text('risk-caption', exitOnly
-      ? `Exposure posisi lama ${money(adaptive.allocatedInvestment, 4)} ${quote()}; cap entry 0 ${quote()}.`
-      : adaptive.investmentCap > 0
-        ? `${money(adaptive.allocatedInvestment, 4)} dari cap pair ${money(adaptive.investmentCap, 2)} ${quote()}`
-        : 'Batas exposure belum tersedia.');
+    const data = state.data; const position = data.futures?.position; const scalper = data.scalper || {}; const side = positionSide();
+    const sidePct = num(side === 'LONG' ? scalper.longAllocationPct : scalper.shortAllocationPct);
+    const pairCount = Math.max(1, num(scalper.pairCount));
+    const target = num(data.exposureAllocation?.walletBalance) * sidePct / 100 * num(data.exposureAllocation?.leverage) / pairCount;
+    const current = num(data.comparison?.[side]?.exposure);
+    const exposure = target > 0 ? current / target * 100 : 0;
+    const threshold = 100;
+    text('risk-title', `Jatah ${data.selectedSymbol || 'pair'}`);
+    text('risk-exposure', target > 0 ? percent(exposure, 0) : 'N/A');
+    text('risk-caption', target > 0
+      ? `${money(current, 2)} dari jatah posisi ${money(target, 2)} ${quote()}`
+      : 'Jatah pair belum tersedia.');
     byId('exposure-fill').style.width = `${clamp(exposure, 0, 100)}%`; byId('exposure-fill').style.background = exposure >= threshold ? 'var(--warning)' : 'var(--accent)';
     byId('exposure-limit').style.left = `${clamp(threshold, 0, 100)}%`; byId('exposure-meter').setAttribute('aria-valuenow', String(clamp(exposure, 0, 100)));
     const mark = num(position?.markPrice); const liquidation = num(position?.liquidationPrice); const distance = mark > 0 && liquidation > 0 ? Math.abs(mark - liquidation) / mark * 100 : null;
-    renderDefinitionList(byId('risk-facts'), [['Exposure', `${money(adaptive.allocatedInvestment, 2)} ${quote()}`], ['Cap entry pair', exitOnly ? `0 ${quote()}` : adaptive.investmentCap > 0 ? `${money(adaptive.investmentCap, 2)} ${quote()}` : 'N/A'], ['Saldo tersedia', `${money(data.futures?.availableBalance, 2)} ${quote()}`], ['Jarak likuidasi', distance == null ? 'N/A' : percent(distance, 2)]]);
+    renderDefinitionList(byId('risk-facts'), [['Posisi sekarang', `${money(current, 2)} ${quote()}`], ['Jatah posisi pair', target > 0 ? `${money(target, 2)} ${quote()}` : 'N/A'], ['Saldo tersedia', `${money(data.futures?.availableBalance, 2)} ${quote()}`], ['Jarak likuidasi', distance == null ? 'N/A' : percent(distance, 2)]]);
   }
 
   function renderOrders() {
     const orders = state.data.orders?.active || [];
     text('buy-count', `BUY ${num(state.data.orders?.buyCount)}`); text('sell-count', `SELL ${num(state.data.orders?.sellCount)}`);
-    text('orders-copy', `Order grid ${positionSide()} yang aktif.`);
+    text('orders-copy', `Order aktif untuk posisi ${positionSide()}, termasuk take profit dan stop loss.`);
     const body = byId('orders-body'); const cards = byId('order-cards'); body.replaceChildren(); cards.replaceChildren();
     if (!orders.length) {
-      const row = document.createElement('tr'); row.className = 'empty-row'; const cell = document.createElement('td'); cell.colSpan = 7; cell.textContent = state.loading ? 'Mengambil order aktif dari Binance.' : 'Tidak ada order grid aktif untuk pair ini.'; row.append(cell); body.append(row);
-      const empty = document.createElement('div'); empty.className = 'order-empty'; empty.textContent = state.loading ? 'Memuat order aktif.' : 'Tidak ada order grid aktif untuk pair ini.'; cards.append(empty); return;
+      const row = document.createElement('tr'); row.className = 'empty-row'; const cell = document.createElement('td'); cell.colSpan = 7; cell.textContent = state.loading ? 'Mengambil order aktif dari Binance.' : 'Tidak ada order aktif. Saat posisi kosong, kondisi ini normal.'; row.append(cell); body.append(row);
+      const empty = document.createElement('div'); empty.className = 'order-empty'; empty.textContent = state.loading ? 'Memuat order aktif.' : 'Tidak ada order aktif. Saat posisi kosong, kondisi ini normal.'; cards.append(empty); return;
     }
     for (const order of [...orders].sort((a, b) => b.price - a.price || String(a.side).localeCompare(String(b.side)))) {
       const row = document.createElement('tr');
-      const values = [{ value: String(order.side || '').toUpperCase(), className: `side-label ${order.side}` }, { value: `L${order.level ?? 'N/A'}` }, { value: order.priceText || price(order.price) }, { value: order.amountText || compact(order.amount) }, { value: order.remainingText || compact(order.remaining) }, { value: order.entryComparison || 'Order grid' }, { value: order.id }];
+      const type = order.orderType === 'TAKE_PROFIT' ? 'TP' : order.orderType === 'STOP_LOSS' ? 'SL' : order.level == null ? 'REGULAR' : `L${order.level}`;
+      const values = [{ value: String(order.side || '').toUpperCase(), className: `side-label ${order.side}` }, { value: type }, { value: order.priceText || price(order.price) }, { value: order.amountText || compact(order.amount) }, { value: order.remainingText || compact(order.remaining) }, { value: order.entryComparison || 'Order aktif' }, { value: order.id }];
       for (const item of values) { const cell = document.createElement('td'); if (item.className) { const span = document.createElement('span'); span.className = item.className; span.textContent = item.value; cell.append(span); } else cell.textContent = item.value; row.append(cell); } body.append(row);
       const card = document.createElement('article'); card.className = 'order-card';
       const side = document.createElement('span'); side.className = `side-label ${order.side}`; side.textContent = String(order.side || '').toUpperCase();
-      const level = document.createElement('small'); level.textContent = `Level ${order.level ?? 'N/A'}`;
+      const level = document.createElement('small'); level.textContent = type;
       const orderPrice = document.createElement('div'); orderPrice.className = 'order-price'; orderPrice.textContent = `${order.priceText || price(order.price)} ${quote()}`;
       const amount = document.createElement('small'); amount.textContent = `Jumlah ${order.amountText || compact(order.amount)} · Tersisa ${order.remainingText || compact(order.remaining)}`;
       const comparison = document.createElement('small'); comparison.textContent = order.entryComparison || '';
@@ -657,17 +520,24 @@
     const box = canvas.getBoundingClientRect(); if (!(box.width > 0 && box.height > 0)) return;
     const ratio = window.devicePixelRatio || 1; canvas.width = Math.floor(box.width * ratio); canvas.height = Math.floor(box.height * ratio);
     const context = canvas.getContext('2d'); context.setTransform(ratio, 0, 0, ratio, 0, 0);
-    const width = box.width; const height = box.height; const padding = { left: 10, right: Math.min(86, width * .25), top: 12, bottom: 24 }; const range = state.data.range || {};
-    const values = candles.flatMap(candle => [num(candle.high), num(candle.low)]).concat([range.lower, range.upper].filter(Boolean).map(num)); const min = Math.min(...values); const max = Math.max(...values); const span = max - min || 1;
+    const width = box.width; const height = box.height; const padding = { left: 10, right: Math.min(86, width * .25), top: 12, bottom: 24 };
+    const position = state.data.futures?.position;
+    const protection = state.data.scalper?.protection || {};
+    const markers = [
+      { value: num(position?.entryPrice), color: '#f3f7f5', label: 'ENTRY' },
+      { value: num(protection.takeProfit?.triggerPrice), color: '#91d4aa', label: 'TP' },
+      { value: num(protection.stopLoss?.triggerPrice), color: '#ff8d86', label: 'SL' },
+    ];
+    const values = candles.flatMap(candle => [num(candle.high), num(candle.low)]).concat(markers.filter(item => item.value > 0).map(item => item.value)); const min = Math.min(...values); const max = Math.max(...values); const span = max - min || 1;
     const plotWidth = width - padding.left - padding.right; const plotHeight = height - padding.top - padding.bottom; const x = index => padding.left + index * plotWidth / Math.max(candles.length - 1, 1); const y = value => padding.top + (max - value) * plotHeight / span;
     context.clearRect(0, 0, width, height); context.font = '10px ui-monospace, monospace'; context.fillStyle = '#aab5c2'; context.strokeStyle = '#25313e'; context.lineWidth = 1;
     for (let index = 0; index < 5; index += 1) { const gridY = padding.top + index * plotHeight / 4; const value = max - index * span / 4; context.beginPath(); context.moveTo(padding.left, gridY); context.lineTo(width - padding.right, gridY); context.stroke(); context.fillText(price(value), width - padding.right + 9, gridY + 4); }
-    [{ value: num(range.lower), color: '#65d6ad', label: 'LOW' }, { value: num(range.upper), color: '#ffbe66', label: 'HIGH' }].forEach(item => { if (!(item.value > 0)) return; const lineY = y(item.value); context.setLineDash([6, 5]); context.strokeStyle = item.color; context.beginPath(); context.moveTo(padding.left, lineY); context.lineTo(width - padding.right, lineY); context.stroke(); context.setLineDash([]); context.fillStyle = item.color; context.fillText(item.label, padding.left + 4, lineY - 5); });
+    markers.forEach(item => { if (!(item.value > 0)) return; const lineY = y(item.value); context.setLineDash([6, 5]); context.strokeStyle = item.color; context.beginPath(); context.moveTo(padding.left, lineY); context.lineTo(width - padding.right, lineY); context.stroke(); context.setLineDash([]); context.fillStyle = item.color; context.fillText(item.label, padding.left + 4, lineY - 5); });
     const gradient = context.createLinearGradient(0, padding.top, 0, height - padding.bottom); gradient.addColorStop(0, 'rgba(198,243,111,.22)'); gradient.addColorStop(1, 'rgba(198,243,111,0)');
     context.beginPath(); candles.forEach((candle, index) => index ? context.lineTo(x(index), y(num(candle.close))) : context.moveTo(x(index), y(num(candle.close)))); context.lineTo(x(candles.length - 1), height - padding.bottom); context.lineTo(x(0), height - padding.bottom); context.closePath(); context.fillStyle = gradient; context.fill();
     context.beginPath(); candles.forEach((candle, index) => index ? context.lineTo(x(index), y(num(candle.close))) : context.moveTo(x(index), y(num(candle.close)))); context.strokeStyle = '#c6f36f'; context.lineWidth = 2; context.stroke();
   }
-  function renderChartMeta() { const range = state.data.range || {}; text('range-copy', range.lower > 0 && range.upper > 0 ? `Grid ${range.lowerText || price(range.lower)} sampai ${range.upperText || price(range.upper)} ${quote()}` : 'Range grid belum tersedia untuk pair ini.'); text('timeframe-label', state.data.market?.timeframe || 'N/A'); requestAnimationFrame(drawChart); }
+  function renderChartMeta() { const position = state.data.futures?.position; text('range-copy', position ? 'Garis menunjukkan harga entry, take profit, dan stop loss.' : 'Grafik harga pair. Garis proteksi muncul setelah entry.'); text('timeframe-label', state.data.market?.timeframe || 'N/A'); requestAnimationFrame(drawChart); }
   function renderRuntime() {
     const data = state.data; const side = positionSide(); text('status-text', state.loading ? 'Memperbarui' : !data.running ? `${side} · Bot offline` : data.tradingEnabled ? `${side} · Trading aktif` : `${side} · Order dijeda`); byId('status-mark').dataset.state = state.loading ? '' : data.tradingEnabled ? 'active' : data.running ? 'paused' : 'error';
     text('updated-at', `Diperbarui ${time(data.generatedAt)}`); text('runtime-label', `${String(data.mode || '').toUpperCase()} · ${data.source || 'Binance'} · refresh ${num(data.refreshSeconds) || 5} detik`); byId('logout-form').hidden = !data.dashboardAuthEnabled;
