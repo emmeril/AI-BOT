@@ -31,7 +31,7 @@ test('SHORT sends Telegram alerts without competing for command processing', () 
 
 test('SHORT uses the validated price-momentum ownership gate', () => {
   const environment = buildShortEnvironment({});
-  assert.equal(environment.FUTURES_SHORT_ENTRY_DIRECTION, 'ALWAYS');
+  assert.equal(environment.FUTURES_SHORT_ENTRY_DIRECTION, 'BEARISH');
   assert.equal(environment.VOLUME_DELTA_ENTRY_FILTER_ENABLED, 'false');
   assert.equal(environment.EMA_TREND_ENTRY_FILTER_ENABLED, 'false');
   assert.equal(environment.EMA_TREND_ENTRY_FILTER_MODE, 'LIVE');
@@ -43,6 +43,14 @@ test('SHORT uses the validated price-momentum ownership gate', () => {
   assert.equal(environment.PRICE_MOMENTUM_LOOKBACK_CANDLES, '144');
   assert.equal(environment.PRICE_MOMENTUM_DEADBAND_PCT, '0');
   assert.equal(environment.PRICE_MOMENTUM_FAIL_CLOSED, 'true');
+});
+
+test('SHORT uses the validated nine-level scalping profile', () => {
+  const environment = buildShortEnvironment({});
+  assert.equal(environment.GRID_COUNT, '9');
+  assert.equal(environment.GRID_TOTAL_INVESTMENT_USDT, '50');
+  assert.equal(environment.GRID_MAX_ACTIVE_BUY_ORDERS, '9');
+  assert.equal(environment.GRID_MAX_ACTIVE_SELL_ORDERS, '9');
 });
 
 test('SHORT keeps the nearest profitable Fibonacci exit target', () => {

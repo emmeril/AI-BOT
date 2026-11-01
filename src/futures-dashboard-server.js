@@ -57,6 +57,9 @@ const shortStateFile = path.resolve(
 const shortLockFile = path.resolve(
   process.env.FUTURES_DASHBOARD_SHORT_LOCK_FILE || `${shortStateFile}.lock`
 );
+const scalperStateFile = path.resolve(
+  process.env.SCALPER_STATE_FILE || path.join(__dirname, '..', 'futures-scalper-state.json')
+);
 const authEnabled = process.env.FUTURES_DASHBOARD_AUTH_ENABLED !== undefined
   ? envBoolean('FUTURES_DASHBOARD_AUTH_ENABLED', false)
   : envBoolean('DASHBOARD_AUTH_ENABLED', false);
@@ -644,6 +647,7 @@ function exitOverview(orders, rawPosition, positionSide) {
 async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedSide = 'LONG', options = {}) {
   const longSymbols = engine.constructor.SYMBOLS || String(process.env.SYMBOLS || '').split(',').filter(Boolean);
   const shortState = options.shortState === undefined ? readJsonState(shortStateFile) : options.shortState;
+  const scalperState = options.scalperState === undefined ? readJsonState(scalperStateFile) : options.scalperState;
   const shortSymbols = Object.keys(shortState?.symbols || {});
   const selectedPositionSide = String(requestedSide || '').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
   const symbols = selectedPositionSide === 'SHORT' ? shortSymbols : longSymbols;
@@ -737,6 +741,15 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedS
   });
   const combinedStrategyPnl = longComparison.strategyPnl + shortComparison.strategyPnl;
   const combinedExposure = longComparison.exposure + shortComparison.exposure;
+  const scalperSymbolState = scalperState?.symbols?.[symbol] || null;
+  const handoffActive = scalperSymbolState?.handoffActive === true;
+  const scalperAllocationPct = numberOrZero(process.env.SCALPER_ALLOCATION_PCT || 70);
+  const scalperLongAllocationPct = numberOrZero(
+    process.env.SCALPER_LONG_ALLOCATION_PCT || scalperAllocationPct / 2
+  );
+  const scalperShortAllocationPct = numberOrZero(
+    process.env.SCALPER_SHORT_ALLOCATION_PCT || scalperAllocationPct / 2
+  );
   return {
     generatedAt: new Date().toISOString(), refreshSeconds, dashboardAuthEnabled: authEnabled,
     source: 'Binance USDⓈ-M Futures',
@@ -746,6 +759,21 @@ async function buildFuturesDashboardSnapshot(engine, requestedSymbol, requestedS
     symbols, selectedSymbol: symbol,
     positionSides: ['LONG', 'SHORT'], selectedPositionSide,
     sideAvailable: selectedPositionSide === 'SHORT' ? shortAvailable : longAvailable,
+    scalper: {
+      enabled: booleanValue(process.env.SCALPER_ENABLED, true),
+      tradingEnabled: booleanValue(process.env.SCALPER_TRADING_ENABLED, true),
+      handoffActive,
+      phase: handoffActive ? (short ? 'POSITION_ACTIVE' : 'READY') : 'LEGACY_EXIT',
+      allocationPct: scalperLongAllocationPct + scalperShortAllocationPct,
+      longAllocationPct: scalperLongAllocationPct,
+      shortAllocationPct: scalperShortAllocationPct,
+      takeProfitPct: numberOrZero(process.env.SCALPER_TAKE_PROFIT_PCT || 2.5),
+      stopLossPct: numberOrZero(process.env.SCALPER_STOP_LOSS_PCT || 1),
+      maxHoldMinutes: numberOrZero(process.env.SCALPER_MAX_HOLD_MINUTES || 120),
+      legacyLongOpen: Boolean(long),
+      legacyShortOpen: Boolean(short),
+      activatedAt: scalperSymbolState?.activatedAt || null,
+    },
     comparison: {
       scope: 'selected-pair',
       combined: { exposure: combinedExposure, strategyPnl: combinedStrategyPnl },

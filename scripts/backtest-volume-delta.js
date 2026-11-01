@@ -7,6 +7,7 @@ const dotenv = require('dotenv');
 const { FullGridBacktester, DEFAULT_OPTIONS } = require('../src/full-grid-backtester');
 const { aggregate, comparison, fetchFundingRates } = require('./backtest-full-grid-pnl');
 const { analyzeVolumeDelta, evaluateVolumeDeltaEntry } = require('../src/volume-delta-analyzer');
+const { evaluatePriceMomentumEntry } = require('../src/price-momentum-entry-filter');
 const { timeframeToMs } = require('../src/fibonacci-range-advisor');
 
 dotenv.config({ path: process.env.DOTENV_CONFIG_PATH || '.env.futures', quiet: true });
@@ -16,8 +17,8 @@ const BASE_TIMEFRAME = String(process.env.BACKTEST_BASE_TIMEFRAME || '15m').trim
 const CANDLE_MS = timeframeToMs(BASE_TIMEFRAME);
 if (!(CANDLE_MS > 0)) throw new Error(`Unsupported BACKTEST_BASE_TIMEFRAME: ${BASE_TIMEFRAME}`);
 const SCALPING_MODE = process.env.BACKTEST_SCALPING_MODE === 'true';
-const HISTORY_DAYS = 90;
-const WARMUP_DAYS = 21;
+const HISTORY_DAYS = Math.max(2, Math.floor(Number(process.env.BACKTEST_HISTORY_DAYS) || 90));
+const WARMUP_DAYS = Math.max(1, Math.floor(Number(process.env.BACKTEST_WARMUP_DAYS) || 21));
 const DEFAULT_SYMBOLS = [
   '1000SHIB/USDT:USDT',
   '1000PEPE/USDT:USDT',
@@ -58,6 +59,25 @@ function buildVariants() {
       label: `Both sides ${window.label} same-side confirmation`,
       lookbackCandles: window.lookbackCandles,
       thresholdPct: 0,
+    });
+  }
+  for (const window of [
+    { key: '15m', label: '15m', lookbackCandles: 3 },
+    { key: '30m', label: '30m', lookbackCandles: 6 },
+    { key: '1h', label: '1h', lookbackCandles: 12 },
+    { key: '2h', label: '2h', lookbackCandles: 24 },
+    { key: '4h', label: '4h', lookbackCandles: 48 },
+    { key: '8h', label: '8h', lookbackCandles: 96 },
+    { key: '12h', label: '12h', lookbackCandles: 144 },
+    { key: '24h', label: '24h', lookbackCandles: 288 },
+    { key: '3d', label: '3d', lookbackCandles: 864 },
+    { key: '7d', label: '7d', lookbackCandles: 2016 },
+    { key: '14d', label: '14d', lookbackCandles: 4032 },
+  ]) {
+    variants.push({
+      key: `momentum_${window.key}`,
+      label: `Both sides ${window.label} price-momentum regime`,
+      momentumLookbackCandles: window.lookbackCandles,
     });
   }
   return variants;
@@ -138,10 +158,35 @@ function buildAnalysisMap(rawRows, lookbackCandles) {
   return result;
 }
 
-function entryDecisionProvider(analysisMap, variant) {
+function buildMomentumMap(rawRows, lookbackCandles) {
+  const result = new Map();
+  for (let index = lookbackCandles; index < rawRows.length; index++) {
+    const startPrice = Number(rawRows[index - lookbackCandles]?.[4]);
+    const endPrice = Number(rawRows[index]?.[4]);
+    if (!(startPrice > 0) || !(endPrice > 0)) continue;
+    result.set(Number(rawRows[index][0]) + CANDLE_MS, {
+      lookbackCandles,
+      timestamp: Number(rawRows[index][0]),
+      startPrice,
+      endPrice,
+      returnRatio: endPrice / startPrice - 1,
+      direction: endPrice > startPrice ? 'BULLISH' : endPrice < startPrice ? 'BEARISH' : 'NEUTRAL',
+    });
+  }
+  return result;
+}
+
+function entryDecisionProvider(maps, variant) {
+  if (variant.momentumLookbackCandles) {
+    return ({ timestamp, positionSide }) => evaluatePriceMomentumEntry(
+      maps.momentum[variant.momentumLookbackCandles].get(timestamp),
+      positionSide,
+      { deadbandPct: 0, failClosed: false }
+    );
+  }
   if (!variant.lookbackCandles) return null;
   return ({ timestamp, positionSide }) => evaluateVolumeDeltaEntry(
-    analysisMap.get(timestamp),
+    maps.volumeDelta[variant.lookbackCandles].get(timestamp),
     positionSide,
     { oppositionThresholdPct: variant.thresholdPct, failClosed: false }
   );
@@ -158,7 +203,7 @@ function simulateSide({ simulator, exchange, symbol, rows, fundingRates, start, 
       start,
       end,
       adaptive: false,
-      entryDecisionProvider: entryDecisionProvider(maps[variant.lookbackCandles], variant),
+      entryDecisionProvider: entryDecisionProvider(maps, variant),
       variant: `${side.toLowerCase()}-${variant.key}`,
     });
   }
@@ -219,22 +264,39 @@ function selectOnTraining(train) {
 
 function selectSideOnTraining(train, side) {
   const baseline = train.aggregate.baseline[side];
+  const symbols = Object.keys(train.perSymbol || {});
   return VARIANTS.slice(1).map(variant => ({
     key: variant.key,
     result: train.aggregate[variant.key][side],
   })).filter(item =>
-    item.result.netLiquidationPnl > 0 &&
-    item.result.sumOfPerSymbolMaximumDrawdowns <= baseline.sumOfPerSymbolMaximumDrawdowns
+    item.result.netLiquidationPnl >= 0 &&
+    item.result.sumOfPerSymbolMaximumDrawdowns <= baseline.sumOfPerSymbolMaximumDrawdowns &&
+    symbols.every(symbol => train.perSymbol[symbol][side][item.key].netLiquidationPnl >= 0)
   ).sort((left, right) =>
     right.result.netLiquidationPnl - left.result.netLiquidationPnl ||
     left.result.sumOfPerSymbolMaximumDrawdowns - right.result.sumOfPerSymbolMaximumDrawdowns
   )[0]?.key || null;
 }
 
-function selectedSideCombination(scope, selectedBySide) {
-  if (!selectedBySide?.LONG || !selectedBySide?.SHORT) return null;
-  const long = scope.aggregate[selectedBySide.LONG].LONG;
-  const short = scope.aggregate[selectedBySide.SHORT].SHORT;
+function emptySideAggregate() {
+  return {
+    netLiquidationPnl: 0,
+    fees: 0,
+    fundingPnl: 0,
+    gridCycles: 0,
+    sumOfPerSymbolMaximumDrawdowns: 0,
+    entryFilterBlockedSamples: 0,
+  };
+}
+
+function selectedSideCombination(scope, selectedBySide, activeSides = ['LONG', 'SHORT']) {
+  if (activeSides.some(side => !selectedBySide?.[side])) return null;
+  const long = activeSides.includes('LONG')
+    ? scope.aggregate[selectedBySide.LONG].LONG
+    : emptySideAggregate();
+  const short = activeSides.includes('SHORT')
+    ? scope.aggregate[selectedBySide.SHORT].SHORT
+    : emptySideAggregate();
   return { LONG: long, SHORT: short, combined: aggregateCombined(long, short) };
 }
 
@@ -263,8 +325,10 @@ function renderMarkdown(report) {
   if (SCALPING_MODE) {
     lines.push(
       '- Baseline without Volume Delta is reference-only and cannot be selected.',
+      `- Active strategy sides: ${report.selection.activeSides.join(', ')}.`,
       `- LONG selected using training data only: ${report.selection.selectedBySide?.LONG || 'none'}.`,
       `- SHORT selected using training data only: ${report.selection.selectedBySide?.SHORT || 'none'}.`,
+      `- Every pair profitable out-of-sample: ${report.selection.outOfSamplePerPairPass ? 'yes' : 'no'}.`,
       `- Out-of-sample validation: ${report.selection.validation}.`
     );
     if (report.selection.outOfSample) {
@@ -295,6 +359,11 @@ function renderMarkdown(report) {
 async function main() {
   const symbols = (process.env.BACKTEST_SYMBOLS || process.env.SYMBOLS || DEFAULT_SYMBOLS.join(','))
     .split(',').map(value => value.trim()).filter(Boolean);
+  const activeSides = envList('BACKTEST_ACTIVE_SIDES', ['LONG', 'SHORT'])
+    .map(value => value.toUpperCase());
+  if (!activeSides.length || activeSides.some(side => !['LONG', 'SHORT'].includes(side))) {
+    throw new Error('BACKTEST_ACTIVE_SIDES must contain LONG, SHORT, or both');
+  }
   const now = Date.now();
   const end = Math.floor(now / CANDLE_MS) * CANDLE_MS;
   const start = end - HISTORY_DAYS * DAY_MS;
@@ -359,10 +428,16 @@ async function main() {
       console.log(`[BACKTEST] ${symbol}: loading raw taker-volume klines`);
       const rawRows = await fetchRawKlines(exchange, symbol, fetchStart, end, dataDirectory);
       const rows = rawRows.map(row => row.slice(0, 6).map(Number));
-      const maps = Object.fromEntries(
-        [...new Set(VARIANTS.map(variant => variant.lookbackCandles).filter(Boolean))]
-          .map(lookback => [lookback, buildAnalysisMap(rawRows, lookback)])
-      );
+      const maps = {
+        volumeDelta: Object.fromEntries(
+          [...new Set(VARIANTS.map(variant => variant.lookbackCandles).filter(Boolean))]
+            .map(lookback => [lookback, buildAnalysisMap(rawRows, lookback)])
+        ),
+        momentum: Object.fromEntries(
+          [...new Set(VARIANTS.map(variant => variant.momentumLookbackCandles).filter(Boolean))]
+            .map(lookback => [lookback, buildMomentumMap(rawRows, lookback)])
+        ),
+      };
       const fundingRates = await fetchFundingRates(exchange, symbol, start, end, fundingDirectory);
       const minimumNotional = Number(exchange.market(symbol)?.limits?.cost?.min) || 5;
       const long = { ...longOptions, minimumNotional };
@@ -385,30 +460,40 @@ async function main() {
   let selection;
   if (SCALPING_MODE) {
     const selectedBySide = {
-      LONG: selectSideOnTraining(scopes.train, 'LONG'),
-      SHORT: selectSideOnTraining(scopes.train, 'SHORT'),
+      LONG: activeSides.includes('LONG') ? selectSideOnTraining(scopes.train, 'LONG') : null,
+      SHORT: activeSides.includes('SHORT') ? selectSideOnTraining(scopes.train, 'SHORT') : null,
     };
-    const fullSelection = selectedSideCombination(scopes.full, selectedBySide);
-    const oosSelection = selectedSideCombination(scopes.outOfSample, selectedBySide);
+    const fullSelection = selectedSideCombination(scopes.full, selectedBySide, activeSides);
+    const oosSelection = selectedSideCombination(scopes.outOfSample, selectedBySide, activeSides);
     const baselineOos = scopes.outOfSample.aggregate.baseline;
     const oosDays = (scopes.outOfSample.end - scopes.outOfSample.start) / DAY_MS;
     const minimumCyclesPerDay = envNumber('BACKTEST_MINIMUM_SCALPING_CYCLES_PER_DAY', 10);
     const outOfSampleCyclesPerDay = oosSelection
       ? round(oosSelection.combined.gridCycles / oosDays, 3)
       : 0;
+    const outOfSamplePerPairPass = oosSelection && symbols.every(symbol => {
+      const sidePnls = activeSides.map(side =>
+        scopes.outOfSample.perSymbol[symbol][side][selectedBySide[side]].netLiquidationPnl
+      );
+      return sidePnls.every(pnl => pnl >= 0) && sidePnls.reduce((sum, pnl) => sum + pnl, 0) > 0;
+    });
     const validation = oosSelection &&
-      oosSelection.LONG.netLiquidationPnl > 0 &&
-      oosSelection.SHORT.netLiquidationPnl > 0 &&
-      oosSelection.LONG.sumOfPerSymbolMaximumDrawdowns <= baselineOos.LONG.sumOfPerSymbolMaximumDrawdowns &&
-      oosSelection.SHORT.sumOfPerSymbolMaximumDrawdowns <= baselineOos.SHORT.sumOfPerSymbolMaximumDrawdowns &&
+      outOfSamplePerPairPass &&
+      activeSides.every(side =>
+        oosSelection[side].netLiquidationPnl > 0 &&
+        oosSelection[side].sumOfPerSymbolMaximumDrawdowns <=
+          baselineOos[side].sumOfPerSymbolMaximumDrawdowns
+      ) &&
       outOfSampleCyclesPerDay >= minimumCyclesPerDay
       ? 'PASS'
       : 'FAIL';
     selection = {
       selectedBySide,
+      activeSides,
       validation,
       minimumCyclesPerDay,
       outOfSampleCyclesPerDay,
+      outOfSamplePerPairPass,
       full: fullSelection,
       outOfSample: oosSelection,
     };
@@ -440,16 +525,22 @@ async function main() {
       `Volume delta is taker buy base volume minus taker sell base volume from Binance USD-M ${BASE_TIMEFRAME} klines.`,
       'LONG entries require applied Fibonacci BULLISH; SHORT entries require applied Fibonacci BEARISH.',
       'Adaptive Supervisor is disabled for both sides.',
-      'Every selectable candidate applies the same mirrored volume-delta rule to LONG and SHORT and cancels only opposing pending entries.',
+      'Volume-delta candidates apply the same mirrored guard to LONG and SHORT and cancel only opposing pending entries.',
+      'Price-momentum candidates allow LONG only in a rising window and SHORT only in a falling window.',
       'Exit orders are never filtered by Fibonacci direction or volume delta.',
-      'The candidate is selected on the first 45 days and validated unchanged on the final 45 days.',
+      'The candidate is selected on the first half of the period and validated unchanged on the final half.',
       `${BASE_TIMEFRAME} candles cannot model queue position, slippage, latency, exact intrabar ordering, or rejected post-only orders.`,
       'Liquidation and maintenance-margin tiers are not simulated.',
     ],
     ...scopes,
   };
   fs.mkdirSync(resultsDirectory, { recursive: true });
-  const reportBaseName = SCALPING_MODE ? 'scalping-volume-delta-backtest' : 'volume-delta-backtest';
+  const defaultReportBaseName = SCALPING_MODE
+    ? 'scalping-volume-delta-backtest'
+    : 'volume-delta-backtest';
+  const reportBaseName = String(process.env.BACKTEST_REPORT_NAME || defaultReportBaseName)
+    .trim()
+    .replace(/[^a-z0-9_-]+/gi, '-');
   fs.writeFileSync(path.join(resultsDirectory, `${reportBaseName}.json`), JSON.stringify(report, null, 2));
   fs.writeFileSync(path.join(resultsDirectory, `${reportBaseName}.md`), renderMarkdown(report));
   console.log(renderMarkdown(report));
@@ -465,6 +556,7 @@ if (require.main === module) {
 module.exports = {
   VARIANTS,
   buildAnalysisMap,
+  buildMomentumMap,
   entryDecisionProvider,
   selectOnTraining,
   selectSideOnTraining,

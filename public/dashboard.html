@@ -8,8 +8,8 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/fontawesome/css/fontawesome.min.css?v=7.3.1">
   <link rel="stylesheet" href="/fontawesome/css/solid.min.css?v=7.3.1">
-  <link rel="stylesheet" href="/dashboard.css?v=20261030.2">
-  <script defer src="/dashboard.js?v=20261030.2"></script>
+  <link rel="stylesheet" href="/dashboard.css?v=20261101.1">
+  <script defer src="/dashboard.js?v=20261101.1"></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Lewati ke isi dashboard</a>
@@ -36,6 +36,20 @@
     <div class="loading-state" id="loading-state" role="status" aria-live="polite"><span class="loading-bar" aria-hidden="true"></span><span>Mengambil data terbaru dari bot dan Binance.</span></div>
 
     <main id="main-content">
+      <section class="strategy-summary" id="strategy-summary" data-state="waiting" aria-labelledby="strategy-title" aria-live="polite">
+        <div>
+          <p class="section-label">Strategi production</p>
+          <h2 id="strategy-title">Memeriksa perpindahan strategi</h2>
+          <p id="strategy-copy">Menunggu status posisi lama dan scalper.</p>
+        </div>
+        <dl class="strategy-facts">
+          <div><dt>Mode</dt><dd id="strategy-mode">LONG + SHORT</dd></div>
+          <div><dt>Target / stop</dt><dd id="strategy-risk">2,5% / 1%</dd></div>
+          <div><dt>Batas waktu</dt><dd id="strategy-hold">120 menit</dd></div>
+          <div><dt>Jatah modal</dt><dd id="strategy-allocation">35% + 35%</dd></div>
+        </dl>
+      </section>
+
       <section class="plain-overview" aria-labelledby="plain-title">
         <div class="health-summary" aria-live="polite">
           <p class="section-label">Kondisi sekarang</p>
@@ -60,9 +74,9 @@
           <dl class="portfolio-legend">
             <div><dt><span class="legend-key long" aria-hidden="true"></span>Entry LONG</dt><dd id="plan-long-pct">35%</dd></div>
             <div><dt><span class="legend-key short" aria-hidden="true"></span>Entry SHORT</dt><dd id="plan-short-pct">35%</dd></div>
-            <div><dt><span class="legend-key rescue-long" aria-hidden="true"></span>Rescue LONG</dt><dd id="plan-rescue-long-pct">10%</dd></div>
-            <div><dt><span class="legend-key rescue-short" aria-hidden="true"></span>Rescue SHORT</dt><dd id="plan-rescue-short-pct">10%</dd></div>
-            <div><dt><span class="legend-key buffer" aria-hidden="true"></span>Buffer</dt><dd id="plan-buffer-pct">10%</dd></div>
+            <div><dt><span class="legend-key rescue-long" aria-hidden="true"></span>Rescue LONG</dt><dd id="plan-rescue-long-pct">0%</dd></div>
+            <div><dt><span class="legend-key rescue-short" aria-hidden="true"></span>Rescue SHORT</dt><dd id="plan-rescue-short-pct">0%</dd></div>
+            <div><dt><span class="legend-key buffer" aria-hidden="true"></span>Buffer</dt><dd id="plan-buffer-pct">30%</dd></div>
           </dl>
           <p class="ramp-message" id="ramp-message">Bot membagi modal sama rata ke semua pair.</p>
         </div>

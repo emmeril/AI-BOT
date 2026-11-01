@@ -32,6 +32,15 @@ test('dashboard pipeline shows only the active deterministic execution flow', ()
   assert.match(script, /`\$\{price\(range\.lower\)\}–\$\{price\(range\.upper\)\}`/);
 });
 
+test('dashboard explains the safe migration from legacy exits to dual scalper', () => {
+  const html = publicFile('dashboard.html');
+  const script = publicFile('dashboard.js');
+  assert.match(html, /Strategi production/);
+  assert.match(script, /Posisi lama sedang diselesaikan/);
+  assert.match(script, /Grid tidak boleh entry lagi/);
+  assert.match(script, /Scalper LONG \+ SHORT aktif/);
+});
+
 test('futures dashboard switches between LONG and SHORT operating surfaces', () => {
   const html = publicFile('dashboard.html');
   const css = publicFile('dashboard.css');
@@ -49,9 +58,9 @@ test('futures dashboard switches between LONG and SHORT operating surfaces', () 
   assert.match(html, /id="portfolio-track"/);
   assert.match(html, /id="plan-long-pct">35%/);
   assert.match(html, /id="plan-short-pct">35%/);
-  assert.match(html, /id="plan-rescue-long-pct">10%/);
-  assert.match(html, /id="plan-rescue-short-pct">10%/);
-  assert.match(html, /id="plan-buffer-pct">10%/);
+  assert.match(html, /id="plan-rescue-long-pct">0%/);
+  assert.match(html, /id="plan-rescue-short-pct">0%/);
+  assert.match(html, /id="plan-buffer-pct">30%/);
   assert.match(html, /<details class="technical-details" id="technical-details">/);
   assert.match(html, /id="allocation-pair-list"/);
   assert.match(html, /id="allocation-pair-count"/);
@@ -152,7 +161,7 @@ test('dashboard omits inactive Gemini and learning surfaces from the operator vi
 
   assert.doesNotMatch(html, /Gemini|Adaptive learning|learning-panel/);
   assert.doesNotMatch(login, /Gemini/);
-  assert.match(login, /level Fibonacci, Price Momentum/);
+  assert.match(login, /sinyal tren LONG dan SHORT/);
   assert.doesNotMatch(html, /Adaptive supervisor|Profil BUY|profil adaptive/i);
   assert.doesNotMatch(login, /Adaptive Supervisor|Adaptive decision/i);
   assert.doesNotMatch(script, /renderLearning|trustPolicyView|setNode\('gemini'|setNode\('trust'/);

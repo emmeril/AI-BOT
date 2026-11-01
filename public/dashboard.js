@@ -309,10 +309,15 @@
     text('health-short', !short.available ? 'Tidak tersedia' : short.running ? 'Aktif' : 'Offline');
     text('health-exit', !position ? 'Tidak diperlukan' : exitProtected ? 'Terlindungi 100%' : 'Perlu perhatian');
 
-    const longTarget = clamp(num(allocation.LONG?.configuredSidePct ?? allocation.longPct), 0, 100);
-    const shortTarget = clamp(num(allocation.SHORT?.configuredSidePct ?? allocation.shortPct), 0, 100);
-    const rescueLong = clamp(num(allocation.rescue?.LONG?.configuredMarginPct), 0, 100);
-    const rescueShort = clamp(num(allocation.rescue?.SHORT?.configuredMarginPct), 0, 100);
+    const scalperPlan = Boolean(data.scalper?.enabled);
+    const longTarget = scalperPlan
+      ? clamp(num(data.scalper.longAllocationPct), 0, 100)
+      : clamp(num(allocation.LONG?.configuredSidePct ?? allocation.longPct), 0, 100);
+    const shortTarget = scalperPlan
+      ? clamp(num(data.scalper.shortAllocationPct), 0, 100)
+      : clamp(num(allocation.SHORT?.configuredSidePct ?? allocation.shortPct), 0, 100);
+    const rescueLong = scalperPlan ? 0 : clamp(num(allocation.rescue?.LONG?.configuredMarginPct), 0, 100);
+    const rescueShort = scalperPlan ? 0 : clamp(num(allocation.rescue?.SHORT?.configuredMarginPct), 0, 100);
     const plannedBuffer = clamp(100 - longTarget - shortTarget - rescueLong - rescueShort, 0, 100);
     const planTotal = longTarget + shortTarget + rescueLong + rescueShort + plannedBuffer;
 
@@ -330,12 +335,30 @@
 
     const shortCurrent = clamp(num(allocation.SHORT?.sidePct ?? allocation.shortPct), 0, 100);
     const pairCount = Math.max(num(allocation.LONG?.pairCount), num(allocation.SHORT?.pairCount));
-    const temporaryReserve = Math.max(0, shortTarget - shortCurrent);
-    if (allocation.SHORT?.autoRampEnabled && shortCurrent < shortTarget) {
+    if (data.scalper?.enabled) {
+      text('ramp-message', `LONG ${percent(longTarget, 0)} dan SHORT ${percent(shortTarget, 0)} berjalan independen, dibagi rata ke ${pairCount || 'semua'} pair. Sisa ${percent(plannedBuffer, 0)} menjadi buffer.`);
+    } else if (allocation.SHORT?.autoRampEnabled && shortCurrent < shortTarget) {
+      const temporaryReserve = Math.max(0, shortTarget - shortCurrent);
       text('ramp-message', `SHORT aktif ${percent(shortCurrent, 0)} dari target ${percent(shortTarget, 0)}. Bot akan menaikkannya otomatis saat kondisi aman. Sementara ${percent(temporaryReserve, 0)} tetap di cadangan.`);
     } else {
       text('ramp-message', `LONG dan SHORT sudah sesuai target. Setiap jatah dibagi rata ke ${pairCount || 'semua'} pair.`);
     }
+  }
+
+  function renderStrategySummary() {
+    const scalper = state.data?.scalper || {};
+    const panel = byId('strategy-summary');
+    if (!panel) return;
+    const active = Boolean(scalper.handoffActive);
+    panel.dataset.state = active ? 'active' : 'waiting';
+    text('strategy-title', active ? 'Scalper LONG + SHORT aktif' : 'Posisi lama sedang diselesaikan');
+    text('strategy-copy', active
+      ? 'Pair ini memakai dua sisi independen dalam Hedge Mode. LONG dan SHORT boleh terbuka bersamaan; masing-masing memiliki TP dan SL sendiri.'
+      : 'Grid tidak boleh entry lagi. Exit lama tetap dijaga 100%, lalu pair berpindah otomatis ke scalper dua sisi setelah LONG dan SHORT sama-sama kosong.');
+    text('strategy-mode', 'LONG + SHORT');
+    text('strategy-risk', `${percent(scalper.takeProfitPct, 1)} / ${percent(scalper.stopLossPct, 1)}`);
+    text('strategy-hold', `${num(scalper.maxHoldMinutes) || 120} menit`);
+    text('strategy-allocation', `${percent(scalper.longAllocationPct, 0)} + ${percent(scalper.shortAllocationPct, 0)}`);
   }
 
   function allocationStatusView(budget) {
@@ -654,7 +677,7 @@
       button.setAttribute('aria-pressed', String(button.dataset.positionSide === state.positionSide));
     });
   }
-  function render() { renderPositionSwitch(); renderPlainOverview(); renderAllocation(); renderOverview(); renderFlow(); renderInspector(); renderLedger(); renderRisk(); renderOrders(); renderChartMeta(); renderRuntime(); }
+  function render() { renderPositionSwitch(); renderStrategySummary(); renderPlainOverview(); renderAllocation(); renderOverview(); renderFlow(); renderInspector(); renderLedger(); renderRisk(); renderOrders(); renderChartMeta(); renderRuntime(); }
   function renderSymbols(symbols, selected) {
     const select = byId('symbol-select'); const current = [...select.options].map(option => option.value);
     if (JSON.stringify(current) !== JSON.stringify(symbols)) { select.replaceChildren(); for (const symbol of symbols) { const option = document.createElement('option'); option.value = symbol; option.textContent = symbol; select.append(option); } }

@@ -11,11 +11,25 @@ const workerSpecs = [
   {
     name: 'LONG',
     script: path.join(projectRoot, 'futures-grid.js'),
-    env: { ...process.env, FUTURES_POSITION_SIDE: 'LONG' },
+    env: {
+      ...process.env,
+      FUTURES_POSITION_SIDE: 'LONG',
+      FUTURES_ENTRY_ENABLED: 'false',
+      REVERSAL_INVENTORY_ENABLED: 'false',
+    },
   },
   {
     name: 'SHORT',
     script: path.join(projectRoot, 'scripts', 'start-futures-short.js'),
+    env: {
+      ...process.env,
+      SHORT_FUTURES_ENTRY_ENABLED: 'false',
+      SHORT_REVERSAL_INVENTORY_ENABLED: 'false',
+    },
+  },
+  {
+    name: 'SCALPER',
+    script: path.join(projectRoot, 'scripts', 'start-futures-scalper.js'),
     env: { ...process.env },
   },
 ];

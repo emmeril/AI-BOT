@@ -313,6 +313,44 @@ html:not([data-motion=on]) .loading-bar::after { animation: none; width: 100%; }
   background: var(--panel);
 }
 
+.strategy-summary {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(420px, 1.25fr);
+  gap: clamp(20px, 4vw, 56px);
+  align-items: center;
+  margin-bottom: 16px;
+  padding: clamp(18px, 2.5vw, 26px);
+  border: 1px solid var(--control-line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.strategy-summary[data-state=active] { border-color: var(--positive); }
+.strategy-summary[data-state=waiting] { border-color: var(--warning); }
+
+.strategy-summary h2 {
+  margin: 6px 0 0;
+  font-size: clamp(1.15rem, 2vw, 1.5rem);
+  line-height: 1.2;
+}
+
+.strategy-summary p:not(.section-label) {
+  max-width: 66ch;
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+
+.strategy-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.strategy-facts div { min-width: 0; }
+.strategy-facts dt { color: var(--muted); font-size: .72rem; }
+.strategy-facts dd { margin: 4px 0 0; font-weight: 700; }
+
 .health-summary,
 .portfolio-plan {
   min-width: 0;
@@ -731,6 +769,7 @@ tbody tr:hover { background: var(--surface); }
   .topbar { grid-template-columns: 1fr; }
   .top-actions { justify-content: flex-start; }
   .plain-overview { grid-template-columns: 1fr; }
+  .strategy-summary { grid-template-columns: 1fr; }
   .health-summary { border-right: 0; border-bottom: 1px solid var(--line); }
   .portfolio-legend { grid-template-columns: repeat(5, minmax(100px, 1fr)); overflow-x: auto; padding-bottom: 4px; }
   .command-strip { grid-template-columns: repeat(3, 1fr); }
@@ -746,6 +785,7 @@ tbody tr:hover { background: var(--surface); }
 }
 
 @media (max-width: 820px) {
+  .strategy-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .command-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .detail-layout,
   .telemetry-layout { grid-template-columns: 1fr; }
@@ -753,6 +793,7 @@ tbody tr:hover { background: var(--surface); }
 }
 
 @media (max-width: 560px) {
+  .strategy-facts { grid-template-columns: 1fr 1fr; }
   .app-shell { padding: 14px 12px 36px; }
   .topbar { gap: 16px; }
   .top-actions { display: grid; grid-template-columns: 1fr 44px; align-items: end; }

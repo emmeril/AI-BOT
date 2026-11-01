@@ -35,6 +35,7 @@ const {
 } = require('./src/futures-exposure-budget');
 const { displayNumber, signedUsdt, sellOverview, sellFillMessage } = require('./src/futures-display');
 const { CrossProcessMutex } = require('./src/cross-process-mutex');
+const { isHandoffActive } = require('./src/scalper-handoff');
 const {
   VolumeDeltaAnalyzer,
   evaluateVolumeDeltaEntry,
@@ -55,6 +56,10 @@ const {
   trackedInventorySummary,
 } = require('./src/reversal-inventory-manager');
 const futuresTelegramCommandPath = path.resolve(process.cwd(), 'futures-telegram-command.json');
+const scalperHandoffStatePath = path.resolve(
+  process.cwd(),
+  process.env.SCALPER_STATE_FILE || 'futures-scalper-state.json'
+);
 
 // Tracks, per async call chain, which symbols' locks are currently held by
 // an ancestor call. Used by withSymbolLock() to detect true re-entrancy
@@ -5029,6 +5034,9 @@ class FuturesGridEngine {
   }
 
   async reconcileSymbolUnlocked(symbol) {
+    if (isHandoffActive(scalperHandoffStatePath, symbol)) {
+      return;
+    }
     if (POSITION_SIDE === 'SHORT') return this.reconcileShortSymbolUnlocked(symbol);
     await this.syncAccountIncome(symbol);
     if (!this.canPlaceNewOrders()) {
