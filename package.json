@@ -10,6 +10,8 @@
     "start:futures:short": "node scripts/start-futures-short.js",
     "start:futures:scalper": "node scripts/start-futures-scalper.js",
     "start:futures:dual": "node scripts/start-futures-dual.js",
+    "start:ai-signal": "node scripts/start-ai-signal-shadow.js",
+    "start:ai-signal-shadow": "node scripts/start-ai-signal-shadow.js",
     "backtest:fibonacci-direction": "node scripts/backtest-fibonacci-direction.js",
     "backtest:adaptive-supervisor": "node scripts/backtest-adaptive-grid-supervisor.js",
     "backtest:adaptive-deterministic": "BACKTEST_DETERMINISTIC_ONLY=true node scripts/backtest-adaptive-variants.js",
@@ -35,6 +37,7 @@
     "backtest:stale-inventory": "node scripts/backtest-reversal-rescue.js",
     "reconcile:inventory": "node scripts/reconcile-spot-inventory.js",
     "test:scalper": "node --test tests/scalper-handoff.test.js tests/scalper-modules.test.js tests/dashboard.test.js tests/dashboard-assets.test.js",
+    "test:ai-signal-shadow": "node --test tests/ai-signal-shadow.test.js",
     "test": "node --test"
   },
   "keywords": [],

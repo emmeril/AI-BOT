@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const ccxt = require('ccxt');
 const { buildIndicators, entrySignal, exitSignal } = require('./micro-scalper-strategy');
+const { applyLiveEntryPolicy, readLiveEntry } = require('./ai-signal/live-policy');
 const { targetNotional, walletBalance } = require('./scalper/allocation');
 const { buildScalperConfig } = require('./scalper/config');
 const { normalizeAlgoOrders, scalperOrdersForSide } = require('./scalper/order-inspection');
@@ -360,7 +361,9 @@ class FuturesScalperEngine {
       ['Take profit', formatNumber(protection.takeProfit)],
       ['Stop loss', formatNumber(protection.stopLoss)],
       ['Jatah sisi', `${formatNumber(this.config.allocations[side], 2)}% dibagi ${this.config.symbols.length} pair`],
-      ['Sinyal', `Volume delta reversal ${this.config.timeframe}`],
+      ['Sinyal', this.config.aiSignal.liveEnabled
+        ? `Antigravity OAuth ${this.config.timeframe}`
+        : `Volume delta reversal ${this.config.timeframe}`],
     ]);
   }
 
@@ -412,6 +415,15 @@ class FuturesScalperEngine {
     const signalSides = [...new Set([...openSides.map(item => item.side), ...flatSides])];
     if (!signalSides.length) return;
     const signals = await this.signals(symbol, signalSides);
+    for (const side of flatSides) {
+      const liveDecision = this.config.aiSignal.liveEnabled
+        ? readLiveEntry(this.config.aiSignal.statePath, symbol, side, {
+          minimumConfidence: this.config.aiSignal.minimumConfidence,
+          maximumAgeMs: this.config.aiSignal.maximumAgeMs,
+        })
+        : null;
+      signals[side] = applyLiveEntryPolicy(signals[side], liveDecision, this.config.aiSignal.liveEnabled);
+    }
     for (const side of signalSides) {
       const signal = signals[side];
       state.signals[side] = {
@@ -419,6 +431,13 @@ class FuturesScalperEngine {
         evaluatedAt: new Date().toISOString(),
         available: Boolean(signal.candle && signal.indicator),
         allow: Boolean(signal.allow),
+        deterministicAllow: signal.deterministicAllow ?? Boolean(signal.allow),
+        entrySource: signal.entrySource || 'VOLUME_DELTA',
+        aiAction: signal.aiDecision?.decision?.action || null,
+        aiConfidence: Number.isFinite(Number(signal.aiDecision?.decision?.confidence))
+          ? Number(signal.aiDecision.decision.confidence)
+          : null,
+        aiReason: signal.aiDecision?.reason || null,
         exit: Boolean(signal.exit),
         close: Number(signal.candle?.close) || null,
         flowDeltaRatio: Number.isFinite(Number(signal.indicator?.flowDeltaRatio))
@@ -496,7 +515,9 @@ class FuturesScalperEngine {
     this.save();
     console.log(
       `[SCALPER] Started ${this.config.activeSides.join('+') || 'EXIT-ONLY'} Hedge Mode; ` +
-      `${this.config.timeframe} volume-delta reversal; ` +
+      `${this.config.timeframe} ${this.config.aiSignal.liveEnabled
+        ? 'Antigravity OAuth entry'
+        : 'volume-delta reversal'}; ` +
       `TP=${this.config.strategy.takeProfitPct}%; SL=${this.config.strategy.stopLossPct}%; ` +
       `maxHold=${this.config.strategy.maxHoldMinutes}m; ` +
       `allocation=LONG ${this.config.allocations.LONG}% + SHORT ${this.config.allocations.SHORT}% ` +
@@ -504,7 +525,9 @@ class FuturesScalperEngine {
     );
     await this.notify('SCALPER STARTED', [
       ['Mode', this.config.activeSides.join(' + ') || 'EXIT-ONLY'],
-      ['Strategi', `${this.config.timeframe} volume-delta reversal`],
+      ['Strategi', `${this.config.timeframe} ${this.config.aiSignal.liveEnabled
+        ? 'Antigravity OAuth entry'
+        : 'volume-delta reversal'}`],
       ['Trading', this.pauseReason() || 'Aktif'],
       ['Alokasi', `LONG ${formatNumber(this.config.allocations.LONG, 2)}% + SHORT ${formatNumber(this.config.allocations.SHORT, 2)}%`],
       ['Proteksi', `TP ${formatNumber(this.config.strategy.takeProfitPct, 2)}% / SL ${formatNumber(this.config.strategy.stopLossPct, 2)}%`],

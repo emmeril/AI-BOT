@@ -55,6 +55,12 @@ function buildScalperConfig(environment = process.env) {
     killSwitchEnabled: readBoolean(environment, 'KILL_SWITCH_ENABLED', true),
     killSwitchPath: path.resolve(environment.KILL_SWITCH_FILE || 'bot-paused.flag'),
     statePath: path.resolve(environment.SCALPER_STATE_FILE || 'futures-scalper-state.json'),
+    aiSignal: {
+      liveEnabled: readBoolean(environment, 'AI_SIGNAL_LIVE_ENABLED', false),
+      statePath: path.resolve(environment.AI_SIGNAL_SHADOW_STATE_FILE || 'ai-signal-shadow-state.json'),
+      minimumConfidence: readNumber(environment, 'AI_SIGNAL_MIN_CONFIDENCE', 65),
+      maximumAgeMs: readNumber(environment, 'AI_SIGNAL_MAX_AGE_MS', 4 * 60 * 60_000),
+    },
     strategies,
     strategy: strategies.SHORT,
     activeSides,

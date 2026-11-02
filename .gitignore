@@ -16,6 +16,7 @@ profit-ledger-*.json
 risk-state.json
 risk-state-*.json
 futures-scalper-state.json
+ai-signal-shadow-state.json
 grid-state-*.json
 gemini-range-advisor-state.json
 fibonacci-range-advisor-state.json

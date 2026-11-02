@@ -47,6 +47,25 @@ launchers
 
 Policy modules must not import `futures-grid.js`, dashboard server code, or process launchers. Presentation modules may consume policy results, but they must not place or cancel exchange orders.
 
+## AI signal worker
+
+`scripts/start-ai-signal-shadow.js` is an independent, read-only market-data process. It fetches completed
+15-minute futures candles, calls Antigravity through cached Google OAuth, validates one structured
+LONG, SHORT, or HOLD forecast per configured pair, and writes `ai-signal-shadow-state.json`.
+
+The worker is deliberately outside `scripts/start-futures-dual.js`. An authentication, quota, model,
+or schema failure becomes a recorded HOLD decision and cannot stop the trading supervisor. The child
+process does not inherit Gemini API-key variables, and no AI signal module imports order execution code.
+Every completed 15-minute candle is checked locally. Antigravity is called after the same coarse
+LONG, SHORT, or HOLD feature regime appears on three consecutive candles, with a four-hour maximum
+refresh interval. This keeps the worker responsive without paying the CLI context overhead on every
+unchanged candle.
+When `AI_SIGNAL_LIVE_ENABLED=true`, the scalper reads this file as its entry-direction source. Only a
+fresh OAuth decision at or above the confidence threshold may open the matching LONG or SHORT side.
+TP, SL, maximum hold, protection repair, and emergency close remain deterministic. Historical
+profitability is not inferred from current model output. Each saved forecast is scored at
+1-hour, 4-hour, and 24-hour horizons after those prices exist, preventing look-ahead bias.
+
 ## Trading invariants
 
 Changes must preserve these rules:
