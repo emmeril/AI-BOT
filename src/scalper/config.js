@@ -4,26 +4,34 @@ const path = require('path');
 const { readBoolean, readNumber } = require('./environment');
 
 function strategyForSide(environment, side) {
-  return {
+  const strategy = {
     side,
-    entryMode: 'VOLUME_DELTA_REVERSAL',
-    useFlowFilter: true,
-    flowWindow: side === 'LONG' ? 1 : 4,
-    flowThreshold: 0,
-    flowExitThreshold: side === 'LONG' ? 0 : -0.2,
-    emaFast: 8,
-    emaSlow: 21,
-    momentumWindow: side === 'LONG' ? 16 : 4,
-    atrPeriod: 14,
-    minAtrPct: 0.03,
-    maxAtrPct: 2,
-    minTrendPct: 0,
-    minMomentumPct: side === 'LONG' ? 3 : 2,
-    takeProfitPct: readNumber(environment, 'SCALPER_TAKE_PROFIT_PCT', 2),
-    stopLossPct: readNumber(environment, 'SCALPER_STOP_LOSS_PCT', 1),
-    maxHoldMinutes: readNumber(environment, 'SCALPER_MAX_HOLD_MINUTES', 240),
-    cooldownMinutes: readNumber(environment, 'SCALPER_COOLDOWN_MINUTES', 15),
+    entryMode: 'MA_CROSS',
+    exitMode: 'HISTORICAL_CROSS',
+    stopMode: 'HISTORICAL_CROSS',
+    crossSelection: {
+      priority: 'higherFirst', rank: 'retests', minimumRetests: 1,
+      targetIndex: 2, stopIndex: 1, requireNetTarget: true,
+    },
+    // Percentage settings are retained for positions opened before the SR migration.
+    takeProfitPct: readNumber(environment, 'SCALPER_TAKE_PROFIT_PCT', 0.35),
+    stopLossPct: readNumber(environment, 'SCALPER_STOP_LOSS_PCT', 0.3),
+    maxHoldMinutes: null,
+    cooldownMinutes: 0,
+    countertrendTakeProfitPct: readNumber(environment, 'SCALPER_COUNTERTREND_TAKE_PROFIT_PCT', 0.2),
+    countertrendStopLossPct: readNumber(environment, 'SCALPER_COUNTERTREND_STOP_LOSS_PCT', 0.15),
+    countertrendMaxHoldMinutes: null,
+    countertrendSizeMultiplier: readNumber(environment, 'SCALPER_COUNTERTREND_SIZE_MULTIPLIER', 0.25),
   };
+  for (const key of ['takeProfitPct', 'stopLossPct',
+    'countertrendTakeProfitPct', 'countertrendStopLossPct']) {
+    if (!(strategy[key] > 0)) throw new Error(`Invalid scalper ${key}: must be positive`);
+  }
+  if (!(strategy.countertrendSizeMultiplier > 0 && strategy.countertrendSizeMultiplier < 1)) {
+    throw new Error('SCALPER_COUNTERTREND_SIZE_MULTIPLIER must be between 0 and 1');
+  }
+  if (strategy.cooldownMinutes < 0) throw new Error('Scalper cooldown must not be negative');
+  return strategy;
 }
 
 function buildScalperConfig(environment = process.env) {
@@ -37,14 +45,15 @@ function buildScalperConfig(environment = process.env) {
     SHORT: strategyForSide(environment, 'SHORT'),
   };
   const activeSides = ['LONG', 'SHORT'].filter(side =>
-    readBoolean(environment, `SCALPER_${side}_ENABLED`, side === 'LONG'));
+    readBoolean(environment, `SCALPER_${side}_ENABLED`, true));
 
   return {
     symbols,
     enabled: readBoolean(environment, 'SCALPER_ENABLED', true),
     tradingEnabled: readBoolean(environment, 'SCALPER_TRADING_ENABLED', true),
     intervalMs: Math.max(5000, readNumber(environment, 'SCALPER_INTERVAL_MS', 15000)),
-    timeframe: String(environment.SCALPER_TIMEFRAME || '15m'),
+    timeframe: '1m',
+    contextTimeframes: ['15m', '1h', '4h'],
     allocationPct: totalAllocationPct,
     allocations: {
       LONG: readNumber(environment, 'SCALPER_LONG_ALLOCATION_PCT', totalAllocationPct / 2),
@@ -56,7 +65,7 @@ function buildScalperConfig(environment = process.env) {
     killSwitchPath: path.resolve(environment.KILL_SWITCH_FILE || 'bot-paused.flag'),
     statePath: path.resolve(environment.SCALPER_STATE_FILE || 'futures-scalper-state.json'),
     aiSignal: {
-      liveEnabled: readBoolean(environment, 'AI_SIGNAL_LIVE_ENABLED', false),
+      liveEnabled: false,
       statePath: path.resolve(environment.AI_SIGNAL_SHADOW_STATE_FILE || 'ai-signal-shadow-state.json'),
       minimumConfidence: readNumber(environment, 'AI_SIGNAL_MIN_CONFIDENCE', 65),
       maximumAgeMs: readNumber(environment, 'AI_SIGNAL_MAX_AGE_MS', 4 * 60 * 60_000),

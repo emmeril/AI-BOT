@@ -26,7 +26,7 @@ class ScalperTelegramReports {
       '[STATUS SCALPER FUTURES]',
       '',
       `Trading: ${this.config.tradingEnabled && !this.config.stopTrading && !paused ? 'AKTIF' : 'DIJEDA'}`,
-      `Strategi: Volume delta reversal ${this.config.timeframe}`,
+      `Strategi: MA7/25/99 ${this.config.timeframe}; konteks 15m/1h/4h`,
       `Sisi: ${this.config.activeSides.join(' + ') || 'EXIT-ONLY'}`,
       `Alokasi: LONG ${formatNumber(this.config.allocations.LONG)}% + SHORT ${formatNumber(this.config.allocations.SHORT)}%`,
     ];

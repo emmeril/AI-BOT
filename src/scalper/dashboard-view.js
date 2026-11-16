@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { booleanValue } = require('./environment');
+const { buildScalperConfig } = require('./config');
 const { fetchOpenAlgoOrders, scalperProtectionSnapshot } = require('./order-inspection');
 
 function numberOrZero(value) {
@@ -50,6 +51,8 @@ function buildDashboardView({
   formatAmount = value => String(value ?? ''),
 } = {}) {
   const selectedSide = String(positionSide || 'LONG').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+  const config = buildScalperConfig(environment);
+  const strategy = symbolState?.positions?.[selectedSide]?.risk || config.strategies[selectedSide];
   const state = symbolState || {};
   const ordersResult = algoOrderResult || { available: false, orders: [], error: 'Belum diperiksa' };
   const handoffActive = state.handoffActive === true;
@@ -59,7 +62,7 @@ function buildDashboardView({
   const enabled = booleanValue(environment.SCALPER_ENABLED, true);
   const sideEnabled = booleanValue(
     environment[`SCALPER_${selectedSide}_ENABLED`],
-    selectedSide === 'LONG'
+    true
   );
   const stoppedBecause = pauseReason(environment);
   const tradingEnabled = enabled && handoffActive && sideEnabled && !stoppedBecause;
@@ -103,21 +106,23 @@ function buildDashboardView({
       selectedSide,
       sideEnabled,
       longEnabled: booleanValue(environment.SCALPER_LONG_ENABLED, true),
-      shortEnabled: booleanValue(environment.SCALPER_SHORT_ENABLED, false),
-      timeframe: String(environment.SCALPER_TIMEFRAME || '15m'),
-      strategy: 'VOLUME_DELTA_REVERSAL',
+      shortEnabled: booleanValue(environment.SCALPER_SHORT_ENABLED, true),
+      timeframe: config.timeframe,
+      strategy: 'MA_CROSS',
+      protectionMode: strategy.protectionMode || config.strategies[selectedSide].exitMode,
+      contextTimeframes: config.contextTimeframes,
       pairCount,
       allocationPct: longAllocationPct + shortAllocationPct,
       longAllocationPct,
       shortAllocationPct,
-      takeProfitPct: numberOrZero(environment.SCALPER_TAKE_PROFIT_PCT || 2),
-      stopLossPct: numberOrZero(environment.SCALPER_STOP_LOSS_PCT || 1),
-      maxHoldMinutes: numberOrZero(environment.SCALPER_MAX_HOLD_MINUTES || 240),
+      takeProfitPct: strategy.takeProfitPct,
+      stopLossPct: strategy.stopLossPct,
+      maxHoldMinutes: null,
       trackedPosition: state.positions?.[selectedSide] || null,
       signal: state.signals?.[selectedSide] || null,
       protection,
       activatedAt: state.activatedAt || null,
-      cooldownUntil: numberOrZero(state.cooldownUntil?.[selectedSide]) || null,
+      cooldownUntil: null,
     },
   };
 }

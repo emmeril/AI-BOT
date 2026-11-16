@@ -30,17 +30,16 @@ test('LONG protection places profit above entry and stop below entry', () => {
   });
 });
 
-test('live config matches the selected walk-forward strategy', () => {
+test('live config selects MA cross with scalping risk', () => {
   const config = buildConfig({ SYMBOLS: 'A,B,C' });
-  assert.equal(config.strategy.emaFast, 8);
-  assert.equal(config.strategy.emaSlow, 21);
-  assert.equal(config.strategy.entryMode, 'VOLUME_DELTA_REVERSAL');
-  assert.equal(config.strategy.takeProfitPct, 2);
-  assert.equal(config.strategy.stopLossPct, 1);
-  assert.equal(config.strategy.maxHoldMinutes, 240);
+  assert.deepEqual(config.contextTimeframes, ['15m', '1h', '4h']);
+  assert.equal(config.strategy.entryMode, 'MA_CROSS');
+  assert.equal(config.strategy.takeProfitPct, 0.35);
+  assert.equal(config.strategy.stopLossPct, 0.3);
+  assert.equal(config.strategy.maxHoldMinutes, null);
   assert.equal(config.allocationPct, 70);
   assert.deepEqual(config.allocations, { LONG: 35, SHORT: 35 });
-  assert.deepEqual(config.activeSides, ['LONG']);
+  assert.deepEqual(config.activeSides, ['LONG', 'SHORT']);
 });
 
 test('directional live config enables both independently selected sides', () => {
@@ -53,12 +52,10 @@ test('directional live config enables both independently selected sides', () => 
     SCALPER_TIMEFRAME: '15m',
   });
   assert.deepEqual(config.activeSides, ['LONG', 'SHORT']);
-  assert.equal(config.timeframe, '15m');
-  assert.equal(config.strategies.LONG.flowWindow, 1);
-  assert.equal(config.strategies.LONG.momentumWindow, 16);
-  assert.equal(config.strategies.SHORT.flowWindow, 4);
-  assert.equal(config.strategies.SHORT.momentumWindow, 4);
-  assert.equal(config.strategies.LONG.maxHoldMinutes, 240);
+  assert.equal(config.timeframe, '1m');
+  assert.equal(config.strategies.LONG.entryMode, 'MA_CROSS');
+  assert.equal(config.strategies.SHORT.entryMode, 'MA_CROSS');
+  assert.equal(config.strategies.LONG.maxHoldMinutes, null);
 });
 
 test('position lookup respects Hedge Mode side', () => {
@@ -146,6 +143,6 @@ test('LONG protection never cancels SHORT protection and uses sell exits', async
   assert.equal(created.length, 2);
   assert.equal(created[0][2], 'sell');
   assert.equal(created[0][5].positionSide, 'LONG');
-  assert.equal(created[0][5].stopLossPrice, '99');
-  assert.equal(created[1][5].takeProfitPrice, '102');
+  assert.equal(created[0][5].stopLossPrice, '99.7');
+  assert.equal(created[1][5].takeProfitPrice, '100.35');
 });

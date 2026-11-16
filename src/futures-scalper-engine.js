@@ -3,8 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const ccxt = require('ccxt');
-const { buildIndicators, entrySignal, exitSignal } = require('./micro-scalper-strategy');
-const { applyLiveEntryPolicy, readLiveEntry } = require('./ai-signal/live-policy');
+const { TIMEFRAMES, evaluateMaCross, historicalProtection } = require('./ma-cross-strategy');
 const { targetNotional, walletBalance } = require('./scalper/allocation');
 const { buildScalperConfig } = require('./scalper/config');
 const { normalizeAlgoOrders, scalperOrdersForSide } = require('./scalper/order-inspection');
@@ -167,8 +166,8 @@ class FuturesScalperEngine {
     }
     state.handoffActive = true;
     state.activatedAt = new Date().toISOString();
-    state.cooldownUntil.LONG = Date.now() + this.config.intervalMs * 2;
-    state.cooldownUntil.SHORT = Date.now() + this.config.intervalMs * 2;
+    state.cooldownUntil.LONG = 0;
+    state.cooldownUntil.SHORT = 0;
     this.save();
     console.log(`[SCALPER HANDOFF] ${symbol} is flat; grid ownership released`);
     await this.notify('SCALPER PAIR SIAP', [
@@ -179,37 +178,39 @@ class FuturesScalperEngine {
     return true;
   }
 
-  async closedKlines(symbol) {
-    const lookback = Math.max(...Object.values(this.config.strategies).map(strategy =>
-      Math.max(strategy.emaSlow, strategy.momentumWindow, strategy.atrPeriod, strategy.flowWindow)
-    ));
+  async closedKlines(symbol, timeframe = this.config.timeframe) {
     const rows = await this.exchange.fapiPublicGetKlines({
-      symbol: this.marketId(symbol), interval: this.config.timeframe, limit: Math.min(1500, lookback + 10),
+      symbol: this.marketId(symbol), interval: timeframe, limit: 500,
     });
     const now = Date.now();
     return rows.filter(row => Number(row?.[6]) < now);
   }
 
   async signals(symbol, sides) {
-    const rows = await this.closedKlines(symbol);
+    const rows = Object.fromEntries(await Promise.all(Object.keys(TIMEFRAMES).map(async timeframe => {
+      try {
+        return [timeframe, await this.closedKlines(symbol, timeframe)];
+      } catch (error) {
+        console.warn(`[SCALPER] ${symbol} ${timeframe}: ${error.message}`);
+        return [timeframe, []];
+      }
+    })));
     return Object.fromEntries(sides.map(side => {
       const strategy = this.config.strategies[side];
-      const { candles, indicators } = buildIndicators(rows, strategy);
-      const index = candles.length - 1;
-      return [side, {
-        candleTimestamp: candles[index]?.timestamp || 0,
-        allow: entrySignal(candles[index], indicators[index], strategy),
-        exit: exitSignal(candles[index], indicators[index], strategy),
-        candle: candles[index],
-        indicator: indicators[index],
-      }];
+      return [side, evaluateMaCross(rows, side, strategy)];
     }));
   }
 
   async placeProtections(symbol, position, side) {
     await this.cancelScalperAlgoOrders(symbol, side);
-    const strategy = this.config.strategies[side];
+    const strategy = this.symbolState(symbol).positions[side]?.risk || this.config.strategies[side];
     const { takeProfit, stopLoss } = protectionPrices(position.entryPrice, strategy);
+    const roundedTakeProfit = this.exchange.priceToPrecision(symbol, takeProfit);
+    const roundedStopLoss = this.exchange.priceToPrecision(symbol, stopLoss);
+    if (strategy.protectionMode === 'HISTORICAL_CROSS' || strategy.protectionMode === 'CROSS_TARGET_RR1') {
+      protectionPrices(position.entryPrice, { ...strategy, protectionMode: 'HISTORICAL_CROSS',
+        takeProfitPrice: roundedTakeProfit, stopLossPrice: roundedStopLoss });
+    }
     const exitOrderSide = side === 'LONG' ? 'sell' : 'buy';
     const sideCode = side === 'LONG' ? 'l' : 's';
     const common = {
@@ -220,13 +221,13 @@ class FuturesScalperEngine {
     const nonce = Date.now().toString(36);
     const stop = await this.exchange.createOrder(symbol, 'market', exitOrderSide, undefined, undefined, {
       ...common,
-      stopLossPrice: this.exchange.priceToPrecision(symbol, stopLoss),
+      stopLossPrice: roundedStopLoss,
       clientOrderId: `scalp-${sideCode}-sl-${nonce}`.slice(0, 32),
     });
     try {
       const take = await this.exchange.createOrder(symbol, 'market', exitOrderSide, undefined, undefined, {
         ...common,
-        takeProfitPrice: this.exchange.priceToPrecision(symbol, takeProfit),
+        takeProfitPrice: roundedTakeProfit,
         clientOrderId: `scalp-${sideCode}-tp-${nonce}`.slice(0, 32),
       });
       return { stopAlgoId: String(stop.id), takeProfitAlgoId: String(take.id), takeProfit, stopLoss };
@@ -303,30 +304,28 @@ class FuturesScalperEngine {
         throw error;
       }
     }
-    const maxAge = this.config.strategies[side].maxHoldMinutes * 60_000;
-    if (Date.now() - Number(state.positions[side].enteredAt) >= maxAge) {
-      await this.closePosition(
-        symbol, position, side, `maximum ${this.config.strategies[side].maxHoldMinutes}-minute hold`
-      );
-      return true;
-    }
     return false;
   }
 
-  async enterPosition(symbol, currentPrice, side) {
+  async enterPosition(symbol, currentPrice, side, signal) {
+    if (!signal?.allow || !signal.risk || !this.canEnterNewPositions()) return;
+    const ticker = await this.exchange.fetchTicker(symbol);
+    const currentEntry = Number(side === 'LONG' ? ticker.ask || ticker.last : ticker.bid || ticker.last);
+    const estimatedEntry = currentEntry * (side === 'LONG' ? 1.0002 : 0.9998);
+    if (!historicalProtection(estimatedEntry, side, signal.supportResistance, signal.risk).valid) return;
     const balance = await this.exchange.fetchBalance();
     const wallet = walletBalance(balance);
     const notional = targetNotional(
       wallet,
-      this.config.allocations[side],
+      this.config.allocations[side] * signal.risk.sizeMultiplier,
       this.config.leverage,
       this.config.symbols.length
     );
-    const amount = Number(this.exchange.amountToPrecision(symbol, notional / currentPrice));
+    const amount = Number(this.exchange.amountToPrecision(symbol, notional / estimatedEntry));
     const market = this.exchange.market(symbol);
     const minAmount = Number(market.limits?.amount?.min) || 0;
     const minCost = Number(market.limits?.cost?.min) || 0;
-    if (!(amount > 0) || amount < minAmount || amount * currentPrice < minCost) {
+    if (!(amount > 0) || amount < minAmount || amount * estimatedEntry < minCost) {
       throw new Error(`${symbol} scalper amount ${amount} / notional ${notional} below exchange minimum`);
     }
     const entryOrderSide = side === 'LONG' ? 'buy' : 'sell';
@@ -339,9 +338,15 @@ class FuturesScalperEngine {
     const position = positionForSide(positions, symbol, side);
     if (!position) throw new Error(`${symbol} ${side} entry returned but no position is visible`);
     const state = this.symbolState(symbol);
-    state.positions[side] = { enteredAt: Date.now(), entryPrice: Number(position.entryPrice) };
+    state.positions[side] = { enteredAt: Date.now(), entryPrice: Number(position.entryPrice),
+      risk: signal.risk, countertrend: signal.countertrend, timeframes: signal.timeframes };
     this.save();
     try {
+      const filledProtection = historicalProtection(Number(position.entryPrice), side, signal.supportResistance, signal.risk);
+      if (!filledProtection.valid) {
+        throw new Error('Filled entry invalidates historical cross TP/SL');
+      }
+      state.positions[side].risk = { ...signal.risk, ...filledProtection };
       state.positions[side].protection = await this.placeProtections(symbol, position, side);
       this.save();
     } catch (error) {
@@ -361,9 +366,8 @@ class FuturesScalperEngine {
       ['Take profit', formatNumber(protection.takeProfit)],
       ['Stop loss', formatNumber(protection.stopLoss)],
       ['Jatah sisi', `${formatNumber(this.config.allocations[side], 2)}% dibagi ${this.config.symbols.length} pair`],
-      ['Sinyal', this.config.aiSignal.liveEnabled
-        ? `Antigravity OAuth ${this.config.timeframe}`
-        : `Volume delta reversal ${this.config.timeframe}`],
+      ['Sinyal', `MA7/25/99 ${this.config.timeframe}`],
+      ['Kondisi', signal.reason],
     ]);
   }
 
@@ -381,8 +385,8 @@ class FuturesScalperEngine {
     for (const side of ['LONG', 'SHORT']) {
       const position = positionForSide(positions, symbol, side);
       if (position) {
-        const closedForAge = await this.ensureManagedPosition(symbol, position, side, algoOrders);
-        if (!closedForAge) openSides.push({ side, position });
+        const closing = await this.ensureManagedPosition(symbol, position, side, algoOrders);
+        if (!closing) openSides.push({ side, position });
         continue;
       }
       if (state.positions[side]) {
@@ -407,32 +411,30 @@ class FuturesScalperEngine {
         state.cooldownUntil[side] = Date.now() + this.config.strategies[side].cooldownMinutes * 60_000;
         this.save();
       }
-      if (this.canEnterNewPositions() && this.config.activeSides.includes(side) &&
-        Date.now() >= Number(state.cooldownUntil[side] || 0)) {
+      if (this.canEnterNewPositions() && this.config.activeSides.includes(side)) {
         flatSides.push(side);
       }
     }
     const signalSides = [...new Set([...openSides.map(item => item.side), ...flatSides])];
     if (!signalSides.length) return;
     const signals = await this.signals(symbol, signalSides);
-    for (const side of flatSides) {
-      const liveDecision = this.config.aiSignal.liveEnabled
-        ? readLiveEntry(this.config.aiSignal.statePath, symbol, side, {
-          minimumConfidence: this.config.aiSignal.minimumConfidence,
-          maximumAgeMs: this.config.aiSignal.maximumAgeMs,
-        })
-        : null;
-      signals[side] = applyLiveEntryPolicy(signals[side], liveDecision, this.config.aiSignal.liveEnabled);
-    }
     for (const side of signalSides) {
       const signal = signals[side];
       state.signals[side] = {
         candleTimestamp: signal.candleTimestamp,
         evaluatedAt: new Date().toISOString(),
-        available: Boolean(signal.candle && signal.indicator),
+        available: signal.available,
+        ma7: signal.indicator?.ma7 ?? null,
+        ma25: signal.indicator?.ma25 ?? null,
+        ma99: signal.indicator?.ma99 ?? null,
+        timeframes: signal.timeframes,
+        supportResistance: signal.supportResistance,
+        countertrend: signal.countertrend ?? null,
+        risk: signal.risk || null,
+        reason: signal.reason,
         allow: Boolean(signal.allow),
         deterministicAllow: signal.deterministicAllow ?? Boolean(signal.allow),
-        entrySource: signal.entrySource || 'VOLUME_DELTA',
+        entrySource: signal.entrySource,
         aiAction: signal.aiDecision?.decision?.action || null,
         aiConfidence: Number.isFinite(Number(signal.aiDecision?.decision?.confidence))
           ? Number(signal.aiDecision.decision.confidence)
@@ -455,20 +457,12 @@ class FuturesScalperEngine {
       };
     }
     this.save();
-    for (const { side, position } of openSides) {
-      const signal = signals[side];
-      if (!signal.exit || !signal.candleTimestamp ||
-        signal.candleTimestamp === state.lastExitSignalCandle[side]) continue;
-      state.lastExitSignalCandle[side] = signal.candleTimestamp;
-      this.save();
-      await this.closePosition(symbol, position, side, 'adverse volume delta');
-    }
     for (const side of flatSides) {
       const signal = signals[side];
       if (!signal.candleTimestamp || signal.candleTimestamp === state.lastSignalCandle[side]) continue;
       state.lastSignalCandle[side] = signal.candleTimestamp;
       this.save();
-      if (signal.allow) await this.enterPosition(symbol, signal.candle.close, side);
+      if (signal.allow) await this.enterPosition(symbol, signal.candle.close, side, signal);
     }
   }
 
@@ -515,22 +509,18 @@ class FuturesScalperEngine {
     this.save();
     console.log(
       `[SCALPER] Started ${this.config.activeSides.join('+') || 'EXIT-ONLY'} Hedge Mode; ` +
-      `${this.config.timeframe} ${this.config.aiSignal.liveEnabled
-        ? 'Antigravity OAuth entry'
-        : 'volume-delta reversal'}; ` +
-      `TP=${this.config.strategy.takeProfitPct}%; SL=${this.config.strategy.stopLossPct}%; ` +
-      `maxHold=${this.config.strategy.maxHoldMinutes}m; ` +
+      `${this.config.timeframe} MA7/25/99; context 15m/1h/4h; ` +
+      'TP/SL=historical MA7/MA25 crosses; ' +
+      'exit=TP/SL only; ' +
       `allocation=LONG ${this.config.allocations.LONG}% + SHORT ${this.config.allocations.SHORT}% ` +
       `across ${this.config.symbols.length} pairs`
     );
     await this.notify('SCALPER STARTED', [
       ['Mode', this.config.activeSides.join(' + ') || 'EXIT-ONLY'],
-      ['Strategi', `${this.config.timeframe} ${this.config.aiSignal.liveEnabled
-        ? 'Antigravity OAuth entry'
-        : 'volume-delta reversal'}`],
+      ['Strategi', `${this.config.timeframe} MA7/25/99; konteks 15m/1h/4h`],
       ['Trading', this.pauseReason() || 'Aktif'],
       ['Alokasi', `LONG ${formatNumber(this.config.allocations.LONG, 2)}% + SHORT ${formatNumber(this.config.allocations.SHORT, 2)}%`],
-      ['Proteksi', `TP ${formatNumber(this.config.strategy.takeProfitPct, 2)}% / SL ${formatNumber(this.config.strategy.stopLossPct, 2)}%`],
+      ['Proteksi', 'TP/SL cross historis terpilih: prioritas timeframe besar dan retest; TP kandidat 3, SL kandidat 2'],
     ]);
     while (true) {
       await this.cycle();

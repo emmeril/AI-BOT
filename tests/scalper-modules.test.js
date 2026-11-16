@@ -29,19 +29,19 @@ test('scalper config owns all side and allocation settings', () => {
   assert.deepEqual(config.activeSides, ['LONG', 'SHORT']);
   assert.deepEqual(config.allocations, { LONG: 35, SHORT: 35 });
   assert.equal(config.symbols.length, 3);
-  assert.equal(config.strategies.LONG.momentumWindow, 16);
-  assert.equal(config.strategies.SHORT.momentumWindow, 4);
+  assert.equal(config.strategies.LONG.entryMode, 'MA_CROSS');
+  assert.equal(config.strategies.SHORT.entryMode, 'MA_CROSS');
   assert.equal(config.aiSignal.liveEnabled, false);
 });
 
-test('scalper config enables the validated AI entry feed explicitly', () => {
+test('AI entry feed cannot override MA cross strategy', () => {
   const config = buildScalperConfig({
     ...environment,
     AI_SIGNAL_LIVE_ENABLED: 'true',
     AI_SIGNAL_MIN_CONFIDENCE: '70',
     AI_SIGNAL_MAX_AGE_MS: '3600000',
   });
-  assert.equal(config.aiSignal.liveEnabled, true);
+  assert.equal(config.aiSignal.liveEnabled, false);
   assert.equal(config.aiSignal.minimumConfidence, 70);
   assert.equal(config.aiSignal.maximumAgeMs, 3600000);
 });

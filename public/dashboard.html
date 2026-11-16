@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="/fontawesome/css/fontawesome.min.css?v=7.3.1">
   <link rel="stylesheet" href="/fontawesome/css/solid.min.css?v=7.3.1">
   <link rel="stylesheet" href="/dashboard.css?v=20261101.2">
-  <script defer src="/dashboard.js?v=20261101.2"></script>
+  <script defer src="/dashboard.js?v=20261116.7"></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Lewati ke isi dashboard</a>
@@ -44,8 +44,8 @@
         </div>
         <dl class="strategy-facts">
           <div><dt>Mode</dt><dd id="strategy-mode">LONG + SHORT</dd></div>
-          <div><dt>Target / stop</dt><dd id="strategy-risk">2% / 1%</dd></div>
-          <div><dt>Batas waktu</dt><dd id="strategy-hold">240 menit</dd></div>
+          <div><dt>Target / stop</dt><dd id="strategy-risk">TP / SL cross terpilih</dd></div>
+          <div><dt>Aturan keluar</dt><dd id="strategy-hold">TP / SL cross historis</dd></div>
           <div><dt>Jatah modal</dt><dd id="strategy-allocation">35% + 35%</dd></div>
         </dl>
       </section>
@@ -120,7 +120,7 @@
                 </svg>
                 <div class="flow-grid">
                   <button class="flow-node node-market" type="button" data-node="market" data-tone="accent" aria-pressed="false"><span class="node-index">1. HARGA</span><span class="node-title">Binance</span><strong class="node-status" id="market-node-status">LIVE</strong><span class="node-value" id="market-node-value">N/A</span><span class="node-meta" id="market-node-meta">Menunggu harga</span></button>
-                  <button class="flow-node node-fibonacci" type="button" data-node="fibonacci" aria-pressed="false"><span class="node-index">2. TEKANAN PASAR</span><span class="node-title">Volume delta</span><strong class="node-status" id="fib-node-status">MENUNGGU</strong><span class="node-value" id="fib-node-value">Data belum tersedia</span><span class="node-meta" id="fib-node-meta">Menunggu candle selesai</span></button>
+                  <button class="flow-node node-fibonacci" type="button" data-node="fibonacci" aria-pressed="false"><span class="node-index">2. MOVING AVERAGE</span><span class="node-title">MA7 / MA25 / MA99</span><strong class="node-status" id="fib-node-status">MENUNGGU</strong><span class="node-value" id="fib-node-value">Data belum tersedia</span><span class="node-meta" id="fib-node-meta">Menunggu candle selesai</span></button>
                   <button class="flow-node node-supervisor" type="button" data-node="supervisor" aria-pressed="true"><span class="node-index">3. KEPUTUSAN</span><span class="node-title" id="supervisor-node-title">Sinyal LONG</span><strong class="node-status" id="supervisor-node-status">MENUNGGU</strong><span class="node-value" id="supervisor-node-value">Belum entry</span><span class="node-meta" id="supervisor-node-meta">Menunggu candle</span></button>
                   <button class="flow-node node-buy" type="button" data-node="buy" aria-pressed="false"><span class="node-index">4. ENTRY</span><span class="node-title" id="entry-node-title">Market BUY</span><strong class="node-status" id="buy-node-status">MENUNGGU</strong><span class="node-value" id="buy-node-value">BUY market</span><span class="node-meta" id="buy-node-meta">Dikirim saat sinyal valid</span></button>
                   <button class="flow-node node-position" type="button" data-node="position" aria-pressed="false"><span class="node-index">5. POSISI</span><span class="node-title" id="position-node-title">LONG</span><strong class="node-status" id="position-node-status">KOSONG</strong><span class="node-value" id="position-node-value">0</span><span class="node-meta" id="position-node-meta">Hasil 0 USDT</span></button>

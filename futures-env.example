@@ -8,7 +8,7 @@ EXCHANGE_SECRET=your_binance_futures_demo_secret
 EXCHANGE_MODE=testnet
 SYMBOLS=BTC/USDT:USDT
 
-# Two-sided intraday volume-delta reversal scalper in Binance Hedge Mode. Legacy grid workers remain exit-only
+# MA7/25/99 one-minute scalper in Binance Hedge Mode. Legacy grid workers remain exit-only
 # until each pair is flat, then ownership moves atomically to this engine.
 SCALPER_ENABLED=true
 SCALPER_TRADING_ENABLED=false
@@ -18,15 +18,16 @@ SCALPER_LONG_ENABLED=true
 SCALPER_SHORT_ENABLED=true
 SCALPER_LONG_ALLOCATION_PCT=35
 SCALPER_SHORT_ALLOCATION_PCT=35
-SCALPER_TIMEFRAME=15m
-SCALPER_TAKE_PROFIT_PCT=2
-SCALPER_STOP_LOSS_PCT=1
-SCALPER_MAX_HOLD_MINUTES=240
-SCALPER_COOLDOWN_MINUTES=15
+SCALPER_TIMEFRAME=1m
+SCALPER_TAKE_PROFIT_PCT=0.35
+SCALPER_STOP_LOSS_PCT=0.3
+SCALPER_COUNTERTREND_TAKE_PROFIT_PCT=0.2
+SCALPER_COUNTERTREND_STOP_LOSS_PCT=0.15
+SCALPER_COUNTERTREND_SIZE_MULTIPLIER=0.25
 SCALPER_INTERVAL_MS=15000
 
 # Independent Antigravity OAuth signal journal. This never places orders.
-AI_SIGNAL_SHADOW_ENABLED=true
+AI_SIGNAL_SHADOW_ENABLED=false
 AI_SIGNAL_LIVE_ENABLED=false
 AI_SIGNAL_TIMEFRAME=15m
 AI_SIGNAL_INTERVAL_MS=900000
@@ -49,8 +50,7 @@ FUTURES_USER_STREAM_ENABLED=true
 FUTURES_USER_STREAM_RECONCILE_DEBOUNCE_MS=750
 FUTURES_USER_STREAM_KEEPALIVE_MINUTES=45
 FUTURES_USER_STREAM_RECONNECT_MAX_SECONDS=30
-# Bearish scalping profile: LONG keeps exits only, while SHORT entries require
-# aligned Fibonacci direction and the live momentum guard.
+# Legacy grid workers keep exits only; MA scalper owns new entries.
 FUTURES_MUTUAL_EXCLUSION_ENABLED=false
 FUTURES_ENTRY_ENABLED=false
 FUTURES_LONG_ENTRY_DIRECTION=BULLISH

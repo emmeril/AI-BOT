@@ -5,7 +5,7 @@ const path = require('node:path');
 
 const publicFile = name => fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8');
 
-test('dashboard pipeline shows the active volume-delta scalper flow', () => {
+test('dashboard pipeline shows the active MA cross scalper flow', () => {
   const html = publicFile('dashboard.html');
   const css = publicFile('dashboard.css');
   const script = publicFile('dashboard.js');
@@ -28,7 +28,7 @@ test('dashboard pipeline shows the active volume-delta scalper flow', () => {
   assert.match(script, /setFlowEdge\('supervisor', 'buy', positionAvailable/);
   assert.match(script, /setFlowEdge\('position', 'sell', protectionError/);
   assert.match(css, /\.flow-grid\{[^}]*grid-template-columns:repeat\(6/);
-  assert.match(html, /Volume delta/);
+  assert.match(html, /MA7 \/ MA25 \/ MA99/);
   assert.match(html, /Take profit dan stop loss/);
   assert.match(script, /function signalView\(scalper = \{\}\)/);
   assert.match(script, /protection\.status === 'PROTECTED'/);
@@ -40,7 +40,7 @@ test('dashboard explains the safe migration from legacy exits to dual scalper', 
   assert.match(html, /Strategi production/);
   assert.match(script, /Posisi lama sedang diselesaikan/);
   assert.match(script, /Grid lama tidak menerima entry baru/);
-  assert.match(script, /Scalper volume delta aktif/);
+  assert.match(script, /Scalper MA7\/25\/99 aktif/);
 });
 
 test('futures dashboard switches between LONG and SHORT operating surfaces', () => {

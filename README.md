@@ -6,6 +6,92 @@ Entrypoint runtime ada di `index.js`; implementasi utama sudah dipisah ke modul 
 
 ## Fitur
 
+Profil futures aktif menggunakan SMA7/25/99 pada harga close. Entry LONG saat MA7
+cross naik MA25, SHORT saat cross turun, setelah candle 1m selesai. MA7 dan MA25
+di atas MA99 berarti bullish; keduanya di bawah berarti bearish. Bot juga membaca
+15m, 1h, dan 4h. Jika salah satu timeframe berlawanan atau campuran, entry tetap
+boleh tetapi memakai risiko countertrend. Data belum lengkap atau kedaluwarsa
+menahan entry baru. Cross berlawanan adalah sinyal sisi lawan, bukan pemicu
+penutupan posisi yang sedang berjalan.
+
+TP dan SL ditentukan oleh titik cross historis. LONG memakai resisten di atas
+entry sebagai TP dan support di bawah entry sebagai SL; SHORT sebaliknya.
+SL memakai harga cross lama, tanpa ATR, ekstrem lima candle, atau cermin jarak 1:1.
+Posisi berjalan sampai TP/SL tersentuh, tanpa batas durasi. Countertrend memakai
+25% ukuran normal dan aturan pemilihan cross yang sama. Level disimpan
+per posisi agar proteksi tetap konsisten setelah restart.
+
+Support/resisten berasal dari persilangan MA7/MA25, MA7/MA99, dan MA25/MA99
+historis pada 500 candle
+terakhir masing-masing timeframe. Harga perpotongan diinterpolasi di antara
+dua candle. Cross pemicu entry tidak dimasukkan sebagai level historis.
+Cross tidak otomatis dipilih berdasarkan jarak terdekat. Selektor memberi
+prioritas 4h, lalu 1h, 15m dan 1m; minimal satu retest yang masih valid, lalu
+jumlah retest terbanyak, jarak, dan waktu cross sebagai pemecah seri. TP memakai
+kandidat ke-3 pada sisi untung dan SL kandidat ke-2 di sisi berlawanan. Target
+harus menutup estimasi biaya. Jika kandidat terkonfirmasi belum cukup, entry
+ditahan tanpa fallback ke level terdekat. Harga sebelum
+order memasukkan estimasi slippage masuk 0,02%. Level dicek lagi sesudah fill;
+jika harga sudah melewati level, posisi ditutup. Tidak ada cooldown entry,
+exit cross berlawanan, atau penutupan berdasarkan umur.
+Fee taker 0,05% dan slippage keluar 0,02% tetap dihitung dalam backtest.
+
+Jalankan `npm run backtest:ma-cross` untuk replay data lokal. Hasil TP/SL historis
+tersimpan di `backtest-results/ranked-cross-default-30d.json` dan `.md`. Hasil varian
+sebelumnya tetap disimpan terpisah. Posisi yang belum menyentuh TP/SL pada akhir
+periode dinilai terpisah pada harga terakhir, bukan ditutup paksa oleh strategi.
+
+Koreksi sumber level MA99 dapat dibandingkan dengan versi MA7/MA25 saja melalui
+`npm run backtest:ma99-levels`. Laporan `backtest-results/ma99-level-comparison.md`
+memisahkan ketiga cross historis dari eksperimen garis MA99 dinamis, dengan entry
+dan biaya yang sama. Hasil riset lama sebelum koreksi tidak mencakup cross MA99.
+
+Pemilihan TP/SL cross historis diuji dengan `npm run backtest:pure-cross-selection`.
+TP dan SL adalah harga cross MA7/25, MA7/99, atau MA25/99 yang sudah terjadi.
+Tidak ada ATR, buffer, target persentase tetap, trailing, atau timeout. Riset membandingkan
+urutan target, prioritas timeframe dan jumlah retest. Hasil dan status eksploratif
+dicatat di `backtest-results/pure-cross-selection.md`. Eksperimen SL cermin 1:1
+tersimpan terpisah di `cross-target-rr1.md` dan dapat diulang dengan
+`PURE_CROSS_STOP_MODE=MIRROR_TARGET npm run backtest:pure-cross-selection`. Audit biaya, sensitivitas,
+dan jarak stop dijalankan lewat `node scripts/audit-pure-cross-selection.js` dan
+`node scripts/audit-pure-cross-stop-distance.js`; tidak mengubah strategi live.
+
+Uji SL satu tick di luar ekstrem 5 candle 1m selesai memakai
+`npm run backtest:five-candle-stop`. Target cross dibekukan dari uji 1:1 sebelumnya;
+runner membandingkan SL 1:1, SL lima candle, serta filter rasio bersih 1,5 dan 2.
+Hasil berada di `backtest-results/five-candle-stop.md` dan `.json`; tidak mengubah
+trading live. Tick dibaca dari exchangeInfo saat pengujian dan diasumsikan berlaku
+untuk data historis.
+
+Eksperimen zona cross terkonfirmasi dijalankan dengan `npm run backtest:cross-zones`.
+Runner membandingkan empat varian pada periode 30 hari dan 13 hari sebelumnya,
+tanpa mengubah konfigurasi trading. Aturan zona, biaya, hasil posisi terbuka,
+dan batas simulasi dicatat di `backtest-results/confirmed-cross-zones.md` dan `.json`.
+
+Pencarian TP/SL lebih luas memakai `node scripts/fetch-ma-exit-research.js` untuk
+mengambil kelanjutan candle dan funding publik Binance, kemudian
+`npm run backtest:exit-search` dan `npm run backtest:exit-management`.
+`node scripts/audit-ma-exit-survivors.js` memeriksa seluruh kandidat yang profit
+pada periode seleksi. Laporan berada di `backtest-results/ma-exit-research.md`,
+`ma-exit-management.md`, dan `ma-exit-survivor-audit.md`. Pemilihan parameter
+hanya memakai 13 hari awal, posisi terbuka dihitung, dan hasil periode yang
+dipakai ulang ditandai eksploratif. Runner riset tidak mengubah trading live.
+
+Simulasi likuidasi **5x isolated** memakai `node scripts/fetch-liquidation-data.js`
+untuk mark-price candles dan snapshot tier margin (endpoint akun hanya dibaca),
+lalu `npm run backtest:liquidation`. Hasil berada di
+`backtest-results/cross-liquidation-5x.md` dan `.json`. Margin LONG/SHORT terpisah,
+funding dibayar dari cash tersedia sebelum isolated margin, maintenance margin
+memakai tier dan cumulative amount, dan full liquidation memasukkan clearance fee.
+Runner membandingkan pemicu mark tanpa/dengan likuidasi, stress slippage, serta
+skenario alokasi 35% wallet per sisi. Snapshot tier dan fee sekarang diasumsikan
+berlaku pada data historis; bukan replay margin engine dan tick Binance lengkap.
+
+`npm run start:futures:dual` menjalankan scalper beserta worker lama untuk
+menyelesaikan exit. Entry grid/rescue lama dinonaktifkan, dan scalper menunggu
+pair kosong sebelum mengambil alih. Sinyal AI tidak dapat mengganti entry MA.
+Modul strategi dan backtest lama dipertahankan untuk riwayat penelitian.
+
 - Trading grid spot untuk satu atau banyak pair, contoh `BTC/USDT,ETH/USDT`.
 - Mode exchange `live`, `testnet`, atau `demo` (`demo` diperlakukan sebagai `testnet`; default aman adalah `testnet`).
 - Grid `ARITHMETIC` atau `GEOMETRIC`.

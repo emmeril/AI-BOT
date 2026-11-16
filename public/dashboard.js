@@ -28,6 +28,11 @@
     return new Intl.NumberFormat('id-ID', { minimumFractionDigits: digits > 2 ? 2 : 0, maximumFractionDigits: digits }).format(numeric);
   }
   function percent(value, digits = 1) { const numeric = nullable(value); return numeric === null ? 'N/A' : `${money(numeric, digits)}%`; }
+  function crossLevelText(level) {
+    if (!level) return 'Belum ditemukan';
+    const source = [level.pair, level.timeframe].filter(Boolean).join(' · ');
+    return `${price(level.price)}${source ? ` (${source})` : ''}`;
+  }
   function compact(value) { return new Intl.NumberFormat('id-ID', { notation: 'compact', maximumFractionDigits: 2 }).format(num(value)); }
   function signed(value, digits = 2) { const numeric = nullable(value); return numeric === null ? 'N/A' : `${numeric >= 0 ? '+' : ''}${money(numeric, digits)}`; }
   function price(value) {
@@ -141,7 +146,7 @@
     const cooldownMinutes = Math.ceil(cooldownMs / 60_000);
     let status = 'MENUNGGU CANDLE';
     let tone = 'accent';
-    let summary = `Bot menunggu candle ${scalper.timeframe || '15m'} yang selesai.`;
+    let summary = `Bot menunggu candle ${scalper.timeframe || '1m'} yang selesai.`;
     if (!scalper.handoffActive) {
       status = 'TRANSISI';
       tone = 'warning';
@@ -161,11 +166,11 @@
     } else if (signal.available && signal.allow) {
       status = 'SINYAL ENTRY';
       tone = 'positive';
-      summary = `Volume delta dan pantulan harga memenuhi syarat entry ${positionSide()}.`;
+      summary = signal.reason || `Cross MA7/MA25 memenuhi syarat entry ${positionSide()}.`;
     } else if (signal.available) {
       status = 'MENUNGGU SINYAL';
       tone = 'accent';
-      summary = `Belum ada sinyal entry ${positionSide()} pada candle terakhir.`;
+      summary = signal.reason || `Belum ada cross untuk entry ${positionSide()} pada candle terakhir.`;
     }
     return {
       available: Boolean(signal.available),
@@ -177,8 +182,8 @@
       momentumPct: nullable(signal.momentumPct),
       atrPct: nullable(signal.atrPct),
       candleTimestamp: signal.candleTimestamp || null,
-      value: flowPct === null ? 'Data belum tersedia' : `Delta ${signed(flowPct, 2)}%`,
-      reason: signal.exit ? 'Volume delta memberi sinyal keluar.' : summary,
+      value: signal.ma7 == null ? 'Data belum tersedia' : `${signal.countertrend ? 'Countertrend' : 'MA7/25/99'} | ${signal.timeframes?.['1m']?.trend || 'menunggu'}`,
+      reason: summary,
     };
   }
 
@@ -216,7 +221,7 @@
       : scalper.paused
         ? `${scalper.pauseReason || 'Entry baru dijeda.'} Posisi yang sudah terbuka tetap dipantau.`
         : !position
-          ? `Pair ${data.selectedSymbol} belum memiliki posisi ${selectedSide}. Bot menunggu sinyal volume delta.`
+          ? `Pair ${data.selectedSymbol} belum memiliki posisi ${selectedSide}. Bot menunggu cross MA7/MA25.`
           : exitProtected
             ? `Posisi ${selectedSide} memiliki take profit dan stop loss aktif di Binance.`
             : 'Posisi aktif belum terdeteksi memiliki take profit dan stop loss lengkap.');
@@ -256,13 +261,13 @@
     if (!panel) return;
     const active = Boolean(scalper.handoffActive);
     panel.dataset.state = active ? 'active' : 'waiting';
-    text('strategy-title', active ? 'Scalper volume delta aktif' : 'Posisi lama sedang diselesaikan');
+    text('strategy-title', active ? 'Scalper MA7/25/99 aktif' : 'Posisi lama sedang diselesaikan');
     text('strategy-copy', active
-      ? `Bot membaca candle ${scalper.timeframe || '15m'}. LONG dan SHORT boleh berjalan bersamaan dan setiap posisi memiliki TP serta SL sendiri.`
+      ? 'Entry cross MA7/MA25 pada candle 1m selesai. TP/SL dipilih dari cross MA7/25, MA7/99, dan MA25/99 berdasarkan timeframe dan retest: TP kandidat ke-3, SL ke-2. Countertrend memakai posisi lebih kecil. Tanpa batas waktu.'
       : 'Grid lama tidak menerima entry baru. Bot tetap menjaga exit lama, lalu berpindah ke scalper setelah pair kosong.');
     text('strategy-mode', 'LONG + SHORT');
-    text('strategy-risk', `${percent(scalper.takeProfitPct, 1)} / ${percent(scalper.stopLossPct, 1)}`);
-    text('strategy-hold', `${num(scalper.maxHoldMinutes) || 240} menit`);
+    text('strategy-risk', 'TP / SL cross terpilih');
+    text('strategy-hold', 'TP / SL cross historis');
     text('strategy-allocation', `${percent(scalper.longAllocationPct, 0)} + ${percent(scalper.shortAllocationPct, 0)}`);
   }
 
@@ -349,7 +354,7 @@
     text('overview-copy', signal.summary);
     text('market-price', `${data.market?.priceText || price(data.market?.price)} ${quote()}`);
     text('market-change', `Perubahan 24 jam: ${signed(data.market?.changePercent, 2)}%`);
-    text('entry-signal-label', `Sinyal ${scalper.timeframe || '15m'}`);
+    text('entry-signal-label', `Sinyal ${scalper.timeframe || '1m'}`);
     text('entry-signal-status', signal.status);
     text('entry-signal-value', signal.value);
     byId('entry-signal-status').className = `metric-value ${signal.tone}`.trim();
@@ -378,7 +383,7 @@
     const positionAvailable = Boolean(data.running && position && num(position.contracts) > 0);
     const protectionReady = Boolean(positionAvailable && protection.status === 'PROTECTED');
     const protectionError = Boolean(positionAvailable && ['INCOMPLETE', 'UNKNOWN'].includes(protection.status));
-    text('flow-title', `Dari candle ${scalper.timeframe || '15m'} sampai posisi ditutup`);
+    text('flow-title', `Dari candle ${scalper.timeframe || '1m'} sampai posisi ditutup`);
     text('supervisor-node-title', `Sinyal ${side}`);
     text('entry-node-title', `Market ${selectedEntrySide}`);
     text('position-node-title', side);
@@ -419,21 +424,21 @@
         details: [['Harga', `${data.market?.priceText || price(data.market?.price)} ${quote()}`], ['24 jam', `${signed(data.market?.changePercent, 2)}%`], ['High', `${data.market?.highText || price(data.market?.high)} ${quote()}`], ['Low', `${data.market?.lowText || price(data.market?.low)} ${quote()}`]],
       },
       fibonacci: {
-        title: 'Volume delta', status: signal.available ? 'TERBACA' : 'MENUNGGU', summary: 'Perbandingan tekanan beli dan jual pada candle yang sudah selesai.', tags: [scalper.timeframe || '15m'],
-        details: [['Delta', signal.flowPct === null ? 'N/A' : signed(signal.flowPct, 2) + '%'], ['Momentum', signal.momentumPct === null ? 'N/A' : signed(signal.momentumPct, 2) + '%'], ['ATR', signal.atrPct === null ? 'N/A' : percent(signal.atrPct, 2)], ['Candle', time(signal.candleTimestamp)]],
+        title: 'MA7 / MA25 / MA99', status: signal.available ? 'TERBACA' : 'MENUNGGU', summary: scalper.signal?.reason || 'Menunggu MA dari candle selesai.', tags: ['1m', '15m', '1h', '4h'],
+        details: [['MA7', price(scalper.signal?.ma7)], ['MA25', price(scalper.signal?.ma25)], ['MA99', price(scalper.signal?.ma99)], ...['15m', '1h', '4h'].map(tf => [tf, scalper.signal?.timeframes?.[tf]?.trend || 'Menunggu']), ['Support cross sebelumnya', crossLevelText(scalper.signal?.supportResistance?.support)], ['Resisten cross sebelumnya', crossLevelText(scalper.signal?.supportResistance?.resistance)], ['Candle', time(signal.candleTimestamp)]],
       },
       supervisor: {
         title: `Sinyal ${side}`, status: signal.status, summary: signal.summary,
         tags: signal.available ? [signal.value] : [],
-        details: [['Strategi', 'Volume delta reversal'], ['Timeframe', scalper.timeframe || '15m'], ['Keputusan', signal.status], ['Cooldown sampai', scalper.cooldownUntil ? time(scalper.cooldownUntil) : 'Tidak ada']],
+        details: [['Strategi', 'MA7/25/99 cross'], ['Timeframe', scalper.timeframe || '1m'], ['Keputusan', signal.status], ['Cooldown sampai', scalper.cooldownUntil ? time(scalper.cooldownUntil) : 'Tidak ada']],
       },
       buy: {
         title: `Entry market ${selectedEntrySide}`, status: position ? 'SELESAI' : 'MENUNGGU', summary: position ? 'Order market sudah menjadi posisi aktif.' : 'Bot mengirim order market hanya setelah sinyal valid.', tags: [signal.status],
         details: [['Sisi order', selectedEntrySide], ['Status posisi', position ? 'Aktif' : 'Kosong'], ['Harga entry', position ? `${price(position.entryPrice)} ${quote()}` : 'N/A'], ['Jumlah', position ? compact(position.contracts) : '0']],
       },
       position: {
-        title: `Posisi ${side}`, status: position ? 'AKTIF' : 'KOSONG', summary: position ? 'Posisi dipantau sampai TP, SL, sinyal keluar, atau batas waktu.' : `Tidak ada posisi ${side}.`,
-        tags: position ? [`${data.futures?.leverage || 0}x`, `Maks ${num(scalper.maxHoldMinutes)} menit`] : [],
+        title: `Posisi ${side}`, status: position ? 'AKTIF' : 'KOSONG', summary: position ? 'Posisi dipantau sampai TP atau SL cross historis tersentuh.' : `Tidak ada posisi ${side}.`,
+        tags: position ? [`${data.futures?.leverage || 0}x`, 'TP/SL cross historis'] : [],
         details: [['Kontrak', position ? compact(position.contracts) : '0'], ['Entry', position ? price(position.entryPrice) : 'N/A'], ['Mark', position ? price(position.markPrice) : 'N/A'], ['Likuidasi', position?.liquidationPrice > 0 ? price(position.liquidationPrice) : 'N/A'], ['PnL berjalan', `${signed(data.profit?.unrealizedPnl, 4)} ${quote()}`], ['Mulai', scalper.trackedPosition?.enteredAt ? time(scalper.trackedPosition.enteredAt) : 'N/A']],
       },
       sell: {
