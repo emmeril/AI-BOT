@@ -1,47 +1,137 @@
 'use strict';
-const test=require('node:test'),assert=require('node:assert/strict');
-const {normalizeKlines,buildFeatureRows}=require('../src/predictive/features');
-const {barrierOutcome,labeledRows}=require('../src/predictive/labels');
-const {trainSoftmax,predict}=require('../src/predictive/model');
-const {splitChronological,tradeSummary,fitAndEvaluate}=require('../src/predictive/evaluation');
-const {predictiveDecision}=require('../src/predictive/decision');
-const makeRows=(n=450)=>Array.from({length:n},(_,i)=>{
-  const open=100+i*0.001+Math.sin(i/8)*0.05,close=open+Math.sin(i/3)*0.01;
-  return [i*60000,open,Math.max(open,close)+0.035,Math.min(open,close)-0.035,close,100,i*60000+59999,1000,20,54,540];
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { normalizeKlines, buildFeatureRows } = require('../src/predictive/features');
+const { rewardRisk, simulateExit } = require('../src/predictive/trade-simulator');
+const { labeledRows } = require('../src/predictive/labels');
+const { train, predict } = require('../src/predictive/hit-first-model');
+const { splitChronological, chooseAction, simulate, trainAndEvaluate } =
+  require('../src/predictive/v2-evaluation');
+const { forecast, scoreForecast, scorePending, summary } =
+  require('../src/predictive/forward-evaluator');
+
+function klines(count = 850) {
+  return Array.from({ length: count }, (_, i) => {
+    const close = 100 + 0.0008 * i + Math.sin(i / 9) * 0.12;
+    const open = close - Math.sin(i / 3) * 0.012;
+    return [i * 60000, open, Math.max(open, close) + 0.08,
+      Math.min(open, close) - 0.08, close, 100, i * 60000 + 59999,
+      1000 + i / 10, 20, 50, 520 + i / 100];
+  });
+}
+
+const assumptions = { horizon: 15, targetPct: 0.9, stopPct: 0.3,
+  feePct: 0.05, slippagePct: 0.02, minNetRewardRisk: 1.5 };
+
+test('feature rows use only completed historic candles', () => {
+  const data = klines();
+  const original = buildFeatureRows(normalizeKlines(data.slice(0, 90)));
+  const changed = data.map((row, i) => i < 90 ? row : [
+    row[0], row[1] * 1.2, row[2] * 1.2, row[3] * 1.2,
+    row[4] * 1.2, row[5], row[6], row[7], row[8], row[9], row[10],
+  ]);
+  assert.deepEqual(original, buildFeatureRows(normalizeKlines(changed)).filter(row => row.index < 90));
 });
-test('features never require future candles',()=>{
-  const rows=makeRows(),original=normalizeKlines(rows);
-  const prior=buildFeatureRows(original.slice(0,80));
-  const revised=normalizeKlines(rows.map((r,i)=>i<80?r:[r[0],r[1]*1.1,r[2]*1.1,r[3]*1.1,r[4]*1.1,r[5],r[6],r[7],r[8],r[9],r[10]]));
-  assert.deepEqual(prior,buildFeatureRows(revised).filter(r=>r.index<80));
+
+test('gaps or malformed Binance candles fail closed', () => {
+  const data = klines(90);
+  data.splice(40, 1);
+  assert.throws(() => normalizeKlines(data), /Invalid or non-contiguous/);
 });
-test('invalid or missing candles reject safely',()=>{
-  const rows=makeRows(40);rows.splice(10,1);
-  assert.throws(()=>normalizeKlines(rows),/Invalid/);
-  assert.throws(()=>normalizeKlines(makeRows(3).map((r,i)=>i===1?[...r.slice(0,10),2000]:r)),/Invalid/);
+
+test('configured net reward/risk passes default and rejects low gross target', () => {
+  assert.ok(rewardRisk('LONG', assumptions).ratio >= 1.5);
+  assert.ok(rewardRisk('SHORT', assumptions).ratio >= 1.5);
+  assert.ok(rewardRisk('LONG', { ...assumptions, targetPct: 0.35 }).ratio < 1.5);
 });
-test('same-minute double barriers are not counted as a definite win',()=>{
-  const candles=normalizeKlines(makeRows(80)).map(row=>({...row}));
-  candles[31]={...candles[31],high:110,low:90};
-  assert.equal(barrierOutcome(candles,30,5,0.5,0.5).reason,'AMBIGUOUS_STOP_FIRST');
+
+test('simulator uses next candle open and counts ambiguous barriers as stop', () => {
+  const rows = normalizeKlines(klines(110));
+  rows[31] = { ...rows[31], open: rows[30].close,
+    high: rows[30].close * 1.05, low: rows[30].close * 0.95 };
+  const trade = simulateExit(rows, 30, 'LONG', assumptions);
+  assert.equal(trade.reason, 'STOP_AMBIGUOUS');
+  assert.equal(trade.targetHit, false);
+  assert.equal(trade.ambiguous, true);
+  assert.ok(trade.netPct < 0);
 });
-test('chronological train, validation and holdout are purged by horizon',()=>{
-  const candles=normalizeKlines(makeRows());
-  const options={horizon:10,targetPct:0.1,stopPct:0.1,feePct:0.05,slippagePct:0.02};
-  const rows=labeledRows(buildFeatureRows(candles),candles,options);
-  const {train,validation,holdout}=splitChronological(rows,options.horizon);
-  assert.ok(train.at(-1).index+options.horizon<validation[0].index);
-  assert.ok(validation.at(-1).index+options.horizon<holdout[0].index);
-  const model=trainSoftmax(train,{steps:15}),p=predict(model,train[0].x);
-  assert.ok(Math.abs(Object.values(p).reduce((a,b)=>a+b,0)-1)<1e-9);
-  assert.equal(tradeSummary(model,holdout,candles,{...options,confidence:1}).trades,0);
-  const result=fitAndEvaluate(rows,candles,options);
-  assert.ok(result.report.metrics.holdout.samples>0);
+
+test('gap through stop executes at open rather than ideal stop price', () => {
+  const rows = normalizeKlines(klines(110));
+  const gap = rows[30].close * 0.9;
+  rows[31] = { ...rows[31], open: gap, high: gap * 1.001, low: gap * 0.999 };
+  rows[32] = { ...rows[32], open: gap * 0.9, high: gap * 0.901, low: gap * 0.899 };
+  const trade = simulateExit(rows, 30, 'LONG', assumptions);
+  assert.equal(trade.reason, 'STOP_GAP');
+  assert.ok(trade.netPct < -0.3);
 });
-test('shadow decision is no-trade when model missing or signal stale',()=>{
-  assert.equal(predictiveDecision(null,null).action,'NO_TRADE');
-  const model=trainSoftmax([{x:[0],label:0},{x:[1],label:1},{x:[2],label:2}],{steps:10});
-  model.confidence=0.6;model.options={targetPct:1,stopPct:0.2};
-  assert.equal(predictiveDecision(model,{x:[1],time:1000},{now:300000}).action,'NO_TRADE');
-  assert.equal(predictiveDecision(model,{x:[1],time:1000},{now:2000}).mode,'SHADOW_ONLY');
+
+test('training labels reproduce the exact simulator per position side', () => {
+  const candles = normalizeKlines(klines());
+  const rows = labeledRows(buildFeatureRows(candles), candles, assumptions);
+  const sample = rows[50];
+  assert.equal(sample.longTrade.netPct,
+    simulateExit(candles, sample.index, 'LONG', assumptions).netPct);
+  assert.equal(sample.labelLong, Number(sample.longTrade.targetHit));
+  assert.equal(sample.labelShort, Number(sample.shortTrade.targetHit));
+});
+
+test('chronological split purges future-label overlap', () => {
+  const candles = normalizeKlines(klines());
+  const rows = labeledRows(buildFeatureRows(candles), candles, assumptions);
+  const split = splitChronological(rows, assumptions.horizon);
+  assert.ok(split.trainRows.at(-1).index + assumptions.horizon <
+    split.validation[0].index);
+  assert.ok(split.validation.at(-1).index + assumptions.horizon <
+    split.holdout[0].index);
+});
+
+test('two independent hit probabilities are finite and do not require summing to one', () => {
+  const candles = normalizeKlines(klines());
+  const rows = labeledRows(buildFeatureRows(candles), candles, assumptions);
+  const model = train(rows.slice(0, 130), { epochs: 5 });
+  const result = predict(model, rows[130].x);
+  assert.ok(result.longTarget >= 0 && result.longTarget <= 1);
+  assert.ok(result.shortTarget >= 0 && result.shortTarget <= 1);
+  assert.equal(chooseAction(model, rows[130], {
+    ...assumptions, threshold: 0.8, targetPct: 0.35,
+  }).action, 'NO_TRADE');
+});
+
+test('holdout research reports are generated without live approval', () => {
+  const candles = normalizeKlines(klines());
+  const rows = labeledRows(buildFeatureRows(candles), candles, assumptions);
+  const result = trainAndEvaluate(rows, assumptions);
+  assert.equal(result.model.approvedForTrading, false);
+  assert.equal(result.report.approvedForTrading, false);
+  assert.ok(result.report.holdoutMetrics.long.samples > 0);
+  assert.ok(simulate(result.model, rows.slice(-60), {
+    ...assumptions, threshold: 0.9,
+  }).trades >= 0);
+});
+
+test('forward evaluation waits for full horizon and does not submit orders', () => {
+  const candles = normalizeKlines(klines());
+  const rows = labeledRows(buildFeatureRows(candles), candles, assumptions);
+  const model = { ...train(rows.slice(0, 120), { epochs: 5 }), horizon: 15,
+    config: assumptions, threshold: 0.7, approvedForTrading: false };
+  const feature = buildFeatureRows(candles)[60];
+  const prediction = forecast(model, feature, 'BTCUSDT', feature.time + 2000);
+  assert.equal(prediction.mode, 'SHADOW_ONLY');
+  assert.equal(scoreForecast(prediction, candles.slice(0, feature.index + 14)), null);
+  const records = [prediction];
+  const updates = scorePending(records, candles);
+  assert.equal(updates.length, 1);
+  assert.equal(scorePending(records, candles).length, 0);
+  assert.equal(summary(records).evaluated, 1);
+  assert.ok(Number.isFinite(records[0].outcome.actualClose));
+});
+
+test('stale or unselected model only produces NO_TRADE', () => {
+  const model = { horizon: 30, config: assumptions, threshold: null,
+    approvedForTrading: false };
+  const decision = forecast(model, { time: 1000, close: 100 }, 'BTCUSDT', 250000);
+  assert.equal(decision.action, 'NO_TRADE');
+  assert.equal(decision.mode, 'SHADOW_ONLY');
 });
