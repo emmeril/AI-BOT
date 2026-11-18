@@ -1,29 +1,39 @@
-# Futures predictive shadow baseline
+# Predictive Futures V2: shadow-only research
 
-This is a **research-only** addition to AI-BOT. It does not place orders, access private trading keys, or modify the existing MA scalper, grid, Antigravity OAuth signal worker, or dashboard. It does not guarantee daily profits.
+Predictive V2 estimates the probability that a **LONG** or **SHORT** price target is reached before a stop. The probabilities are independently modeled and do not need to sum to one. This is research software, not a promise of daily profits.
 
-## Workflow
+## Run it
 
-1. Install existing dependencies with `npm install`.
-2. Fetch public, contiguous 1-minute USD-M futures candles: `node scripts/fetch-predictive-klines.js BTCUSDT 30`. Repeat for XRPUSDT and DOGEUSDT if needed. This requires Binance network access.
-3. Train and evaluate: `node scripts/train-predictive.js predictive-data/BTCUSDT-1m-30d.json predictive-results/BTCUSDT`.
-4. Read `predictive-results/BTCUSDT/report.json` and record the holdout metrics and assumptions. Results on artificially generated candles must never be advertised as real performance.
-5. Observe live market inference with `PREDICTIVE_MODEL_PATH=predictive-results/BTCUSDT/model.json PREDICTIVE_SYMBOL=BTCUSDT node scripts/start-predictive-shadow.js`. Data is public and signals are appended to `predictive-results/shadow.jsonl`. **No orders are submitted.**
-6. Run tests: `node --test tests/predictive-shadow.test.js`.
+1. Install the existing project dependencies: npm install
+2. Retrieve public Binance USD-M 1m history, e.g. npm run fetch:predictive -- BTCUSDT 30
+3. Train and evaluate three models: npm run train:predictive -- predictive-data/BTCUSDT-1m-30d.json predictive-results/BTCUSDT
+4. Examine report-15m.json, report-30m.json, and report-60m.json. Positive results from one holdout do not authorize trading.
+5. Run an isolated public-data-only observer:
+   PREDICTIVE_SYMBOL=BTCUSDT PREDICTIVE_MODEL_DIR=predictive-results/BTCUSDT npm run start:predictive-shadow
+6. The worker writes predictive-results/BTCUSDT-shadow-v2.json with each forecast, its outcome once the full horizon has elapsed, and no API keys or order requests.
 
-## Statistical design and safety
+Repeat for XRPUSDT and DOGEUSDT using separate data folders. The model is not trained on synthetic order book data.
 
-- Node.js softmax logistic regression baseline, no GPU or Python required, classes DOWN/SIDEWAYS/UP and trailing price, flow and volatility features.
-- Only complete contiguous Binance candles are accepted. No fabricated order book or open-interest history.
-- Future candles are used for labels only. Normalization is fitted on the **training period only**.
-- Three chronological periods: training (60%), validation (20%), untouched holdout (20%). A one-horizon gap prevents overlapping future labels across splits. Confidence is selected on validation, never on holdout.
-- Simulated entries use the next 1m open, stop-first for OHLC ambiguity, and estimated maker/taker trading fees and slippage. The default fee/slippage assumptions are illustrative; inspect actual account fees before interpreting results.
-- Reporting uses notional-relative percentage PnL. It is **not** wallet return and does not implement isolated margin, liquidation, funding, network latency, order book dynamics or complete portfolio-level risk.
-- Every generated model has `approved:false` and the shadow worker requires that explicit value. There is no LIVE mode or way to place an order in this module.
-- An exploratory positive holdout is not sufficient to approve live trading.
+## Trading assumptions for historical research
 
-## Future work before any live strategy
+The default horizons are 15m, 30m, 60m, each separately trained with target 0.9%, stop 0.3%, and simulated taker fee 0.05% plus slippage 0.02% per side. These are experiment assumptions, not measured live exchange costs. The full net reward/risk is evaluated using these amounts before a LONG or SHORT decision. Probability selection is fitted on validation data, not on the holdout.
 
-Collect real depth snapshot and delta stream, open interest and funding histories; perform full walk-forward backtests and calibration of estimated probabilities; implement side-specific triple barriers, time-of-day/market-regime filters, WIB daily profit/loss gates, transaction-level reconciliation, stop/position risk sizing, execution mutual exclusion, shadow outcome scoring, and testnet verification.
+A signal closes at next candle OPEN with entry slippage. The simulator treats stop/target thresholds relative to the entry fill. A stop gap is filled at candle OPEN (possibly worse than stop); an intrabar candle that touches both levels hits the stop first; a remaining position exits at the configured time horizon. The label and the backtest share this exact simulator, preventing conflicting target/stop definitions.
 
-A daily +1% target should be treated only as a possible stop-entry threshold, never a requirement or guarantee. Loss days and no-trade days are expected.
+Probability models use only completed candle history, taking both directions independently. Preprocessing uses training-window means and standard deviations. Training/validation/holdout use chronological 60/20/20 with purging equal to the label horizon.
+
+## Forward evaluation
+
+Each completed 1m candle creates up to three horizon-specific forecasts (LONG, SHORT, NO_TRADE). Forecasts are observed against real subsequent closed candles after 15, 30, or 60 minutes. The observer reports Brier scores, evaluated and pending counts, and **simulated**, not actual, PnL. If data gaps prevent evaluation, forecasts remain pending rather than inventing outcomes. Forecast state is written using an atomic file replacement, and completed prediction IDs prevent duplicate evaluations after restart.
+
+## Limitations and safeguards
+
+- No private Binance API keys, order creation, margin management or automatic live entry in V2.
+- The old MA scalper, grid and Antigravity worker remain unchanged. The old V1 model modules remain in the repository for compatibility, but the predictive training and shadow CLI use V2.
+- The module explicitly sets approvedForTrading:false.
+- Holdout is one chronological split, not a rolling walk-forward series. Probability calibration and predictive regime segmentation are future tasks.
+- The research simulation excludes funding, changing fee tiers, liquidations, network latency, exchange precision, variable order book spread, and account-level daily risk. PnL is percentage of traded notional, not wallet ROE.
+- Only the latest ~1000 public candles are fetched during a shadow cycle. Predictions that can no longer be reconstructed from this window stay pending and must be reconciled with historical candles.
+- Daily profit targets are neither guaranteed nor enforced in this research worker.
+
+Run: npm run test:predictive. Full project regression: npm test. Verify live market results in shadow before proposing a separate testnet implementation.
