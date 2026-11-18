@@ -46,7 +46,11 @@
     "reconcile:inventory": "node scripts/reconcile-spot-inventory.js",
     "test:scalper": "node --test tests/scalper-handoff.test.js tests/scalper-modules.test.js tests/dashboard.test.js tests/dashboard-assets.test.js",
     "test:ai-signal-shadow": "node --test tests/ai-signal-shadow.test.js",
-    "test": "node --test"
+    "test": "node --test",
+    "fetch:predictive": "node scripts/fetch-predictive-klines.js",
+    "train:predictive": "node scripts/train-predictive.js",
+    "start:predictive-shadow": "node scripts/start-predictive-shadow.js",
+    "test:predictive": "node --test tests/predictive-shadow.test.js"
   },
   "keywords": [],
   "author": "",
