@@ -6,8 +6,9 @@ const { normalizeKlines, buildFeatureRows } = require('../src/predictive/feature
 const { rewardRisk, simulateExit } = require('../src/predictive/trade-simulator');
 const { labeledRows } = require('../src/predictive/labels');
 const { train, predict } = require('../src/predictive/hit-first-model');
-const { splitChronological, chooseAction, simulate, trainAndEvaluate } =
+const { splitChronological, chooseAction, simulate, selectThreshold, trainAndEvaluate } =
   require('../src/predictive/v2-evaluation');
+const { trainHorizon } = require('../src/predictive/training');
 const { forecast, scoreForecast, scorePending, summary } =
   require('../src/predictive/forward-evaluator');
 
@@ -134,4 +135,84 @@ test('stale or unselected model only produces NO_TRADE', () => {
   const decision = forecast(model, { time: 1000, close: 100 }, 'BTCUSDT', 250000);
   assert.equal(decision.action, 'NO_TRADE');
   assert.equal(decision.mode, 'SHADOW_ONLY');
+  assert.equal(decision.reason, 'STALE_MARKET_DATA');
+});
+
+test('threshold selection rejects sparse and losing validation results', () => {
+  const candidate = (threshold, trades, netPctNotional) =>
+    ({ threshold, outcome: { trades, netPctNotional } });
+  assert.equal(selectThreshold([candidate(0.55, 9, 100)]).reason,
+    'INSUFFICIENT_VALIDATION_TRADES');
+  assert.equal(selectThreshold([candidate(0.55, 20, -1), candidate(0.6, 10, 0)]).reason,
+    'NO_POSITIVE_VALIDATION_EDGE');
+  const result = selectThreshold([candidate(0.55, 9, 100), candidate(0.6, 10, 2),
+    candidate(0.65, 15, 3), candidate(0.7, 40, -2)]);
+  assert.equal(result.threshold, 0.65);
+  assert.equal(result.reason, 'VALIDATION_SELECTED');
+});
+
+test('holdout outcomes cannot change threshold or fitted weights', () => {
+  const rows = Array.from({ length: 1000 }, (_, index) => ({
+    index, time: index * 60000, x: [index % 2 ? 1 : -1],
+    labelLong: index % 2, labelShort: 1 - index % 2,
+    longTrade: { exitIndex: index + 15, netPct: index % 2 ? 1 : -0.4 },
+    shortTrade: { exitIndex: index + 15, netPct: index % 2 ? -0.4 : 1 },
+  }));
+  const original = trainAndEvaluate(rows, assumptions);
+  const changed = trainAndEvaluate(rows.map((row, index) => index < 800 ? row :
+    { ...row, labelLong: 1 - row.labelLong, labelShort: 1 - row.labelShort,
+      longTrade: { ...row.longTrade, netPct: -10 }, shortTrade: { ...row.shortTrade, netPct: -10 } }),
+  assumptions);
+  assert.ok(Number.isFinite(original.model.threshold));
+  assert.deepEqual(original.model, changed.model);
+  assert.ok(original.report.holdout.netPctNotional > 0);
+  assert.ok(changed.report.holdout.netPctNotional < 0);
+  const feature = { ...rows[850], close: 100 };
+  const decision = forecast(original.model, feature, 'DOGEUSDT', feature.time + 2000);
+  assert.equal(decision.action, 'SHORT');
+  assert.equal(decision.reason, 'POSITIVE_MODELLED_EDGE');
+});
+
+test('parameter research reports every candidate and keeps unselected models blocked', () => {
+  const candles = normalizeKlines(klines());
+  const result = trainHorizon(buildFeatureRows(candles), candles, 15, 'doge-shadow');
+  const search = result.report.parameterSearch;
+  assert.equal(search.selectedOn, 'VALIDATION_ONLY');
+  assert.equal(search.candidates.length, 3);
+  assert.ok(search.candidates.every(candidate => !Object.hasOwn(candidate, 'holdout')));
+  assert.equal(result.model.threshold, null);
+  assert.equal(result.report.validation, null);
+  assert.equal(result.report.holdout, null);
+  assert.equal(search.selectedConfig, null);
+  assert.throws(() => trainHorizon([], [], 15, 'unknown'), /Unknown predictive profile/);
+});
+
+test('unselected models still record probabilities for forward evaluation', () => {
+  const candles = normalizeKlines(klines());
+  const rows = labeledRows(buildFeatureRows(candles), candles, assumptions);
+  const model = { ...train(rows.slice(0, 120), { epochs: 5 }), horizon: 15,
+    config: assumptions, threshold: null, approvedForTrading: false,
+    modelId: 'new-doge-model', selection: { reason: 'INSUFFICIENT_VALIDATION_TRADES' } };
+  const feature = rows[130];
+  const prediction = forecast(model, feature, 'DOGEUSDT', feature.time + 2000);
+  assert.equal(prediction.reason, 'MODEL_UNSELECTED');
+  assert.equal(prediction.selectionReason, 'INSUFFICIENT_VALIDATION_TRADES');
+  assert.equal(prediction.action, 'NO_TRADE');
+  assert.deepEqual(prediction.probabilities, predict(model, feature.x));
+  assert.notEqual(prediction.id, forecast({ ...model, modelId: 'old-doge-model' },
+    feature, 'DOGEUSDT', feature.time + 2000).id);
+  scorePending([prediction], candles);
+  const result = summary([prediction]);
+  assert.equal(result.calibration.longTarget.samples, 1);
+  assert.equal(result.simulatedTrades, 0);
+  assert.equal(result.reasons.MODEL_UNSELECTED, 1);
+});
+
+test('unsafe and stale models cannot produce probabilities or trade actions', () => {
+  const model = { threshold: 0.55, approvedForTrading: true };
+  assert.equal(forecast(model, { time: 1000 }, 'DOGEUSDT', 1001).reason, 'UNSAFE_MODEL');
+  const stale = forecast({ ...model, approvedForTrading: false },
+    { time: 1000 }, 'DOGEUSDT', 121001);
+  assert.equal(stale.reason, 'STALE_MARKET_DATA');
+  assert.equal(stale.probabilities, undefined);
 });

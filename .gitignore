@@ -28,6 +28,10 @@ pnpm-debug.log*
 *.log
 backtest-data/
 backtest-results/
+predictive-data/
+predictive-results/
+.venv-predictive/
+__pycache__/
 adaptive-grid-*.jsonl
 gemini-decision-scorecard-*.jsonl
 gemini-decision-scorecard-state.json

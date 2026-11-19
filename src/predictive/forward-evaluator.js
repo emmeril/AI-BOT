@@ -2,17 +2,26 @@
 
 const { settings, simulateExit } = require('./trade-simulator');
 const { chooseAction } = require('./v2-evaluation');
+const { predict } = require('./hit-first-model');
 
 function forecast(model, feature, symbol, now = Date.now()) {
-  const id = symbol + ':' + model?.horizon + ':' + feature?.time;
+  const id = symbol + ':' + model?.horizon + ':' + feature?.time +
+    (model?.modelId ? ':' + model.modelId : '');
   const base = { id, symbol, close: feature?.close ?? null,
     candleCloseTime: feature?.time ?? null, horizon: model?.horizon ?? null,
     mode: 'SHADOW_ONLY', createdAt: new Date(now).toISOString(),
-    assumptions: model?.config || null };
-  if (model?.approvedForTrading !== false || !Number.isFinite(model?.threshold) ||
-      !Number.isFinite(feature?.time) || feature.time > now ||
-      now - feature.time > 120000) {
-    return { ...base, action: 'NO_TRADE', reason: 'MODEL_UNSELECTED_OR_STALE' };
+    assumptions: model?.config || null, modelId: model?.modelId || null,
+    threshold: model?.threshold ?? null };
+  if (model?.approvedForTrading !== false) {
+    return { ...base, action: 'NO_TRADE', reason: 'UNSAFE_MODEL' };
+  }
+  if (!Number.isFinite(feature?.time) || feature.time > now || now - feature.time > 120000) {
+    return { ...base, action: 'NO_TRADE', reason: 'STALE_MARKET_DATA' };
+  }
+  if (!Number.isFinite(model?.threshold)) {
+    return { ...base, action: 'NO_TRADE', reason: 'MODEL_UNSELECTED',
+      selectionReason: model?.selection?.reason || 'MISSING_VALIDATED_THRESHOLD',
+      probabilities: predict(model, feature.x) };
   }
   return { ...base, ...chooseAction(model, feature, {
     ...model.config, threshold: model.threshold,
@@ -70,7 +79,11 @@ function summary(records) {
         return sum + (row.probabilities[side] - Number(actual)) ** 2;
       }, 0) / scored.length : null };
   }
-  return { forecasts: records.length, evaluated: completed.length,
+  const reasons = records.reduce((counts, row) => {
+    counts[row.reason] = (counts[row.reason] || 0) + 1;
+    return counts;
+  }, {});
+  return { forecasts: records.length, evaluated: completed.length, reasons,
     pending: records.length - completed.length, simulatedTrades: entered.length,
     simulatedNetPctNotional: netPct, winRate: entered.length ? positive.length / entered.length : null,
     grossProfitPct: positive.reduce((sum, row) =>

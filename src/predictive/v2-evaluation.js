@@ -1,7 +1,7 @@
 'use strict';
 
 const { train, predict } = require('./hit-first-model');
-const { settings, rewardRisk, simulateExit } = require('./trade-simulator');
+const { settings, rewardRisk } = require('./trade-simulator');
 
 function splitChronological(samples, horizon) {
   const n = samples.length;
@@ -87,28 +87,36 @@ function simulate(model, samples, config) {
     maxRealizedDrawdownPctNotional: drawdown, ambiguousExits: ambiguous, byOutcome };
 }
 
-function trainAndEvaluate(samples, assumptions = {}) {
+function selectThreshold(candidates) {
+  const enoughTrades = candidates.filter(item => item.outcome.trades >= 10);
+  const viable = enoughTrades.filter(item =>
+    Number.isFinite(item.outcome.netPctNotional) && item.outcome.netPctNotional > 0);
+  viable.sort((a, b) => b.outcome.netPctNotional - a.outcome.netPctNotional ||
+    b.threshold - a.threshold);
+  return { threshold: viable[0]?.threshold ?? null, minimumValidationTrades: 10,
+    reason: viable.length ? 'VALIDATION_SELECTED' : enoughTrades.length ?
+      'NO_POSITIVE_VALIDATION_EDGE' : 'INSUFFICIENT_VALIDATION_TRADES',
+    candidates };
+}
+
+function fitAndSelect(samples, assumptions = {}) {
   const config = settings(assumptions);
   const split = splitChronological(samples, config.horizon);
   const model = train(split.trainRows);
   const candidates = [0.55, 0.6, 0.65, 0.7, 0.75, 0.8].map(threshold => ({
     threshold, outcome: simulate(model, split.validation, { ...config, threshold }) }));
-  const viable = candidates.filter(item => item.outcome.trades >= 10);
-  viable.sort((a, b) => b.outcome.netPctNotional - a.outcome.netPctNotional);
-  const threshold = viable[0]?.threshold ?? null;
-  const configured = { ...config, threshold: threshold ?? 0.8 };
-  const validation = simulate(model, split.validation, configured);
-  const holdout = simulate(model, split.holdout, configured);
+  const selection = selectThreshold(candidates);
+  const threshold = selection.threshold;
+  const validation = threshold === null ? null :
+    candidates.find(item => item.threshold === threshold).outcome;
   const approvedForTrading = false;
   return {
     model: { ...model, horizon: config.horizon, config,
-      threshold, approvedForTrading },
+      threshold, selection, approvedForTrading },
     report: { horizon: config.horizon, boundaries: split.boundaries,
       trainingSamples: split.trainRows.length,
       validationMetrics: metrics(model, split.validation),
-      holdoutMetrics: metrics(model, split.holdout),
-      selection: { threshold, minimumValidationTrades: 10 },
-      validation, holdout, approvedForTrading,
+      selection, validation, approvedForTrading,
       limitations: [
         'Single 60/20/20 split, not full walk-forward optimization',
         'Open-candle gap and intrabar stops are conservative but cannot model exact fills',
@@ -119,4 +127,19 @@ function trainAndEvaluate(samples, assumptions = {}) {
   };
 }
 
-module.exports = { splitChronological, metrics, chooseAction, simulate, trainAndEvaluate };
+function evaluateHoldout(result, samples) {
+  const { model } = result;
+  const split = splitChronological(samples, model.horizon);
+  return { ...result, report: { ...result.report,
+    holdoutMetrics: metrics(model, split.holdout),
+    holdout: model.threshold === null ? null : simulate(model, split.holdout,
+      { ...model.config, threshold: model.threshold }),
+  } };
+}
+
+function trainAndEvaluate(samples, assumptions = {}) {
+  return evaluateHoldout(fitAndSelect(samples, assumptions), samples);
+}
+
+module.exports = { splitChronological, metrics, chooseAction, simulate,
+  selectThreshold, fitAndSelect, evaluateHoldout, trainAndEvaluate };

@@ -49,8 +49,10 @@
     "test": "node --test",
     "fetch:predictive": "node scripts/fetch-predictive-klines.js",
     "train:predictive": "node scripts/train-predictive.js",
+    "train:predictive-exits": "node scripts/train-predictive-exits.js",
+    "research:predictive": "OPENBLAS_NUM_THREADS=2 node scripts/research-predictive-direction.js",
     "start:predictive-shadow": "node scripts/start-predictive-shadow.js",
-    "test:predictive": "node --test tests/predictive-shadow.test.js"
+    "test:predictive": "node --test tests/predictive-shadow.test.js tests/predictive-direction.test.js tests/predictive-exits.test.js"
   },
   "keywords": [],
   "author": "",
