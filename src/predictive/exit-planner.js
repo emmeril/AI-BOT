@@ -2,6 +2,7 @@
 
 const { SCHEMA, NAMES } = require('./direction-features');
 const { predictTreeMargins, validateBoostedClassifier } = require('./boosted-classifier');
+const { sizeExitPlan } = require('./shadow-sizing');
 
 const KIND = 'predictive-excursion-quantiles-v1';
 const QUANTILES = Object.freeze([0.25, 0.5, 0.75]);
@@ -98,7 +99,7 @@ function planExit(forecast, model, features, options = {}) {
   const feePct = Number(options.feePct ?? 0.05), slippagePct = Number(options.slippagePct ?? 0.02);
   if (![feePct, slippagePct].every(value => Number.isFinite(value) && value >= 0)) throw new Error('Invalid exit cost assumptions');
   const roundTripCostsPct = 2 * (feePct + slippagePct);
-  return { ...base, status: 'ESTIMATED', side: long ? 'LONG' : 'SHORT',
+  return sizeExitPlan({ ...base, status: 'ESTIMATED', side: long ? 'LONG' : 'SHORT',
     entryReference, referenceBasis: 'SIGNAL_CANDLE_CLOSE', referenceTime: forecast.candleCloseTime,
     expiresAt: forecast.targetCloseTime, horizon: forecast.horizon, takeProfit, stopLoss,
     targetPct, stopPct, rewardRisk: targetPct / stopPct,
@@ -107,7 +108,7 @@ function planExit(forecast, model, features, options = {}) {
     costAssumptions: { feePctPerSide: feePct, slippagePctPerSide: slippagePct },
     estimatedNetRewardRisk: (targetPct - roundTripCostsPct) / (stopPct + roundTripCostsPct),
     coversEstimatedCosts: targetPct > roundTripCostsPct,
-    method: 'HISTORICAL_EXCURSION_QUANTILES' };
+    method: 'HISTORICAL_EXCURSION_QUANTILES' });
 }
 
 module.exports = { KIND, QUANTILES, excursionScale, excursionLabels, validateExitModel,

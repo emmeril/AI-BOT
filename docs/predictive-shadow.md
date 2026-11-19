@@ -99,3 +99,40 @@ Plans show cost coverage using assumed taker fees of 0.05% and slippage of 0.02%
 Forward evaluation preserves the frozen plan and records `exitOutcome` after the horizon closes. The simulation enters at the next candle open with entry slippage, skips entry gaps outside the original protection levels, fills later stop gaps at the candle open, and treats simultaneous intrabar TP/SL touches as SL first. It includes exit slippage and fees. Counts and mean simulated percentage per forecast appear under `exitPlans`; overlapping forecasts are not aggregated as a portfolio return. Historical reports use unrounded reference levels; live shadow plans use the fetched tick.
 
 Existing direction-only state remains readable. Only newly created forecasts receive exit plans; plans are not reconstructed retroactively for earlier forecasts. If exit models are missing or incompatible, direction forecasts continue with an explicit unavailable exit estimate.
+
+## Fixed 100 USDT shadow sizing
+
+Each simulated trade uses a fixed **100 USDT position notional**, with `compounding:false`. Profit or loss does not change the next trade's notional. This is the position value, not a simulated starting wallet or a margin allocation. Quantity is calculated as `100 / entryPrice` using the simulated entry fill; quantity precision and funding are not modeled.
+
+Plans record `sizing:FIXED_NOTIONAL` and `notionalUsdt:100`. Completed outcomes include the executed notional, quantity, gross PnL, fees and `simulatedNetUsdt`. The percentage result is preserved: `simulatedNetUsdt = simulatedNetPct / 100 * 100`. Skipped entry gaps have zero executed notional and quantity, and no simulated net PnL.
+
+On state load, existing plans and completed percentage outcomes gain the same fixed sizing and USDT conversion. This does not change their direction probabilities, levels, entry/exit prices or percentage returns. The conversion is idempotent and does not charge fees a second time.
+
+`exitPlans` summaries report net wins/losses, net winrate, total simulated net USDT and mean net USDT per trade. These totals cover the retained independent forecasts, including completed timeouts and excluding skipped entries. Forecasts overlap, so the summed result is not a portfolio return or a wallet balance. Order sizing remains 100 USDT regardless of the reported total.
+
+## Separate manual live profile
+
+The live profile is prepared for DOGEUSDT, the current 60-minute direction model, fixed 5 USDT margin and 10x isolated leverage. Its target notional is 50 USDT. Quantity rounds down with a small sizing buffer and must satisfy Binance's minimum quantity and notional limits. The shadow observer keeps its independent 100 USDT normalization.
+
+The local `.env.predictive-live` is based on `predictive-live-env.example` and defaults to `PREDICTIVE_LIVE_ENABLED=false`. API credentials are read from `.env.futures` without copying them into the profile. Both files are ignored by Git. Run this read-only check to inspect balance, market limits, existing DOGE positions/orders and a current forecast:
+
+```bash
+npm run check:predictive-live
+```
+
+The check never changes leverage or margin mode and never submits, cancels or tests an exchange order, even if an inherited environment contains an activation flag. It reports the current exchange leverage separately from the requested 10x. Exit status 2 and `BLOCKED_BY_FORWARD_RESULTS` mean the current 60-minute evidence does not meet the requested criteria: direction accuracy above 50% and net winrate above 50%. Both metrics must have completed observations; exactly 50% does not pass. Aggregate net shadow PnL remains visible in the report but does not block entry, following the operator's revised selection rule. These criteria describe the user's experimental selection rule; overlapping shadow samples are not independent proof of live profitability.
+
+Only the operator can activate the execution worker explicitly. The following command is an activation command that can begin placing real orders when the configured criteria pass:
+
+```bash
+PREDICTIVE_LIVE_ENABLED=true pm2 start /root/AI-BOT/scripts/start-predictive-live.js --name ai-predictive-live --cwd /root/AI-BOT --time --kill-timeout 65000 -- --run
+pm2 save
+```
+
+On user activation, the worker configures and verifies isolated 10x leverage before new entries. It uses the account's existing Hedge or One-way Mode and requires DOGE to be flat and free of orders at initial activation. It allows one DOGE position at a time and rechecks fresh 60-minute forecasts and the performance criteria before each new entry. Profit does not increase the 5 USDT margin target. The session drawdown guard pauses new entries after USDT wallet loss reaches 5 USDT relative to the recorded session start; fills, gaps, fees, funding and other account activity can cause the actual change to differ or exceed that threshold.
+
+An entry intent and deterministic client ID are saved before submission. Uncertain submissions are queried by that ID without another entry. SL is installed before TP using Binance's conditional order endpoint, `closePosition:true`, the appropriate position side, and `CONTRACT_PRICE` triggers to match the shadow price basis. Quantity and reduce-only are omitted on these close-all algo orders, as required by the [Binance USD-M trade API](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/trade). Both protections must be confirmed; failure invokes a reducing safety close. Expiry closes at the original forecast target time. Only this worker's conditional orders are cleaned up after the owned position is confirmed flat.
+
+Restart state retains the owned entry, forecast and protection IDs. A process mutex prevents duplicate copies of this worker. Existing or externally modified DOGE exposure is not adopted. Trading pauses on ambiguous entry outcomes, protection failures, external position-size changes, or the session loss threshold. Protective management continues for tracked positions while new entries are paused. A stopped worker leaves exchange-side TP/SL orders in place; stopping PM2 does not itself close a position or perform the timed expiry exit.
+
+Run `npm run test:predictive-live` for mocked execution tests. These exercise network ambiguity, ownership, protection repair/failure, horizon exits, sizing, disabled execution, and read-only checks without making exchange trades. The complete repository suite is `npm test`.

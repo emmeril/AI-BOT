@@ -12,6 +12,8 @@ const { predictTreeMargins, predictBoosted } = require('../src/predictive/booste
 const { scoreExitPlan, exitSummary } = require('../src/predictive/exit-evaluator');
 const { scorePendingDirection } = require('../src/predictive/direction-forward');
 const { loadExitModels, fetchPriceTick } = require('../scripts/start-predictive-shadow');
+const { loadState, saveState } = require('../scripts/start-predictive-shadow');
+const { accountExitOutcome, normalizeFixedSizing } = require('../src/predictive/shadow-sizing');
 
 function features(volatility = 0) {
   const x = Array(NAMES.length).fill(0);
@@ -79,6 +81,9 @@ test('direction determines LONG or SHORT plans while direction probabilities rem
   assert.equal(long.targetQuantile, 0.5);
   assert.equal(long.stopQuantile, 0.75);
   assert.equal(long.executionAllowed, false);
+  assert.equal(long.notionalUsdt, 100);
+  assert.equal(long.sizing, 'FIXED_NOTIONAL');
+  assert.equal(long.compounding, false);
   assert.equal(long.expiresAt, original.targetCloseTime);
 });
 
@@ -129,13 +134,92 @@ test('entry gaps are skipped and later stop gaps fill at the adverse candle open
   const f = forecast(), data = candles();
   f.exitPlan = planExit(f, exitModel(), features(), { feePct: 0, slippagePct: 0 });
   data[1].open = 101;
-  assert.equal(scoreExitPlan(f, data).result, 'SKIPPED_ENTRY_GAP');
+  const skipped = scoreExitPlan(f, data);
+  assert.equal(skipped.result, 'SKIPPED_ENTRY_GAP');
+  assert.equal(skipped.executedNotionalUsdt, 0);
+  assert.equal(skipped.quantity, 0);
+  assert.equal(skipped.simulatedNetUsdt, null);
   data[1].open = 100;
   data[2] = { ...data[2], open: 98, high: 98.01, low: 97.99, close: 98 };
   const result = scoreExitPlan(f, data);
   assert.equal(result.result, 'SL_GAP');
   assert.equal(result.exitPrice, 98);
   assert.equal(scoreExitPlan(f, data.filter((_, i) => i !== 7)), null);
+});
+
+test('each completed shadow trade uses fixed 100 USDT even after previous wins or losses', () => {
+  const plan = { side: 'LONG', costAssumptions: { feePctPerSide: 0 } };
+  const results = [201, 196, 204].map(exitPrice => accountExitOutcome({
+    result: 'TIMEOUT', entryPrice: 200, exitPrice,
+    simulatedNetPct: (exitPrice / 200 - 1) * 100,
+  }, plan));
+  for (const result of results) {
+    assert.equal(result.executedNotionalUsdt, 100);
+    assert.equal(result.quantity, 0.5);
+    assert.equal(result.compounding, false);
+    assert.ok(Math.abs(result.grossPnlUsdt - result.simulatedNetUsdt) < 1e-10);
+  }
+  const cheaper = accountExitOutcome({ result: 'TP', entryPrice: 50, exitPrice: 51, simulatedNetPct: 2 }, plan);
+  assert.equal(cheaper.executedNotionalUsdt, 100);
+  assert.equal(cheaper.quantity, 2);
+  assert.equal(cheaper.simulatedNetUsdt, 2);
+});
+
+test('100 USDT monetary outcomes reconcile with original net percentages after fees', () => {
+  const f = forecast(), data = candles();
+  f.exitPlan = planExit(f, exitModel(), features());
+  data[1].high = 101;
+  const result = scoreExitPlan(f, data);
+  assert.equal(result.executedNotionalUsdt, 100);
+  assert.equal(result.entryPrice * result.quantity, 100);
+  assert.ok(result.feesUsdt > 0);
+  assert.ok(Math.abs(result.grossPnlUsdt - result.feesUsdt - result.simulatedNetUsdt) < 1e-10);
+  assert.ok(Math.abs(result.simulatedNetUsdt - result.simulatedNetPct) < 1e-10);
+});
+
+test('legacy completed outcomes gain fixed sizing without changing prices, percentages or counts', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'predictive-fixed-sizing-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const f = forecast(), data = candles();
+  f.exitPlan = planExit(f, exitModel(), features());
+  data[1].high = 101;
+  const completed = scoreExitPlan(f, data);
+  f.exitOutcome = { result: completed.result, entryPrice: completed.entryPrice,
+    exitPrice: completed.exitPrice, simulatedNetPct: completed.simulatedNetPct, simulatedOnly: true };
+  delete f.exitPlan.notionalUsdt; delete f.exitPlan.sizing; delete f.exitPlan.compounding;
+  const original = structuredClone(f);
+  const file = path.join(directory, 'state.json');
+  saveState(file, { version: 2, objective: 'PRICE_DIRECTION', records: [f] });
+  const state = loadState(file, 'DOGEUSDT');
+  assert.equal(state.records.length, 1);
+  assert.equal(state.records[0].exitPlan.notionalUsdt, 100);
+  assert.equal(state.records[0].exitOutcome.simulatedNetPct, original.exitOutcome.simulatedNetPct);
+  assert.equal(state.records[0].exitOutcome.entryPrice, original.exitOutcome.entryPrice);
+  assert.equal(state.records[0].exitOutcome.exitPrice, original.exitOutcome.exitPrice);
+  assert.equal(state.simulationSizing.compounding, false);
+  const once = structuredClone(state);
+  normalizeFixedSizing(state.records);
+  assert.deepEqual(state, once);
+  saveState(file, state);
+  assert.deepEqual(loadState(file, 'DOGEUSDT'), state);
+});
+
+test('fixed-notional summaries separate accumulated USDT results from order sizing and skipped entries', () => {
+  const records = [1, -2, 0].map(simulatedNetPct => ({ exitPlan: { status: 'ESTIMATED' },
+    exitOutcome: { result: 'TIMEOUT', simulatedNetPct } }));
+  records.push({ exitPlan: { status: 'ESTIMATED' },
+    exitOutcome: { result: 'SKIPPED_ENTRY_GAP', simulatedNetPct: null } });
+  const summary = exitSummary(records);
+  assert.equal(summary.notionalUsdtPerTrade, 100);
+  assert.equal(summary.compounding, false);
+  assert.equal(summary.simulatedTrades, 3);
+  assert.equal(summary.netWins, 1);
+  assert.equal(summary.netLosses, 1);
+  assert.equal(summary.breakeven, 1);
+  assert.equal(summary.netWinRate, 1 / 3);
+  assert.equal(summary.totalSimulatedNetUsdt, -1);
+  assert.equal(summary.meanSimulatedNetUsdtPerTrade, -1 / 3);
+  assert.equal(summary.overlappingForecastsAreNotAPortfolio, true);
 });
 
 test('quantile tree outputs are excursions, and cannot be interpreted as direction probabilities', () => {

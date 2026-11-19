@@ -1,5 +1,7 @@
 'use strict';
 
+const { NOTIONAL_USDT, simulationSizing, accountExitOutcome } = require('./shadow-sizing');
+
 function scoreExitPlan(forecast, candles, referenceIndex) {
   const plan = forecast.exitPlan;
   if (plan?.status !== 'ESTIMATED') return null;
@@ -12,7 +14,8 @@ function scoreExitPlan(forecast, candles, referenceIndex) {
   const first = candles[start + 1];
   const entry = first.open * (1 + direction * slip);
   if (long ? entry >= plan.takeProfit || entry <= plan.stopLoss : entry <= plan.takeProfit || entry >= plan.stopLoss) {
-    return { result: 'SKIPPED_ENTRY_GAP', simulatedOnly: true, entryPrice: entry, simulatedNetPct: null };
+    return accountExitOutcome({ result: 'SKIPPED_ENTRY_GAP', simulatedOnly: true,
+      entryPrice: entry, simulatedNetPct: null }, plan);
   }
   let exit = candles[start + forecast.horizon].close, result = 'TIMEOUT', ambiguous = false;
   for (let i = start + 1; i <= start + forecast.horizon; i++) {
@@ -28,19 +31,28 @@ function scoreExitPlan(forecast, candles, referenceIndex) {
     if (target) { exit = plan.takeProfit; result = 'TP'; break; }
   }
   const exitFill = exit * (1 - direction * slip);
-  return { result, ambiguous, simulatedOnly: true, entryPrice: entry, exitPrice: exitFill,
-    simulatedNetPct: (direction * (exitFill / entry - 1) - fee * (1 + exitFill / entry)) * 100 };
+  return accountExitOutcome({ result, ambiguous, simulatedOnly: true, entryPrice: entry, exitPrice: exitFill,
+    simulatedNetPct: (direction * (exitFill / entry - 1) - fee * (1 + exitFill / entry)) * 100 }, plan);
 }
 
 function exitSummary(records) {
   const planned = records.filter(r => r.exitPlan?.status === 'ESTIMATED');
   const evaluated = planned.filter(r => r.exitOutcome);
   const simulated = evaluated.filter(r => Number.isFinite(r.exitOutcome.simulatedNetPct));
-  return { planned: planned.length, evaluated: evaluated.length, pending: planned.length - evaluated.length,
+  const netUsdt = simulated.map(r => r.exitOutcome.simulatedNetPct / 100 * NOTIONAL_USDT);
+  const wins = netUsdt.filter(value => value > 0).length;
+  const losses = netUsdt.filter(value => value < 0).length;
+  const total = netUsdt.reduce((sum, value) => sum + value, 0);
+  return { ...simulationSizing(), planned: planned.length, evaluated: evaluated.length, pending: planned.length - evaluated.length,
     results: evaluated.reduce((counts, r) => {
       counts[r.exitOutcome.result] = (counts[r.exitOutcome.result] || 0) + 1; return counts;
     }, {}), meanSimulatedNetPctPerForecast: simulated.length ?
       simulated.reduce((sum, r) => sum + r.exitOutcome.simulatedNetPct, 0) / simulated.length : null,
+    simulatedTrades: simulated.length, netWins: wins, netLosses: losses,
+    breakeven: simulated.length - wins - losses,
+    netWinRate: simulated.length ? wins / simulated.length : null,
+    totalSimulatedNetUsdt: total, meanSimulatedNetUsdtPerTrade: simulated.length ? total / simulated.length : null,
+    aggregateScope: 'RETAINED_INDEPENDENT_FORECASTS',
     simulatedOnly: true, overlappingForecastsAreNotAPortfolio: true };
 }
 

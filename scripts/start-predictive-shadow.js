@@ -8,6 +8,7 @@ const { normalizeKlines, buildFeatureRows } = require('../src/predictive/feature
 const { validateDirectionModel } = require('../src/predictive/direction-model');
 const { SCHEMA, buildDirectionFeatures } = require('../src/predictive/direction-features');
 const { validateExitModel, planExit } = require('../src/predictive/exit-planner');
+const { simulationSizing, normalizeFixedSizing } = require('../src/predictive/shadow-sizing');
 const { forecastDirection, scorePendingDirection, directionSummary } =
   require('../src/predictive/direction-forward');
 
@@ -19,9 +20,12 @@ function loadState(file, symbol) {
           (symbol && record.symbol !== symbol))) {
       throw new Error('Incompatible shadow state; use a separate file for price direction forecasts');
     }
+    normalizeFixedSizing(data.records);
+    data.simulationSizing = simulationSizing();
     return data;
   } catch (error) {
-    if (error.code === 'ENOENT') return { version: 2, objective: 'PRICE_DIRECTION', records: [] };
+    if (error.code === 'ENOENT') return { version: 2, objective: 'PRICE_DIRECTION',
+      simulationSizing: simulationSizing(), records: [] };
     throw error;
   }
 }
@@ -120,6 +124,7 @@ async function main() {
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   console.log('[PREDICTIVE V2] PRICE_DIRECTION SHADOW_ONLY ' + symbol);
+  console.log('[PREDICTIVE V2] ' + JSON.stringify({ simulationSizing: simulationSizing() }));
   for (const model of models) {
     console.log('[PREDICTIVE V2] ' + JSON.stringify({ horizon: model.horizon,
       modelId: model.modelId, objective: model.objective, temperature: model.temperature,
