@@ -45,6 +45,24 @@ function buildPrompt(snapshots, options = {}) {
   const operatingContext = options.liveEnabled
     ? 'Your output may authorize an automated LONG or SHORT entry when it passes the configured confidence and freshness checks.'
     : 'Your output is being recorded for observation only and will not control trading.';
+  if (options.purpose === 'PREDICTIVE_ENTRY_REVIEW') {
+    return `Review the supplied DOGEUSDT predictive entry candidates for Binance USD-M perpetual markets.
+${operatingContext}
+You cannot place or manage orders. Do not use tools, files, web access, memory, or outside facts.
+Analyze only the supplied completed 1-minute candles and the causal 5, 15, 60 and 240 minute window summaries.
+The existing statistical model already selected the direction, stop and net-risk TP1/TP2 candidates.
+Your role is to approve that candidate direction or choose HOLD. Never reverse a candidate, invent targets, widen its stop, change sizing, or bypass its cost and risk checks.
+For each supplied symbol return exactly one decision using the required JSON schema:
+- LONG only to approve a LONG candidate with supporting trend, momentum, taker flow and acceptable volatility.
+- SHORT only to approve a SHORT candidate with supporting trend, momentum, taker flow and acceptable volatility.
+- HOLD when the supplied candidate is unsupported, its expected net is nonpositive, evidence conflicts, volatility is dangerous, or data is insufficient.
+- horizonMinutes must be "60". Assess the remaining time until candidate.expiresAt, rather than assuming a new full hour.
+- Confidence is a subjective assessment, not a measured probability of profit. Do not claim guaranteed profit or invent future prices.
+- The execution worker independently rechecks costs and price, and may adjust TP1/TP2 using its frozen net-risk policy at the actual quote and fill.
+
+Input candidates:
+${JSON.stringify(snapshots)}`;
+  }
   return `You are producing directional forecasts for Binance USD-M perpetual markets.
 ${operatingContext}
 You cannot place or manage orders. Analyze only the supplied numeric data from completed 15-minute candles. Do not use tools, files, web access, memory, or outside facts.
@@ -146,8 +164,11 @@ async function requestAntigravity(snapshots, options = {}) {
   delete childEnvironment.GEMINI_API_KEY;
   delete childEnvironment.GOOGLE_API_KEY;
   delete childEnvironment.GOOGLE_APPLICATION_CREDENTIALS;
+  for (const key of Object.keys(childEnvironment)) {
+    if (/^(EXCHANGE_|BINANCE_)/.test(key)) delete childEnvironment[key];
+  }
   const args = [
-    '-p', buildPrompt(snapshots, { liveEnabled: Boolean(options.liveEnabled) }),
+    '-p', buildPrompt(snapshots, { liveEnabled: Boolean(options.liveEnabled), purpose: options.purpose }),
     '--output-format', 'json',
     '--json-schema', JSON.stringify(OUTPUT_SCHEMA),
     '--mode', 'plan',
@@ -163,7 +184,8 @@ async function requestAntigravity(snapshots, options = {}) {
     result = await runner(binary, args, {
       cwd: os.tmpdir(),
       env: childEnvironment,
-      timeout: timeoutMs + 5000,
+      timeout: options.strictDeadline ? timeoutMs : timeoutMs + 5000,
+      ...(options.signal ? { signal: options.signal } : {}),
       maxBuffer: 2 * 1024 * 1024,
       windowsHide: true,
     });
@@ -180,7 +202,7 @@ async function requestAntigravity(snapshots, options = {}) {
     decisions: normalizeDecisions(
       parsed.payload,
       snapshots.map(snapshot => snapshot.symbol),
-      Number(options.minimumConfidence) || 65
+      Number(options.minimumConfidence ?? 65)
     ),
     metadata: parsed.metadata,
   };

@@ -56,7 +56,7 @@
     "start:predictive-shadow": "node scripts/start-predictive-shadow.js",
     "check:predictive-live": "node scripts/start-predictive-live.js --check",
     "test:predictive-live": "node --test tests/predictive-live.test.js",
-    "test:predictive": "node --test tests/predictive-shadow.test.js tests/predictive-direction.test.js tests/predictive-exits.test.js tests/predictive-reachability.test.js tests/predictive-adaptive-exits.test.js tests/predictive-live.test.js"
+    "test:predictive": "node --test tests/predictive-shadow.test.js tests/predictive-direction.test.js tests/predictive-exits.test.js tests/predictive-reachability.test.js tests/predictive-adaptive-exits.test.js tests/predictive-ai-review.test.js tests/predictive-live.test.js tests/ai-signal-shadow.test.js"
   },
   "keywords": [],
   "author": "",

@@ -12,6 +12,8 @@ const { validateExitModel, planExit } = require('../src/predictive/exit-planner'
 const { simulationSizing, normalizeFixedSizing } = require('../src/predictive/shadow-sizing');
 const { ADAPTIVE_KIND, validateReachability } = require('../src/predictive/reachability');
 const { ADAPTIVE_POLICY_ID } = require('../src/predictive/adaptive-exits');
+const { buildAiReviewConfig, candidateFingerprint } = require('../src/predictive/ai-review-policy');
+const { PredictiveAiReviewService } = require('../src/predictive/ai-review-service');
 const { forecastDirection, scorePendingDirection, directionSummary } =
   require('../src/predictive/direction-forward');
 
@@ -124,7 +126,10 @@ function loadReachabilityModels(directory, symbol, directionModels, exitModels, 
 }
 
 async function main() {
-  require('dotenv').config({ path: path.resolve('.env.futures'), quiet: true });
+  const dotenv = require('dotenv');
+  dotenv.config({ path: path.resolve('.env.futures'), quiet: true });
+  const profileFile = path.resolve(__dirname, '..', '.env.predictive-live');
+  const environment = { ...(fs.existsSync(profileFile) ? dotenv.parse(fs.readFileSync(profileFile)) : {}), ...process.env };
   const symbol = String(process.env.PREDICTIVE_SYMBOL || 'DOGEUSDT');
   if (!/^[A-Z0-9]{6,20}$/.test(symbol)) throw new Error('Invalid PREDICTIVE_SYMBOL');
   const modelDir = path.resolve(process.env.PREDICTIVE_MODEL_DIR ||
@@ -151,6 +156,16 @@ async function main() {
   const statePath = path.resolve(process.env.PREDICTIVE_SHADOW_STATE_FILE ||
     path.join('predictive-results', symbol + '-adaptive-shadow-v5.json'));
   const state = loadState(statePath, symbol);
+  const aiReviewConfig = buildAiReviewConfig(environment);
+  const latestLiveForecast = () => state.records.filter(row => row.symbol === symbol && row.horizon === 60)
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.candleCloseTime - a.candleCloseTime)[0];
+  const reviewer = aiReviewConfig.enabled ? new PredictiveAiReviewService({ config: aiReviewConfig, environment,
+    isCurrent: forecast => {
+      const latest = latestLiveForecast();
+      return latest?.id === forecast.id && candidateFingerprint(latest) === candidateFingerprint(forecast);
+    },
+    onUpdate: result => console.log('[PREDICTIVE AI] ' + JSON.stringify(result)),
+  }) : null;
   const ccxt = require('ccxt');
   const exchange = new ccxt.binanceusdm({ enableRateLimit: true,
     options: { fetchCurrencies: false } });
@@ -159,11 +174,13 @@ async function main() {
   catch (error) { console.error('[PREDICTIVE EXITS] Using unrounded indicative prices: ' + error.message); }
   let running = true;
   const shutdown = new AbortController();
-  const stop = () => { running = false; shutdown.abort(); };
+  const stop = () => { running = false; shutdown.abort(); void reviewer?.stop(); };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   console.log('[PREDICTIVE V2] PRICE_DIRECTION SHADOW_ONLY ' + symbol);
   console.log('[PREDICTIVE V2] ' + JSON.stringify({ simulationSizing: simulationSizing(), riskPolicyId: ADAPTIVE_POLICY_ID }));
+  console.log('[PREDICTIVE AI] ' + JSON.stringify({ enabled: aiReviewConfig.enabled,
+    model: aiReviewConfig.model, timeoutMs: aiReviewConfig.timeoutMs, stateFile: aiReviewConfig.stateFile }));
   for (const model of models) {
     console.log('[PREDICTIVE V2] ' + JSON.stringify({ horizon: model.horizon,
       modelId: model.modelId, objective: model.objective, temperature: model.temperature,
@@ -215,6 +232,10 @@ async function main() {
           ...pending].sort((a, b) => a.candleCloseTime - b.candleCloseTime);
       }
       saveState(statePath, state);
+      if (reviewer) {
+        try { reviewer.consider(latestLiveForecast(), candles); }
+        catch (error) { console.error('[PREDICTIVE AI] ' + String(error.message)); }
+      }
       if (newPredictions || outcomes.length) {
         console.log('[PREDICTIVE V2] ' + JSON.stringify(directionSummary(state.records)));
       }
@@ -227,6 +248,7 @@ async function main() {
       });
     }
   }
+  await reviewer?.stop();
 }
 
 if (require.main === module) {

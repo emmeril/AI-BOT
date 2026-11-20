@@ -118,6 +118,9 @@ test('Antigravity OAuth invocation strips API credentials from its child process
       GEMINI_API_KEY: 'must-not-pass',
       GOOGLE_API_KEY: 'must-not-pass',
       GOOGLE_APPLICATION_CREDENTIALS: '/must/not/pass.json',
+      EXCHANGE_API_KEY: 'exchange-key-must-not-pass',
+      EXCHANGE_SECRET: 'exchange-secret-must-not-pass',
+      BINANCE_API_KEY: 'binance-key-must-not-pass',
     },
     execFile: async (_binary, _args, options) => {
       childOptions = options;
@@ -141,6 +144,31 @@ test('Antigravity OAuth invocation strips API credentials from its child process
   assert.equal(childOptions.env.GEMINI_API_KEY, undefined);
   assert.equal(childOptions.env.GOOGLE_API_KEY, undefined);
   assert.equal(childOptions.env.GOOGLE_APPLICATION_CREDENTIALS, undefined);
+  assert.equal(childOptions.env.EXCHANGE_API_KEY, undefined);
+  assert.equal(childOptions.env.EXCHANGE_SECRET, undefined);
+  assert.equal(childOptions.env.BINANCE_API_KEY, undefined);
+});
+
+test('predictive entry review prompt evaluates frozen candidates with a strict subprocess deadline', async () => {
+  let argumentsUsed, optionsUsed;
+  const controller = new AbortController();
+  await requestAntigravity([{ symbol: 'DOGEUSDT', candidate: { side: 'LONG', expectedNetPct: 0.1 } }], {
+    purpose: 'PREDICTIVE_ENTRY_REVIEW', liveEnabled: true, timeoutMs: 30000,
+    strictDeadline: true, signal: controller.signal,
+    execFile: async (_binary, args, options) => {
+      argumentsUsed = args; optionsUsed = options;
+      return { stdout: JSON.stringify({ status: 'SUCCESS', structured_output: { decisions: [{
+        symbol: 'DOGEUSDT', action: 'HOLD', confidence: 70, horizonMinutes: '60', risk: 'MEDIUM',
+        reasonCodes: ['CONFLICT'], reason: 'Candidate is unsupported.',
+      }] } }) };
+    },
+  });
+  assert.equal(optionsUsed.timeout, 30000);
+  assert.equal(optionsUsed.signal, controller.signal);
+  assert.match(argumentsUsed[1], /approve that candidate direction or choose HOLD/);
+  assert.match(argumentsUsed[1], /Never reverse a candidate/);
+  assert.match(argumentsUsed[1], /completed 1-minute candles/);
+  assert.match(argumentsUsed[1], /may authorize an automated LONG or SHORT entry/);
 });
 
 test('forward scoring evaluates long and short directions without look-ahead', () => {

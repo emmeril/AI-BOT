@@ -42,7 +42,7 @@ async function main() {
     const report = await engine.preflight();
     console.log(JSON.stringify({ ...report, orderExecutionEnabled: false,
       inspectedAt: new Date().toISOString(), checkWasReadOnly: true }, null, 2));
-    if (!report.evidence.matchesUserCriteria) process.exitCode = 2;
+    if (!report.evidence.matchesUserCriteria || report.aiReview?.approved === false) process.exitCode = 2;
     return;
   }
   fs.mkdirSync(path.dirname(config.stateFile), { recursive: true });
@@ -53,6 +53,8 @@ async function main() {
   await mutex.run('DOGEUSDT-predictive-60m', async () => {
     if (!engine.state.tracked && !engine.state.intent && !engine.state.pausedReason) await engine.configureAccount();
     console.log('[PREDICTIVE LIVE] DOGEUSDT horizon=60 margin=5USDT leverage=10 notionalTarget=50USDT isolated one-position');
+    console.log('[PREDICTIVE LIVE] ' + JSON.stringify({ aiReviewRequired: config.aiReview.enabled,
+      aiReviewModel: config.aiReview.model, aiReviewTimeoutMs: config.aiReview.timeoutMs, aiReviewStateFile: config.aiReview.stateFile }));
     while (!shutdown.signal.aborted) {
       try {
         const result = await engine.cycle();

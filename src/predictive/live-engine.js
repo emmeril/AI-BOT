@@ -9,6 +9,8 @@ const { validateDirectionModel } = require('./direction-model');
 const { RISK_POLICY_ID } = require('./net-risk-reward');
 const { ADAPTIVE_KIND, validateReachability, planReachableTargets } = require('./reachability');
 const { ADAPTIVE_POLICY_ID } = require('./adaptive-exits');
+const { assessAiReview } = require('./ai-review-policy');
+const { loadAiReviewState } = require('./ai-review-service');
 
 const TERMINAL_ORDER_STATUSES = new Set(['FILLED', 'CANCELED', 'REJECTED', 'EXPIRED', 'EXPIRED_IN_MATCH']);
 
@@ -32,12 +34,13 @@ function saveLiveState(file, state) {
 }
 
 class PredictiveLiveEngine {
-  constructor({ config, exchange, state, save, readForecasts, now = Date.now }) {
+  constructor({ config, exchange, state, save, readForecasts, readAiReviews, now = Date.now }) {
     this.config = config;
     this.exchange = exchange;
     this.state = state || loadLiveState(config.stateFile);
     this.save = save || (() => saveLiveState(config.stateFile, this.state));
     this.readForecasts = readForecasts || (() => JSON.parse(fs.readFileSync(config.forecastFile)));
+    this.readAiReviews = readAiReviews || (() => loadAiReviewState(config.aiReview.stateFile));
     this.now = now;
     const model = JSON.parse(fs.readFileSync(config.modelFile));
     validateDirectionModel(model, config.symbol);
@@ -67,6 +70,30 @@ class PredictiveLiveEngine {
   async positionSnapshot() {
     const rows = await this.exchange.fapiPrivateV3GetPositionRisk({ symbol: this.config.symbol });
     return { positions: openPositions(rows) };
+  }
+
+  reviewEntry(forecast) {
+    let state;
+    if (this.config.aiReview.enabled) {
+      try { state = this.readAiReviews(); }
+      catch { return { enabled: true, approved: false, reason: 'AI_REVIEW_UNAVAILABLE' }; }
+    }
+    return assessAiReview(forecast, state, this.config.aiReview, this.now());
+  }
+
+  assertEntryReview(plan) {
+    if (!this.config.aiReview.enabled) return;
+    if (!Number.isFinite(plan.quoteTime) || plan.quoteTime > this.now() + 2000 || this.now() - plan.quoteTime > 10000) {
+      throw new Error('Entry quote expired before submission');
+    }
+    const forecast = selectLiveForecast(this.readForecasts(), this.config, this.expectedModelId,
+      this.now(), this.expectedReachabilityModelId);
+    const review = this.reviewEntry(forecast);
+    if (forecast.id !== plan.forecastId || review.approved !== true ||
+        plan.aiReview?.reviewId !== review.reviewId ||
+        plan.aiReview?.candidateFingerprint !== review.candidateFingerprint) {
+      throw new Error('Entry AI approval changed or expired: ' + review.reason);
+    }
   }
 
   async snapshot() {
@@ -109,15 +136,17 @@ class PredictiveLiveEngine {
     const source = this.readForecasts();
     const evidence = candidateEvidence(source, this.config, this.expectedModelId, this.expectedReachabilityModelId);
     const forecast = selectLiveForecast(source, this.config, this.expectedModelId, this.now(), this.expectedReachabilityModelId);
+    const aiReview = this.reviewEntry(forecast);
     const plan = buildEntryPlan(this.config, forecast, snapshot.market, snapshot.book, snapshot.availableUsdt,
       snapshot.hedgeMode, this.now(), this.reachabilityModel);
-    return { status: evidence.matchesUserCriteria ? 'CONFIGURATION_VERIFIED_READ_ONLY' : 'BLOCKED_BY_FORWARD_RESULTS',
+    return { status: !evidence.matchesUserCriteria ? 'BLOCKED_BY_FORWARD_RESULTS' :
+      !aiReview.approved ? 'BLOCKED_BY_AI_REVIEW' : 'CONFIGURATION_VERIFIED_READ_ONLY',
       orderExecutionEnabled: false,
       availableUsdt: snapshot.availableUsdt, walletUsdt: snapshot.walletUsdt,
       currentLeverage: Number(snapshot.settings.leverage), requestedLeverage: this.config.leverage,
       currentMarginType: snapshot.settings.marginType, requestedMarginType: 'ISOLATED',
       hedgeMode: snapshot.hedgeMode, maxOpenPositions: 1, sessionLossBudgetUsdt: this.config.sessionLossBudgetUsdt,
-      directionModelId: this.expectedModelId, reachabilityModelId: this.expectedReachabilityModelId, evidence, plan };
+      directionModelId: this.expectedModelId, reachabilityModelId: this.expectedReachabilityModelId, evidence, aiReview, plan };
   }
 
   async configureAccount() {
@@ -189,9 +218,18 @@ class PredictiveLiveEngine {
 
   async enter(plan) {
     this.assertEnabled();
+    this.assertEntryReview(plan);
+    const previouslyConsumed = this.state.consumedForecastId;
     this.state.consumedForecastId = plan.forecastId;
     this.state.intent = { plan, submittedAt: this.now() };
     this.save();
+    try { this.assertEntryReview(plan); }
+    catch (error) {
+      this.state.intent = null;
+      this.state.consumedForecastId = previouslyConsumed;
+      this.save();
+      throw error;
+    }
     try {
       const order = await this.exchange.fapiPrivatePostOrder({ symbol: plan.symbol, side: plan.orderSide,
         positionSide: plan.positionSide, type: 'MARKET', quantity: plan.quantity,
@@ -438,8 +476,11 @@ class PredictiveLiveEngine {
       throw error;
     }
     if (forecast.id === this.state.consumedForecastId) return { status: 'WAITING', reason: 'FORECAST_ALREADY_CONSUMED' };
+    const aiReview = this.reviewEntry(forecast);
+    if (!aiReview.approved) return { status: 'WAITING', reason: aiReview.reason, aiReview, evidence };
     const plan = buildEntryPlan(this.config, forecast, snapshot.market, snapshot.book, snapshot.availableUsdt,
       snapshot.hedgeMode, this.now(), this.reachabilityModel);
+    if (aiReview.enabled) plan.aiReview = aiReview;
     await this.enter(plan);
     return { status: this.state.tracked ? 'POSITION_OPEN' : this.state.intent ? 'ENTRY_PENDING' : 'FLAT' };
   }

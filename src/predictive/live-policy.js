@@ -6,6 +6,7 @@ const { RISK_POLICY_ID } = require('./net-risk-reward');
 const { planReachableTargets } = require('./reachability');
 const { ADAPTIVE_POLICY_ID } = require('./adaptive-exits');
 const { sequentialExitRecords } = require('./exit-evaluator');
+const { buildAiReviewConfig } = require('./ai-review-policy');
 
 const PREFIX = 'p60-';
 const asBoolean = value => value === true || value === 'true';
@@ -18,6 +19,7 @@ function buildLiveConfig(environment = {}) {
     marginUsdt: Number(environment.PREDICTIVE_LIVE_MARGIN_USDT || 5),
     leverage: Number(environment.PREDICTIVE_LIVE_LEVERAGE || 10),
     sessionLossBudgetUsdt: Number(environment.PREDICTIVE_LIVE_LOSS_BUDGET_USDT || 5),
+    aiReview: buildAiReviewConfig(environment),
     feeReserveUsdt: 0.1, intervalMs: 5000, maxForecastAgeMs: 120000,
     riskPolicyId: environment.PREDICTIVE_LIVE_RISK_POLICY_ID || ADAPTIVE_POLICY_ID,
     forecastFile: path.resolve(environment.PREDICTIVE_LIVE_FORECAST_FILE || 'predictive-results/DOGEUSDT-adaptive-shadow-v5.json'),
@@ -157,6 +159,7 @@ function buildEntryPlan(config, forecast, market, book, availableBalance, hedgeM
     quantity, targetMarginUsdt: config.marginUsdt, leverage: config.leverage,
     targetNotionalUsdt: config.notionalUsdt, estimatedNotionalUsdt: notional,
     estimatedMarginUsdt: notional / config.leverage, estimatedEntry,
+    quoteTime: Number(book.time),
     ...risk,
     modelRangeQ75: forecast.exitPlan.modelRangeQ75, tick, expiresAt: forecast.targetCloseTime, token,
     entryClientId: `${PREFIX}e-${token}`, stopClientId: `${PREFIX}sl-${token}`,

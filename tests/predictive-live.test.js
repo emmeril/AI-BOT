@@ -12,6 +12,7 @@ const { RISK_POLICY_ID } = require('../src/predictive/net-risk-reward');
 const { ADAPTIVE_POLICY_ID } = require('../src/predictive/adaptive-exits');
 const { planReachableTargets } = require('../src/predictive/reachability');
 const { reachabilityFixture, adaptiveReachabilityFixture, contextFeatures, setReachThreshold } = require('./helpers/reachability-fixture');
+const { AI_REVIEW_POLICY_ID, candidateFingerprint, forecastReviewExpiry } = require('../src/predictive/ai-review-policy');
 
 function forecast(now, direction = 'UP', id = 'forecast-1', adaptive = false) {
   const reference = now - 30000;
@@ -23,6 +24,7 @@ function forecast(now, direction = 'UP', id = 'forecast-1', adaptive = false) {
     costAssumptions: { feePctPerSide: 0.05, slippagePctPerSide: 0.02 } });
   return { id, symbol: 'DOGEUSDT', horizon: 60, objective: 'PRICE_DIRECTION', status: 'FORECAST',
     modelId: 'frozen-60-model', direction, candleCloseTime: reference,
+    referencePrice: 0.05912, probabilities: { up: 0.55, down: 0.4, unchanged: 0.05 },
     createdAt: new Date(now - 10000).toISOString(), targetCloseTime: reference + 3600000,
     exitPlan: { status: 'ESTIMATED', directionModelId: 'frozen-60-model', exitModelId: 'frozen-exit-60-model',
       ...risk,
@@ -43,6 +45,8 @@ function fixture(t, options = {}) {
     PREDICTIVE_LIVE_RISK_POLICY_ID: options.adaptive ? ADAPTIVE_POLICY_ID : RISK_POLICY_ID,
     PREDICTIVE_LIVE_MODEL_FILE: modelFile, PREDICTIVE_LIVE_STATE_FILE: path.join(dir, 'state.json'),
     PREDICTIVE_LIVE_REACHABILITY_MODEL_FILE: path.join(dir, 'reachability.json'),
+    PREDICTIVE_AI_REVIEW_ENABLED: options.aiReview ? 'true' : 'false',
+    PREDICTIVE_AI_REVIEW_STATE_FILE: path.join(dir, 'ai-reviews.json'),
     PREDICTIVE_LIVE_EXIT_MODEL_FILE: path.join(dir, 'exit-model.json') });
   fs.writeFileSync(config.exitModelFile, JSON.stringify({ modelId: 'frozen-exit-60-model' }));
   const reachability = options.adaptive ? adaptiveReachabilityFixture() :
@@ -109,7 +113,8 @@ function fixture(t, options = {}) {
   const state = loadLiveState(config.stateFile);
   state.initialWalletUsdt = context.wallet;
   let engine = new PredictiveLiveEngine({ config, exchange, state, now: () => context.now,
-    readForecasts: () => context.forecasts, save: () => context.saved.push(clone(engine.state)) });
+    readForecasts: () => context.forecasts, readAiReviews: () => context.aiReviews,
+    save: () => context.saved.push(clone(engine.state)) });
   return { context, config, exchange, engine, market, dir };
 }
 
@@ -804,3 +809,116 @@ for (const code of [-2022, -2024]) {
     assert.equal(context.writes.filter(r => r.method === 'order').length, 2);
   });
 }
+
+function approveAi(context, config) {
+  const f = context.forecasts.records[0];
+  const row = { id: 'approved-ai-review', forecastId: f.id, policyId: AI_REVIEW_POLICY_ID,
+    configId: config.aiReview.configId, model: config.aiReview.model,
+    candidateFingerprint: candidateFingerprint(f), status: 'APPROVED', requestedAt: context.now - 5000,
+    completedAt: context.now - 1000, expiresAt: forecastReviewExpiry(f),
+    decision: { symbol: f.symbol, action: f.exitPlan.side, requestedAction: f.exitPlan.side,
+      horizonMinutes: 60, confidence: 80, risk: 'MEDIUM', reasonCodes: ['TREND'], reason: 'Candidate supported.' } };
+  context.aiReviews = { version: 1, policyId: AI_REVIEW_POLICY_ID, enabled: true,
+    configId: config.aiReview.configId, model: config.aiReview.model, reviews: [row] };
+  return row;
+}
+
+test('AI filter blocks live entry until an exact, fresh approval is available', async t => {
+  const { engine, context, config } = fixture(t, { adaptive: true, aiReview: true });
+  assert.equal((await engine.cycle()).reason, 'AI_REVIEW_UNAVAILABLE');
+  assert.equal(context.writes.length, 0);
+  const row = approveAi(context, config);
+  row.status = 'PENDING'; row.reason = 'AI_REVIEW_PENDING';
+  assert.equal((await engine.cycle()).reason, 'AI_REVIEW_PENDING');
+  assert.equal(context.writes.length, 0);
+  row.status = 'APPROVED';
+  await engine.cycle();
+  assert.equal(context.writes.filter(r => r.method === 'order').length, 1);
+  assert.equal(context.algorithms.length, 2);
+  assert.equal(engine.state.tracked.plan.aiReview.reviewId, row.id);
+});
+
+test('AI rejection, malformed state, opposite direction and stale approval cannot submit an entry', async t => {
+  for (const change of [
+    row => { row.status = 'REJECTED'; row.reason = 'AI_REVIEW_HOLD'; },
+    row => { row.decision.action = 'SHORT'; },
+    row => { row.decision.confidence = 64; },
+    row => { row.decision.horizonMinutes = 240; },
+    row => { row.candidateFingerprint = 'different-candidate'; },
+    row => { row.completedAt = row.requestedAt + 30001; },
+  ]) {
+    const { engine, context, config } = fixture(t, { adaptive: true, aiReview: true });
+    change(approveAi(context, config));
+    assert.equal((await engine.cycle()).status, 'WAITING');
+    assert.equal(context.writes.length, 0);
+    engine.readAiReviews = () => { throw new SyntaxError('Incomplete review file'); };
+    assert.equal((await engine.cycle()).reason, 'AI_REVIEW_UNAVAILABLE');
+    assert.equal(context.writes.length, 0);
+  }
+});
+
+test('read-only preflight reports an AI block without submitting or configuring orders', async t => {
+  const { engine, context } = fixture(t, { adaptive: true, aiReview: true, enabled: false });
+  const report = await engine.preflight();
+  assert.equal(report.status, 'BLOCKED_BY_AI_REVIEW');
+  assert.equal(report.aiReview.approved, false);
+  assert.equal(report.orderExecutionEnabled, false);
+  assert.equal(context.writes.length, 0);
+});
+
+test('AI approval is rechecked immediately before persisting an entry intent', async t => {
+  const { engine, context, config } = fixture(t, { adaptive: true, aiReview: true });
+  const row = approveAi(context, config);
+  let reads = 0;
+  engine.readAiReviews = () => {
+    if (++reads > 1) row.status = 'REJECTED';
+    return context.aiReviews;
+  };
+  await assert.rejects(engine.cycle(), /approval changed or expired/);
+  assert.equal(engine.state.intent, null);
+  assert.equal(engine.state.consumedForecastId, null);
+  assert.equal(context.writes.length, 0);
+});
+
+test('AI outage or rejection after entry cannot block protective repair or horizon close', async t => {
+  const { engine, context, config } = fixture(t, { adaptive: true, aiReview: true });
+  approveAi(context, config);
+  await engine.cycle();
+  engine.readAiReviews = () => { throw new Error('AI is offline'); };
+  context.algorithms = context.algorithms.filter(o => o.type !== 'STOP_MARKET');
+  await engine.cycle();
+  assert.equal(context.algorithms.length, 2);
+  context.now = engine.state.tracked.plan.expiresAt + 1;
+  await engine.cycle(); await engine.cycle();
+  assert.equal(engine.state.tracked, null);
+  assert.equal(context.writes.filter(r => r.method === 'order').length, 2);
+  assert.equal(engine.state.closed.at(-1).reason, 'HORIZON_EXPIRED');
+});
+
+test('approval revoked while saving an unsent entry cannot leave an intent or submit an order', async t => {
+  const { engine, context, config } = fixture(t, { adaptive: true, aiReview: true });
+  const row = approveAi(context, config), save = engine.save;
+  engine.save = () => {
+    save();
+    if (engine.state.intent) row.status = 'REJECTED';
+  };
+  await assert.rejects(engine.cycle(), /approval changed or expired/);
+  assert.equal(engine.state.intent, null);
+  assert.equal(engine.state.consumedForecastId, null);
+  assert.equal(context.writes.length, 0);
+});
+
+test('a quote that expires while saving an entry is rejected before order submission', async t => {
+  const { engine, context, config } = fixture(t, { adaptive: true, aiReview: true });
+  approveAi(context, config);
+  const save = engine.save;
+  let advanced = false;
+  engine.save = () => {
+    save();
+    if (engine.state.intent && !advanced) { context.now += 11000; advanced = true; }
+  };
+  await assert.rejects(engine.cycle(), /quote expired/);
+  assert.equal(engine.state.intent, null);
+  assert.equal(engine.state.consumedForecastId, null);
+  assert.equal(context.writes.length, 0);
+});
