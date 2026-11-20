@@ -55,6 +55,7 @@ class PredictiveAiReviewService {
     this.state.enabled = this.config.enabled;
     this.state.model = this.config.model;
     this.state.effort = this.config.effort;
+    this.state.failureMode = this.config.failureMode;
     this.state.configId = this.config.configId;
     this.state.timeoutMs = this.config.timeoutMs;
     this.state.reviews = this.state.reviews.slice(-this.config.historyLimit);

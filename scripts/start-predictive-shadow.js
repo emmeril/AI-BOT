@@ -186,7 +186,8 @@ async function main() {
   console.log('[PREDICTIVE V2] PRICE_DIRECTION SHADOW_ONLY ' + symbol);
   console.log('[PREDICTIVE V2] ' + JSON.stringify({ simulationSizing: simulationSizing(), riskPolicyId: ADAPTIVE_POLICY_ID }));
   console.log('[PREDICTIVE AI] ' + JSON.stringify({ enabled: aiReviewConfig.enabled,
-    model: aiReviewConfig.model, timeoutMs: aiReviewConfig.timeoutMs, stateFile: aiReviewConfig.stateFile }));
+    model: aiReviewConfig.model, failureMode: aiReviewConfig.failureMode,
+    timeoutMs: aiReviewConfig.timeoutMs, stateFile: aiReviewConfig.stateFile }));
   for (const model of models) {
     console.log('[PREDICTIVE V2] ' + JSON.stringify({ horizon: model.horizon,
       modelId: model.modelId, objective: model.objective, temperature: model.temperature,

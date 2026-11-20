@@ -46,6 +46,7 @@ function fixture(t, options = {}) {
     PREDICTIVE_LIVE_MODEL_FILE: modelFile, PREDICTIVE_LIVE_STATE_FILE: path.join(dir, 'state.json'),
     PREDICTIVE_LIVE_REACHABILITY_MODEL_FILE: path.join(dir, 'reachability.json'),
     PREDICTIVE_AI_REVIEW_ENABLED: options.aiReview ? 'true' : 'false',
+    PREDICTIVE_AI_REVIEW_FAILURE_MODE: options.aiFailureMode || 'BLOCK',
     PREDICTIVE_AI_REVIEW_STATE_FILE: path.join(dir, 'ai-reviews.json'),
     PREDICTIVE_LIVE_EXIT_MODEL_FILE: path.join(dir, 'exit-model.json') });
   fs.writeFileSync(config.exitModelFile, JSON.stringify({ modelId: 'frozen-exit-60-model' }));
@@ -920,5 +921,124 @@ test('a quote that expires while saving an entry is rejected before order submis
   await assert.rejects(engine.cycle(), /quote expired/);
   assert.equal(engine.state.intent, null);
   assert.equal(engine.state.consumedForecastId, null);
+  assert.equal(context.writes.length, 0);
+});
+
+test('primary fallback can submit and protect a baseline trade during an AI outage', async t => {
+  for (const failure of ['provider', 'timeout', 'missing', 'unreadable']) {
+    const { engine, context, config } = fixture(t, { adaptive: true, aiReview: true, aiFailureMode: 'PRIMARY_FALLBACK' });
+    if (['provider', 'timeout'].includes(failure)) {
+      Object.assign(approveAi(context, config), { status: 'UNAVAILABLE',
+        reason: failure === 'timeout' ? 'AI_REVIEW_TIMEOUT' : 'AI_REVIEW_PROVIDER_ERROR' });
+    }
+    if (failure === 'unreadable') engine.readAiReviews = () => { throw new SyntaxError('AI file unavailable'); };
+    if (failure !== 'provider') context.now += 31000;
+    const result = await engine.cycle();
+    assert.equal(result.status, 'POSITION_OPEN', failure);
+    assert.equal(result.aiReview.fallback, true);
+    assert.equal(result.aiReview.aiApproved, false);
+    assert.equal(engine.state.tracked.plan.aiReview.reason, 'AI_REVIEW_PRIMARY_FALLBACK');
+    assert.equal(context.writes.filter(r => r.method === 'order').length, 1);
+    assert.equal(context.algorithms.length, 2);
+    assert.ok(engine.state.tracked.quantity * engine.state.tracked.entryPrice <= 50);
+    engine.readAiReviews = () => { throw new Error('AI remains offline'); };
+    context.now = engine.state.tracked.plan.expiresAt + 1;
+    await engine.cycle(); await engine.cycle();
+    assert.equal(engine.state.tracked, null);
+    assert.equal(engine.state.closed.at(-1).reason, 'HORIZON_EXPIRED');
+  }
+});
+
+test('primary fallback waits for a healthy review instead of racing missing or pending results', async t => {
+  for (const pending of [false, true]) {
+    const { engine, context, config } = fixture(t, { adaptive: true, aiReview: true, aiFailureMode: 'PRIMARY_FALLBACK' });
+    if (pending) Object.assign(approveAi(context, config), { status: 'PENDING', reason: 'AI_REVIEW_PENDING' });
+    assert.equal((await engine.cycle()).status, 'WAITING');
+    assert.equal(context.writes.length, 0);
+    context.now += 31000;
+    assert.equal((await engine.cycle()).status, 'POSITION_OPEN');
+    assert.equal(engine.state.tracked.plan.aiReview.fallback, true);
+  }
+});
+
+test('primary fallback cannot bypass Gemini HOLD, conflict, low confidence or high risk', async t => {
+  for (const [change, reason] of [
+    [{ action: 'HOLD' }, 'AI_REVIEW_HOLD'], [{ action: 'SHORT' }, 'AI_REVIEW_DIRECTION_CONFLICT'],
+    [{ confidence: 64 }, 'AI_REVIEW_LOW_CONFIDENCE'], [{ risk: 'HIGH' }, 'AI_REVIEW_HIGH_RISK'],
+  ]) {
+    const { engine, context, config } = fixture(t, { adaptive: true, aiReview: true, aiFailureMode: 'PRIMARY_FALLBACK' });
+    const row = approveAi(context, config);
+    Object.assign(row, { status: 'REJECTED', reason }); Object.assign(row.decision, change);
+    context.now += 31000;
+    assert.equal((await engine.cycle()).reason, reason);
+    assert.equal(context.writes.length, 0);
+  }
+});
+
+test('primary fallback preserves the original profitability and account risk gates', async t => {
+  for (const block of [
+    context => { context.wallet -= 5; },
+    context => { context.forecasts.records[0].exitPlan.expectedNetPct = 0; },
+    context => { context.evidence.forEach(row => { row.outcome.correct = false; }); },
+    context => { context.available = 4; },
+  ]) {
+    const { engine, context, config } = fixture(t, { adaptive: true, aiReview: true, aiFailureMode: 'PRIMARY_FALLBACK' });
+    Object.assign(approveAi(context, config), { status: 'UNAVAILABLE', reason: 'AI_REVIEW_PROVIDER_ERROR' });
+    block(context);
+    try { await engine.cycle(); }
+    catch (error) { assert.match(error.message, /Insufficient free USDT/); }
+    assert.equal(context.writes.length, 0);
+    assert.equal(engine.state.tracked, null);
+  }
+});
+
+test('a Gemini veto arriving during fallback preparation still cancels the unsent trade', async t => {
+  for (const duringSave of [false, true]) {
+    const { engine, context, config } = fixture(t, { adaptive: true, aiReview: true, aiFailureMode: 'PRIMARY_FALLBACK' });
+    const row = approveAi(context, config);
+    Object.assign(row, { status: 'UNAVAILABLE', reason: 'AI_REVIEW_PROVIDER_ERROR' });
+    const veto = () => Object.assign(row, { status: 'REJECTED', reason: 'AI_REVIEW_HOLD' });
+    if (duringSave) {
+      const save = engine.save;
+      engine.save = () => { save(); if (engine.state.intent) veto(); };
+    } else {
+      let reads = 0;
+      engine.readAiReviews = () => { if (++reads > 1) veto(); return context.aiReviews; };
+    }
+    await assert.rejects(engine.cycle(), /approval changed or expired/);
+    assert.equal(engine.state.intent, null);
+    assert.equal(engine.state.consumedForecastId, null);
+    assert.equal(context.writes.length, 0);
+  }
+});
+
+test('entry records whether AI recovery or failure changed the permitted route before submission', async t => {
+  for (const recovery of [false, true]) {
+    const { engine, context, config } = fixture(t, { adaptive: true, aiReview: true, aiFailureMode: 'PRIMARY_FALLBACK' });
+    const row = approveAi(context, config);
+    if (recovery) Object.assign(row, { status: 'UNAVAILABLE', reason: 'AI_REVIEW_PROVIDER_ERROR' });
+    let reads = 0;
+    engine.readAiReviews = () => {
+      if (++reads > 1) Object.assign(row, { id: 'updated-review',
+        status: recovery ? 'APPROVED' : 'UNAVAILABLE', reason: recovery ? 'AI_REVIEW_APPROVED' : 'AI_REVIEW_PROVIDER_ERROR' });
+      return context.aiReviews;
+    };
+    assert.equal((await engine.cycle()).status, 'POSITION_OPEN');
+    assert.equal(engine.state.tracked.plan.aiReview.aiApproved, recovery);
+    assert.equal(Boolean(engine.state.tracked.plan.aiReview.fallback), !recovery);
+    assert.equal(engine.state.tracked.plan.aiReview.reviewId, 'updated-review');
+  }
+});
+
+test('a primary fallback cannot submit a plan after its underlying TP/SL candidate changed', async t => {
+  const { engine, context, config } = fixture(t, { adaptive: true, aiReview: true, aiFailureMode: 'PRIMARY_FALLBACK' });
+  Object.assign(approveAi(context, config), { status: 'UNAVAILABLE', reason: 'AI_REVIEW_PROVIDER_ERROR' });
+  context.now += 31000;
+  let reads = 0;
+  engine.readAiReviews = () => {
+    if (++reads > 1) context.forecasts.records[0].exitPlan.stopLoss += 0.00001;
+    return context.aiReviews;
+  };
+  await assert.rejects(engine.cycle(), /approval changed or expired/);
   assert.equal(context.writes.length, 0);
 });

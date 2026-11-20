@@ -76,7 +76,7 @@ class PredictiveLiveEngine {
     let state;
     if (this.config.aiReview.enabled) {
       try { state = this.readAiReviews(); }
-      catch { return { enabled: true, approved: false, reason: 'AI_REVIEW_UNAVAILABLE' }; }
+      catch { state = null; }
     }
     return assessAiReview(forecast, state, this.config.aiReview, this.now());
   }
@@ -90,10 +90,11 @@ class PredictiveLiveEngine {
       this.now(), this.expectedReachabilityModelId);
     const review = this.reviewEntry(forecast);
     if (forecast.id !== plan.forecastId || review.approved !== true ||
-        plan.aiReview?.reviewId !== review.reviewId ||
+        (this.config.aiReview.failureMode !== 'PRIMARY_FALLBACK' && plan.aiReview?.reviewId !== review.reviewId) ||
         plan.aiReview?.candidateFingerprint !== review.candidateFingerprint) {
       throw new Error('Entry AI approval changed or expired: ' + review.reason);
     }
+    plan.aiReview = review;
   }
 
   async snapshot() {
@@ -482,7 +483,8 @@ class PredictiveLiveEngine {
       snapshot.hedgeMode, this.now(), this.reachabilityModel);
     if (aiReview.enabled) plan.aiReview = aiReview;
     await this.enter(plan);
-    return { status: this.state.tracked ? 'POSITION_OPEN' : this.state.intent ? 'ENTRY_PENDING' : 'FLAT' };
+    return { status: this.state.tracked ? 'POSITION_OPEN' : this.state.intent ? 'ENTRY_PENDING' : 'FLAT',
+      aiReview: plan.aiReview || aiReview };
   }
 }
 

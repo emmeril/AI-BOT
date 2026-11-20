@@ -53,7 +53,9 @@ async function main() {
   await mutex.run('DOGEUSDT-predictive-60m', async () => {
     if (!engine.state.tracked && !engine.state.intent && !engine.state.pausedReason) await engine.configureAccount();
     console.log('[PREDICTIVE LIVE] DOGEUSDT horizon=60 margin=5USDT leverage=10 notionalTarget=50USDT isolated one-position');
-    console.log('[PREDICTIVE LIVE] ' + JSON.stringify({ aiReviewRequired: config.aiReview.enabled,
+    console.log('[PREDICTIVE LIVE] ' + JSON.stringify({ aiReviewEnabled: config.aiReview.enabled,
+      aiReviewRequired: config.aiReview.enabled && config.aiReview.failureMode === 'BLOCK',
+      aiReviewFailureMode: config.aiReview.failureMode,
       aiReviewModel: config.aiReview.model, aiReviewTimeoutMs: config.aiReview.timeoutMs, aiReviewStateFile: config.aiReview.stateFile }));
     while (!shutdown.signal.aborted) {
       try {

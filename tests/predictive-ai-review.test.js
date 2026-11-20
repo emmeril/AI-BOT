@@ -70,6 +70,9 @@ test('AI review configuration keeps a hard 30 second maximum and is opt-in', () 
   assert.equal(config().timeoutMs, 30000);
   assert.equal(config().model, 'gemini-3.8-flash-high');
   assert.equal(config().effort, 'high');
+  assert.equal(config().failureMode, 'BLOCK');
+  assert.notEqual(config({ PREDICTIVE_AI_REVIEW_FAILURE_MODE: 'PRIMARY_FALLBACK' }).configId, config().configId);
+  assert.throws(() => config({ PREDICTIVE_AI_REVIEW_FAILURE_MODE: 'ALLOW_ALL' }), /Invalid/);
   assert.throws(() => config({ PREDICTIVE_AI_REVIEW_TIMEOUT_MS: '30001' }), /Invalid/);
   assert.throws(() => config({ PREDICTIVE_AI_REVIEW_MIN_CONFIDENCE: '101' }), /Invalid/);
   assert.throws(() => config({ PREDICTIVE_AI_REVIEW_MAX_AGE_MS: '120001' }), /Invalid/);
@@ -136,6 +139,76 @@ test('postdated, over-deadline and extended expiry responses are rejected', () =
     mutate(state.reviews[0]);
     assert.equal(assessAiReview(f, state, c, START + 1000).approved, false);
   }
+});
+
+test('primary fallback uses the baseline on provider failure without claiming AI approval', () => {
+  const f = forecast(), c = config({ PREDICTIVE_AI_REVIEW_FAILURE_MODE: 'PRIMARY_FALLBACK' });
+  const state = approvedState(f, c);
+  Object.assign(state.reviews[0], { status: 'UNAVAILABLE', reason: 'AI_REVIEW_PROVIDER_ERROR' });
+  const result = assessAiReview(f, state, c, START + 1000);
+  assert.equal(result.approved, true);
+  assert.equal(result.aiApproved, false);
+  assert.equal(result.fallback, true);
+  assert.equal(result.reason, 'AI_REVIEW_PRIMARY_FALLBACK');
+  assert.equal(result.failureReason, 'AI_REVIEW_PROVIDER_ERROR');
+  assert.equal(result.candidateFingerprint, candidateFingerprint(f));
+  assert.equal(state.reviews[0].status, 'UNAVAILABLE');
+});
+
+test('primary fallback allows a review to finish before treating a missing or pending result as unavailable', () => {
+  const f = forecast(), c = config({ PREDICTIVE_AI_REVIEW_FAILURE_MODE: 'PRIMARY_FALLBACK' });
+  const missingDeadline = Date.parse(f.createdAt) + c.timeoutMs;
+  for (const state of [null, { invalid: true }, { ...approvedState(f, c), reviews: [] },
+    { ...approvedState(f, c), reviews: [null] }]) {
+    assert.equal(assessAiReview(f, state, c, missingDeadline - 1).approved, false);
+    assert.equal(assessAiReview(f, state, c, missingDeadline).fallback, true);
+  }
+  const state = approvedState(f, c);
+  Object.assign(state.reviews[0], { status: 'PENDING', reason: 'AI_REVIEW_PENDING' });
+  assert.equal(assessAiReview(f, state, c, START + 29999).approved, false);
+  assert.equal(assessAiReview(f, state, c, START + 30000).fallback, true);
+  Object.assign(state.reviews[0], { status: 'UNAVAILABLE', reason: 'AI_REVIEW_TIMEOUT' });
+  assert.equal(assessAiReview(f, state, c, START + 29999).approved, false);
+  assert.equal(assessAiReview(f, state, c, START + 30000).fallback, true);
+});
+
+test('primary fallback keeps actual AI rejections and invalid market input blocked', () => {
+  const f = forecast(), c = config({ PREDICTIVE_AI_REVIEW_FAILURE_MODE: 'PRIMARY_FALLBACK' });
+  for (const reason of ['AI_REVIEW_HOLD', 'AI_REVIEW_DIRECTION_CONFLICT', 'AI_REVIEW_HIGH_RISK', 'AI_REVIEW_LOW_CONFIDENCE']) {
+    const state = approvedState(f, c);
+    Object.assign(state.reviews[0], { status: 'REJECTED', reason });
+    for (const now of [START + 1000, START + 62000]) {
+      assert.equal(assessAiReview(f, state, c, now).approved, false);
+      assert.equal(assessAiReview(f, state, c, now).reason, reason);
+    }
+  }
+  const state = approvedState(f, c);
+  Object.assign(state.reviews[0], { status: 'UNAVAILABLE', reason: 'AI_REVIEW_INVALID_MARKET_DATA' });
+  assert.equal(assessAiReview(f, state, c, START + 30000).approved, false);
+});
+
+test('primary fallback cannot revive stale, unprofitable or incompatible primary forecasts', () => {
+  const c = config({ PREDICTIVE_AI_REVIEW_FAILURE_MODE: 'PRIMARY_FALLBACK' });
+  for (const mutate of [
+    f => { f.exitPlan.expectedNetPct = 0; }, f => { f.exitPlan.expectedNetPct = -0.1; },
+    f => { f.horizon = 15; }, f => { f.exitPlan.status = 'UNAVAILABLE'; },
+    f => { f.createdAt = new Date(START - 130000).toISOString(); },
+  ]) {
+    const f = forecast(); mutate(f);
+    assert.equal(assessAiReview(f, null, c, START + 30000).reason, 'AI_REVIEW_INELIGIBLE_FORECAST');
+  }
+});
+
+test('primary fallback discards malformed or expired AI output without reusing it as approval', () => {
+  const f = forecast(), c = config({ PREDICTIVE_AI_REVIEW_FAILURE_MODE: 'PRIMARY_FALLBACK' });
+  for (const reason of ['AI_REVIEW_INVALID_RESPONSE', 'AI_REVIEW_WRONG_SYMBOL_OR_HORIZON']) {
+    const state = approvedState(f, c);
+    Object.assign(state.reviews[0], { status: 'REJECTED', reason, decision: null });
+    assert.equal(assessAiReview(f, state, c, START + 1000).fallback, true);
+  }
+  const result = assessAiReview(f, approvedState(f, c), c, START + 62000);
+  assert.equal(result.aiApproved, false);
+  assert.equal(result.failureReason, 'AI_REVIEW_EXPIRED');
 });
 
 test('AI service returns immediately while a provider request is pending and deduplicates it', async t => {

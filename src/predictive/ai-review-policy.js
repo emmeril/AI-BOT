@@ -10,6 +10,7 @@ function buildAiReviewConfig(environment = {}) {
   const config = {
     enabled: environment.PREDICTIVE_AI_REVIEW_ENABLED === true || environment.PREDICTIVE_AI_REVIEW_ENABLED === 'true',
     model: String(environment.PREDICTIVE_AI_REVIEW_MODEL || environment.AI_SIGNAL_MODEL || 'gemini-3.8-flash-high'),
+    failureMode: String(environment.PREDICTIVE_AI_REVIEW_FAILURE_MODE || 'BLOCK'),
     binary: environment.PREDICTIVE_AI_REVIEW_BIN || environment.AI_SIGNAL_ANTIGRAVITY_BIN,
     timeoutMs: Number(environment.PREDICTIVE_AI_REVIEW_TIMEOUT_MS || 30000),
     minimumConfidence: Number(environment.PREDICTIVE_AI_REVIEW_MIN_CONFIDENCE ?? 65),
@@ -17,7 +18,8 @@ function buildAiReviewConfig(environment = {}) {
     stateFile: path.resolve(environment.PREDICTIVE_AI_REVIEW_STATE_FILE || 'predictive-results/DOGEUSDT-ai-entry-reviews.json'),
     historyLimit: 1000,
   };
-  if (!config.model.trim() || !Number.isFinite(config.timeoutMs) || config.timeoutMs <= 0 || config.timeoutMs > 30000 ||
+  if (!['BLOCK', 'PRIMARY_FALLBACK'].includes(config.failureMode) ||
+      !config.model.trim() || !Number.isFinite(config.timeoutMs) || config.timeoutMs <= 0 || config.timeoutMs > 30000 ||
       !Number.isInteger(config.minimumConfidence) || config.minimumConfidence < 0 || config.minimumConfidence > 100 ||
       !Number.isFinite(config.maxReviewAgeMs) || config.maxReviewAgeMs <= 0 || config.maxReviewAgeMs > FORECAST_MAX_AGE_MS) {
     throw new Error('Invalid predictive AI review configuration');
@@ -25,7 +27,8 @@ function buildAiReviewConfig(environment = {}) {
   config.policyId = AI_REVIEW_POLICY_ID;
   config.effort = config.model.match(/-(low|medium|high)$/)?.[1] || 'low';
   config.configId = crypto.createHash('sha256').update(JSON.stringify({ policyId: config.policyId,
-    model: config.model, effort: config.effort, timeoutMs: config.timeoutMs, minimumConfidence: config.minimumConfidence,
+    model: config.model, effort: config.effort, failureMode: config.failureMode,
+    timeoutMs: config.timeoutMs, minimumConfidence: config.minimumConfidence,
     maxReviewAgeMs: config.maxReviewAgeMs })).digest('hex');
   return config;
 }
@@ -79,30 +82,60 @@ function decisionRejection(decision, forecast, config) {
 }
 
 function assessAiReview(forecast, state, config, now = Date.now()) {
-  const base = { enabled: config.enabled, policyId: AI_REVIEW_POLICY_ID, model: config.model };
+  const base = { enabled: config.enabled, policyId: AI_REVIEW_POLICY_ID, model: config.model,
+    failureMode: config.failureMode };
   const reject = reason => ({ ...base, approved: false, reason });
   if (!config.enabled) return { ...base, approved: true, reason: 'AI_REVIEW_DISABLED' };
   if (!reviewableForecast(forecast, now)) return reject('AI_REVIEW_INELIGIBLE_FORECAST');
+  const unavailable = (reason, review, waitUntil = Date.parse(forecast.createdAt) + config.timeoutMs) => {
+    if (config.failureMode !== 'PRIMARY_FALLBACK' || !Number.isFinite(waitUntil) || now < waitUntil) {
+      return { ...reject(reason), ...(review ? { reviewId: review.id } : {}) };
+    }
+    return { ...base, approved: true, aiApproved: false, fallback: true,
+      reason: 'AI_REVIEW_PRIMARY_FALLBACK', failureReason: reason,
+      forecastId: forecast.id, candidateFingerprint: candidateFingerprint(forecast),
+      reviewId: review?.id || null, expiresAt: forecastReviewExpiry(forecast) };
+  };
   if (state?.version !== 1 || state.policyId !== AI_REVIEW_POLICY_ID || !Array.isArray(state.reviews)) {
-    return reject('AI_REVIEW_UNAVAILABLE');
+    return unavailable('AI_REVIEW_UNAVAILABLE');
   }
   if (state.enabled !== true || state.configId !== config.configId || state.model !== config.model) {
-    return reject('AI_REVIEW_CONFIG_MISMATCH');
+    return unavailable('AI_REVIEW_CONFIG_MISMATCH');
   }
-  const review = state.reviews.filter(row => row.forecastId === forecast.id)
+  const review = state.reviews.filter(row => row?.forecastId === forecast.id)
     .sort((a, b) => b.requestedAt - a.requestedAt)[0];
-  if (!review) return reject('AI_REVIEW_REQUIRED');
+  if (!review) return unavailable('AI_REVIEW_REQUIRED');
   if (review.policyId !== AI_REVIEW_POLICY_ID || review.configId !== config.configId || review.model !== config.model ||
-      review.candidateFingerprint !== candidateFingerprint(forecast)) return reject('AI_REVIEW_CANDIDATE_MISMATCH');
-  if (review.status !== 'APPROVED') return { ...reject(review.reason || 'AI_REVIEW_' + review.status), reviewId: review.id };
+      review.candidateFingerprint !== candidateFingerprint(forecast)) return unavailable('AI_REVIEW_CANDIDATE_MISMATCH', review);
+  if (review.status === 'PENDING') {
+    const waitUntil = Number.isFinite(review.requestedAt) && review.requestedAt >= Date.parse(forecast.createdAt) &&
+      review.requestedAt <= now ? review.requestedAt + config.timeoutMs : undefined;
+    return unavailable('AI_REVIEW_PENDING', review, waitUntil);
+  }
+  if (review.status === 'UNAVAILABLE') {
+    if (review.reason === 'AI_REVIEW_INVALID_MARKET_DATA') return { ...reject(review.reason), reviewId: review.id };
+    const waitUntil = review.reason === 'AI_REVIEW_TIMEOUT' && Number.isFinite(review.requestedAt)
+      ? review.requestedAt + config.timeoutMs : now;
+    return unavailable(review.reason || 'AI_REVIEW_UNAVAILABLE', review, waitUntil);
+  }
+  if (review.status === 'REJECTED') {
+    if (['AI_REVIEW_INVALID_RESPONSE', 'AI_REVIEW_WRONG_SYMBOL_OR_HORIZON'].includes(review.reason)) {
+      return unavailable(review.reason, review, now);
+    }
+    return { ...reject(review.reason || 'AI_REVIEW_REJECTED'), reviewId: review.id };
+  }
+  if (review.status !== 'APPROVED') return unavailable('AI_REVIEW_' + review.status, review);
   if (![review.requestedAt, review.completedAt, review.expiresAt].every(Number.isFinite) ||
       review.requestedAt < Date.parse(forecast.createdAt) || review.requestedAt > review.completedAt ||
       review.completedAt > now || review.completedAt - review.requestedAt > config.timeoutMs ||
       review.expiresAt !== forecastReviewExpiry(forecast) || now >= review.expiresAt ||
-      now - review.completedAt > config.maxReviewAgeMs) return reject('AI_REVIEW_EXPIRED');
+      now - review.completedAt > config.maxReviewAgeMs) return unavailable('AI_REVIEW_EXPIRED', review);
   const reason = decisionRejection(review.decision, forecast, config);
+  if (['AI_REVIEW_INVALID_RESPONSE', 'AI_REVIEW_WRONG_SYMBOL_OR_HORIZON'].includes(reason)) {
+    return unavailable(reason, review, now);
+  }
   if (reason) return reject(reason);
-  return { ...base, approved: true, reason: 'AI_REVIEW_APPROVED', reviewId: review.id,
+  return { ...base, approved: true, aiApproved: true, reason: 'AI_REVIEW_APPROVED', reviewId: review.id,
     forecastId: forecast.id, candidateFingerprint: review.candidateFingerprint,
     completedAt: review.completedAt, expiresAt: review.expiresAt,
     decision: structuredClone(review.decision) };
