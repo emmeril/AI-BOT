@@ -2,9 +2,13 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('node:crypto');
 const { asBoolean, selectLiveForecast, candidateEvidence, openPositions, positionAmount, algoOrders,
   ownedAlgo, insideProtection, buildEntryPlan, protectionParameters, protectionMatches } = require('./live-policy');
 const { validateDirectionModel } = require('./direction-model');
+const { RISK_POLICY_ID } = require('./net-risk-reward');
+const { ADAPTIVE_KIND, validateReachability, planReachableTargets } = require('./reachability');
+const { ADAPTIVE_POLICY_ID } = require('./adaptive-exits');
 
 function loadLiveState(file) {
   try {
@@ -37,6 +41,20 @@ class PredictiveLiveEngine {
     validateDirectionModel(model, config.symbol);
     if (model.horizon !== config.horizon || !model.modelId) throw new Error('Selected live model must be the current 60 minute direction model');
     this.expectedModelId = model.modelId;
+    const exitModel = JSON.parse(fs.readFileSync(config.exitModelFile));
+    const reachability = validateReachability(JSON.parse(fs.readFileSync(config.reachabilityModelFile)),
+      config.symbol, model.modelId, exitModel.modelId);
+    if (reachability.horizon !== config.horizon) throw new Error('Live reachability horizon mismatch');
+    if ((reachability.kind === ADAPTIVE_KIND ? ADAPTIVE_POLICY_ID : RISK_POLICY_ID) !== config.riskPolicyId) {
+      throw new Error('Live exit policy does not match the model');
+    }
+    const sourceHash = crypto.createHash('sha256').update(fs.readFileSync(config.modelFile)).digest('hex');
+    const stopHash = crypto.createHash('sha256').update(fs.readFileSync(config.exitModelFile)).digest('hex');
+    if (reachability.directionModelHash !== sourceHash || reachability.exitModelHash !== stopHash) {
+      throw new Error('Reachability upstream model hash mismatch');
+    }
+    this.reachabilityModel = reachability;
+    this.expectedReachabilityModelId = reachability.modelId;
     this.market = null;
   }
 
@@ -82,16 +100,17 @@ class PredictiveLiveEngine {
       throw new Error('DOGE must be flat with no regular or conditional orders before new activation');
     }
     const source = this.readForecasts();
-    const evidence = candidateEvidence(source, this.config, this.expectedModelId);
-    const forecast = selectLiveForecast(source, this.config, this.expectedModelId, this.now());
-    const plan = buildEntryPlan(this.config, forecast, snapshot.market, snapshot.book, snapshot.availableUsdt, snapshot.hedgeMode, this.now());
+    const evidence = candidateEvidence(source, this.config, this.expectedModelId, this.expectedReachabilityModelId);
+    const forecast = selectLiveForecast(source, this.config, this.expectedModelId, this.now(), this.expectedReachabilityModelId);
+    const plan = buildEntryPlan(this.config, forecast, snapshot.market, snapshot.book, snapshot.availableUsdt,
+      snapshot.hedgeMode, this.now(), this.reachabilityModel);
     return { status: evidence.matchesUserCriteria ? 'CONFIGURATION_VERIFIED_READ_ONLY' : 'BLOCKED_BY_FORWARD_RESULTS',
       orderExecutionEnabled: false,
       availableUsdt: snapshot.availableUsdt, walletUsdt: snapshot.walletUsdt,
       currentLeverage: Number(snapshot.settings.leverage), requestedLeverage: this.config.leverage,
       currentMarginType: snapshot.settings.marginType, requestedMarginType: 'ISOLATED',
       hedgeMode: snapshot.hedgeMode, maxOpenPositions: 1, sessionLossBudgetUsdt: this.config.sessionLossBudgetUsdt,
-      directionModelId: this.expectedModelId, evidence, plan };
+      directionModelId: this.expectedModelId, reachabilityModelId: this.expectedReachabilityModelId, evidence, plan };
   }
 
   async configureAccount() {
@@ -175,6 +194,19 @@ class PredictiveLiveEngine {
   async ensureProtection(snapshot) {
     this.assertEnabled();
     const tracked = this.state.tracked, plan = tracked.plan;
+    if (plan.riskPolicyId === this.config.riskPolicyId) {
+      const risk = planReachableTargets(this.reachabilityModel, plan.contextFeatures, plan.directionProbabilities,
+        { side: plan.side, entryFill: tracked.entryPrice, stopLoss: plan.stopLoss, tickSize: plan.tick,
+        costAssumptions: plan.costAssumptions });
+      if (risk.status !== 'ESTIMATED') {
+        await this.close(plan.riskPolicyId === ADAPTIVE_POLICY_ID ?
+          'FILLED_ENTRY_NON_POSITIVE_EXPECTED_NET' : 'FILLED_ENTRY_TP1_BEFORE_SL_NOT_SUPPORTED');
+        return;
+      }
+      const targetChanged = plan.takeProfit !== risk.takeProfit || plan.selectedTarget !== risk.selectedTarget;
+      Object.assign(plan, risk);
+      if (targetChanged) this.save();
+    }
     if (!insideProtection(tracked.entryPrice, plan.side, plan) ||
         tracked.quantity * tracked.entryPrice > this.config.notionalUsdt + 1e-8) {
       await this.close('FILLED_ENTRY_OUTSIDE_BUDGET_OR_PROTECTION');
@@ -293,11 +325,18 @@ class PredictiveLiveEngine {
       this.state.pausedReason = 'SESSION_LOSS_BUDGET_REACHED'; this.save(); return;
     }
     const source = this.readForecasts();
-    const evidence = candidateEvidence(source, this.config, this.expectedModelId);
+    const evidence = candidateEvidence(source, this.config, this.expectedModelId, this.expectedReachabilityModelId);
     if (!evidence.matchesUserCriteria) return { status: 'WAITING', reason: 'FORWARD_CRITERIA_NOT_MET', evidence };
-    const forecast = selectLiveForecast(source, this.config, this.expectedModelId, this.now());
+    let forecast;
+    try {
+      forecast = selectLiveForecast(source, this.config, this.expectedModelId, this.now(), this.expectedReachabilityModelId);
+    } catch (error) {
+      if (error.code === 'EXIT_SETUP_REJECTED') return { status: 'WAITING', reason: error.reason, evidence };
+      throw error;
+    }
     if (forecast.id === this.state.consumedForecastId) return { status: 'WAITING', reason: 'FORECAST_ALREADY_CONSUMED' };
-    const plan = buildEntryPlan(this.config, forecast, snapshot.market, snapshot.book, snapshot.availableUsdt, snapshot.hedgeMode, this.now());
+    const plan = buildEntryPlan(this.config, forecast, snapshot.market, snapshot.book, snapshot.availableUsdt,
+      snapshot.hedgeMode, this.now(), this.reachabilityModel);
     await this.enter(plan);
     return { status: this.state.tracked ? 'POSITION_OPEN' : this.state.intent ? 'ENTRY_PENDING' : 'FLAT' };
   }

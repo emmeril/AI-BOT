@@ -2,7 +2,7 @@
 
 const { KEYS, CLASSES, validateDirectionModel, predictDirection,
   mostLikelyDirection } = require('./direction-model');
-const { scoreExitPlan, exitSummary } = require('./exit-evaluator');
+const { scoreExitPlan, exitSummary, scoreCandidateExits, candidateSummary, sequentialExitRecords } = require('./exit-evaluator');
 
 function forecastDirection(model, feature, symbol, now = Date.now()) {
   validateDirectionModel(model, symbol);
@@ -50,6 +50,7 @@ function scorePendingDirection(records, candles) {
       const outcome = scoreExitPlan(record, candles);
       if (outcome) { record.exitOutcome = outcome; updated = true; }
     }
+    if (scoreCandidateExits(record, candles)) updated = true;
     if (updated) updates.push(record.outcome || record.exitOutcome);
   }
   return updates;
@@ -67,8 +68,19 @@ function directionSummary(records) {
     pending: forecasts.length - evaluated.length, metrics: metrics(evaluated),
     byHorizon: Object.fromEntries([15, 30, 60].map(horizon =>
       [horizon, { ...metrics(evaluated.filter(row => row.horizon === horizon)),
-        exitPlans: exitSummary(records.filter(row => row.horizon === horizon)) }])),
-    exitPlans: exitSummary(records),
+        exitPlans: exitSummary(records.filter(row => row.horizon === horizon)),
+        onePositionExitPlans: exitSummary(sequentialExitRecords(records.filter(row => row.horizon === horizon))),
+        candidateDiagnostics: candidateSummary(records.filter(row => row.horizon === horizon)) }])),
+    exitPlans: exitSummary(records), candidateDiagnostics: candidateSummary(records),
+    exitPlansByRiskPolicy: Object.fromEntries([...new Set(records.map(r => r.exitPlan?.riskPolicyId).filter(Boolean))]
+      .map(policy => {
+        const rows = records.filter(r => r.exitPlan?.riskPolicyId === policy);
+        return [policy, { ...exitSummary(rows), byHorizon: Object.fromEntries([15, 30, 60].map(h => {
+          const selected = rows.filter(r => r.horizon === h);
+          return [h, { onePositionExitPlans: exitSummary(sequentialExitRecords(selected)), candidateDiagnostics: candidateSummary(selected) }];
+        })), bySelectedTarget: Object.fromEntries(['TP1', 'TP2']
+          .map(target => [target, exitSummary(rows.filter(r => r.exitPlan.selectedTarget === target))])) }];
+      })),
     mode: 'SHADOW_ONLY', tradeExecutionEnabled: false };
 }
 

@@ -7,7 +7,7 @@ const checked = new WeakSet();
 function validateBoostedClassifier(classifier) {
   if (checked.has(classifier)) return;
   const c = classifier;
-  if (!['boosted-direction-trees-v1', 'boosted-quantile-trees-v1'].includes(c?.kind) || !Number.isInteger(c.featureCount) || c.featureCount < 1 ||
+  if (!['boosted-direction-trees-v1', 'boosted-quantile-trees-v1', 'boosted-first-passage-trees-v1'].includes(c?.kind) || !Number.isInteger(c.featureCount) || c.featureCount < 1 ||
       !Array.isArray(c.baseMargins) || c.baseMargins.length !== 3 || !c.baseMargins.every(Number.isFinite) ||
       !Array.isArray(c.trees) || !c.trees.length || c.trees.length > 5000) {
     throw new Error('Invalid boosted direction classifier');

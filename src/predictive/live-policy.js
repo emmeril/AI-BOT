@@ -2,6 +2,10 @@
 
 const path = require('path');
 const crypto = require('crypto');
+const { RISK_POLICY_ID } = require('./net-risk-reward');
+const { planReachableTargets } = require('./reachability');
+const { ADAPTIVE_POLICY_ID } = require('./adaptive-exits');
+const { sequentialExitRecords } = require('./exit-evaluator');
 
 const PREFIX = 'p60-';
 const asBoolean = value => value === true || value === 'true';
@@ -15,17 +19,23 @@ function buildLiveConfig(environment = {}) {
     leverage: Number(environment.PREDICTIVE_LIVE_LEVERAGE || 10),
     sessionLossBudgetUsdt: Number(environment.PREDICTIVE_LIVE_LOSS_BUDGET_USDT || 5),
     feeReserveUsdt: 0.1, intervalMs: 5000, maxForecastAgeMs: 120000,
-    forecastFile: path.resolve(environment.PREDICTIVE_LIVE_FORECAST_FILE || 'predictive-results/DOGEUSDT-direction-shadow-v2.json'),
+    riskPolicyId: environment.PREDICTIVE_LIVE_RISK_POLICY_ID || ADAPTIVE_POLICY_ID,
+    forecastFile: path.resolve(environment.PREDICTIVE_LIVE_FORECAST_FILE || 'predictive-results/DOGEUSDT-adaptive-shadow-v5.json'),
     stateFile: path.resolve(environment.PREDICTIVE_LIVE_STATE_FILE || 'predictive-results/DOGEUSDT-live-state.json'),
     modelFile: path.resolve(environment.PREDICTIVE_LIVE_MODEL_FILE || 'predictive-results/DOGEUSDT-direction-v2/model-60m.json'),
+    reachabilityModelFile: path.resolve(environment.PREDICTIVE_LIVE_REACHABILITY_MODEL_FILE ||
+      'predictive-results/DOGEUSDT-adaptive-exits-v2/model-60m.json'),
+    exitModelFile: path.resolve(environment.PREDICTIVE_LIVE_EXIT_MODEL_FILE ||
+      'predictive-results/DOGEUSDT-exit-levels-v1/exit-model-60m.json'),
   };
   if (config.symbol !== 'DOGEUSDT' || config.horizon !== 60 || config.marginUsdt !== 5 || config.leverage !== 10 ||
       config.sessionLossBudgetUsdt !== 5) throw new Error('This live profile requires DOGEUSDT, horizon 60, fixed 5 USDT margin and 10x leverage');
   config.notionalUsdt = config.marginUsdt * config.leverage;
+  if (![RISK_POLICY_ID, ADAPTIVE_POLICY_ID].includes(config.riskPolicyId)) throw new Error('Unsupported predictive exit policy');
   return config;
 }
 
-function selectLiveForecast(state, config, expectedModelId, now = Date.now()) {
+function selectLiveForecast(state, config, expectedModelId, now = Date.now(), expectedReachabilityModelId) {
   if (state?.objective !== 'PRICE_DIRECTION' || !Array.isArray(state.records)) throw new Error('Invalid direction state');
   const latest = state.records.filter(r => r.symbol === config.symbol && r.horizon === config.horizon && r.status === 'FORECAST')
     .sort((a, b) => b.candleCloseTime - a.candleCloseTime)[0];
@@ -37,7 +47,17 @@ function selectLiveForecast(state, config, expectedModelId, now = Date.now()) {
   if (!['UP', 'DOWN'].includes(latest.direction)) throw new Error('Latest forecast has no directional bias');
   const plan = latest.exitPlan;
   const side = latest.direction === 'UP' ? 'LONG' : 'SHORT';
+  if (plan?.status === 'UNAVAILABLE' && plan.riskPolicyId === config.riskPolicyId &&
+      (!expectedReachabilityModelId || plan.reachabilityModelId === expectedReachabilityModelId) &&
+      ['NON_POSITIVE_EXPECTED_NET', 'NO_VALID_STOP_CANDIDATE'].includes(plan.reason)) {
+    const error = new Error('Forecast has no compatible fresh exit estimate: ' + plan.reason);
+    error.code = 'EXIT_SETUP_REJECTED';
+    error.reason = plan.reason;
+    throw error;
+  }
   if (plan?.status !== 'ESTIMATED' || typeof plan.exitModelId !== 'string' || !plan.exitModelId ||
+      plan.riskPolicyId !== config.riskPolicyId ||
+      (expectedReachabilityModelId && plan.reachabilityModelId !== expectedReachabilityModelId) ||
       plan.directionModelId !== expectedModelId || plan.side !== side ||
       plan.expiresAt !== latest.targetCloseTime || !(plan.expiresAt > now) ||
       ![plan.takeProfit, plan.stopLoss].every(value => Number.isFinite(value) && value > 0)) {
@@ -47,17 +67,24 @@ function selectLiveForecast(state, config, expectedModelId, now = Date.now()) {
 }
 
 function positionAmount(position) { return Math.abs(Number(position.positionAmt || 0)); }
-function candidateEvidence(state, config, expectedModelId) {
+function candidateEvidence(state, config, expectedModelId, expectedReachabilityModelId) {
   const records = (state.records || []).filter(r => r.symbol === config.symbol && r.horizon === config.horizon && r.modelId === expectedModelId);
   const directions = records.filter(r => r.outcome);
-  const trades = records.filter(r => Number.isFinite(r.exitOutcome?.simulatedNetPct));
+  const compatible = records.filter(r => r.exitPlan?.riskPolicyId === config.riskPolicyId &&
+    (!expectedReachabilityModelId || r.exitPlan.reachabilityModelId === expectedReachabilityModelId));
+  const eligible = config.riskPolicyId === ADAPTIVE_POLICY_ID ? sequentialExitRecords(compatible) : compatible;
+  const trades = eligible.filter(r => r.exitPlan?.riskPolicyId === config.riskPolicyId &&
+    (!expectedReachabilityModelId || r.exitPlan.reachabilityModelId === expectedReachabilityModelId) &&
+    Number.isFinite(r.exitOutcome?.simulatedNetPct));
   const accuracy = directions.length ? directions.filter(r => r.outcome.correct).length / directions.length : null;
   const winrate = trades.length ? trades.filter(r => r.exitOutcome.simulatedNetPct > 0).length / trades.length : null;
   const net = trades.reduce((sum, r) => sum + r.exitOutcome.simulatedNetPct, 0);
-  return { directionEvaluated: directions.length, directionAccuracy: accuracy,
+  return { riskPolicyId: config.riskPolicyId, reachabilityModelId: expectedReachabilityModelId || null,
+    directionEvaluated: directions.length, directionAccuracy: accuracy,
     completedShadowTrades: trades.length, netWinRate: winrate,
-    totalShadowNetUsdtAt100Notional: net, overlappingForecasts: true,
-    matchesUserCriteria: accuracy > 0.5 && winrate > 0.5 };
+    totalShadowNetUsdtAt100Notional: net, overlappingForecasts: config.riskPolicyId !== ADAPTIVE_POLICY_ID,
+    selectionCriterion: 'DIRECTION_ABOVE_50_AND_POSITIVE_NET',
+    matchesUserCriteria: accuracy > 0.5 && trades.length > 0 && Number.isFinite(net) && net > 0 };
 }
 function openPositions(rows) {
   if (!Array.isArray(rows)) throw new Error('Invalid position response');
@@ -75,7 +102,7 @@ function insideProtection(price, side, plan) {
     plan.stopLoss < price && price < plan.takeProfit : plan.takeProfit < price && price < plan.stopLoss);
 }
 
-function buildEntryPlan(config, forecast, market, book, availableBalance, hedgeMode, now = Date.now()) {
+function buildEntryPlan(config, forecast, market, book, availableBalance, hedgeMode, now = Date.now(), reachabilityModel) {
   if (market?.symbol !== config.symbol || market.status !== 'TRADING') throw new Error('DOGE market is not trading');
   const filters = Object.fromEntries(market.filters.map(filter => [filter.filterType, filter]));
   const lot = filters.MARKET_LOT_SIZE || filters.LOT_SIZE;
@@ -89,8 +116,20 @@ function buildEntryPlan(config, forecast, market, book, availableBalance, hedgeM
   }
   const quote = Number(side === 'LONG' ? book.askPrice : book.bidPrice);
   const estimatedEntry = quote * (side === 'LONG' ? 1.0002 : 0.9998);
-  const takeProfit = Number((Math.round(forecast.exitPlan.takeProfit / tick) * tick).toPrecision(14));
   const stopLoss = Number((Math.round(forecast.exitPlan.stopLoss / tick) * tick).toPrecision(14));
+  if (forecast.exitPlan.riskPolicyId !== config.riskPolicyId ||
+      forecast.exitPlan.costAssumptions?.feePctPerSide !== 0.05 ||
+      forecast.exitPlan.costAssumptions?.slippagePctPerSide !== 0.02) {
+    throw new Error('Forecast must use the TP1/TP2 risk policy and current cost assumptions');
+  }
+  if (!reachabilityModel || forecast.exitPlan.reachabilityModelId !== reachabilityModel.modelId) {
+    throw new Error('Missing or incompatible entry reachability model');
+  }
+  const risk = planReachableTargets(reachabilityModel, forecast.exitPlan.contextFeatures,
+    forecast.exitPlan.directionProbabilities, { side, entryFill: estimatedEntry, stopLoss,
+    tickSize: tick, costAssumptions: forecast.exitPlan.costAssumptions });
+  if (risk.status !== 'ESTIMATED') throw new Error(risk.reason);
+  const takeProfit = risk.takeProfit;
   if (!insideProtection(estimatedEntry, side, { takeProfit, stopLoss })) throw new Error('Current entry is outside forecast TP/SL');
   const bid = Number(book.bidPrice), ask = Number(book.askPrice);
   if (!(bid > 0 && ask >= bid) || (ask / bid - 1) > 0.002) throw new Error('Invalid or excessive bid/ask spread');
@@ -101,12 +140,14 @@ function buildEntryPlan(config, forecast, market, book, availableBalance, hedgeM
       notional < minNotional || notional > config.notionalUsdt + 1e-8) throw new Error('50 USDT target violates exchange quantity or notional limits');
   const token = crypto.createHash('sha256').update(forecast.id).digest('hex').slice(0, 18);
   return { forecastId: forecast.id, modelId: forecast.modelId, exitModelId: forecast.exitPlan.exitModelId,
+    stopId: forecast.exitPlan.stopId,
     symbol: config.symbol, side,
     positionSide: hedgeMode ? side : 'BOTH', orderSide: side === 'LONG' ? 'BUY' : 'SELL',
     quantity, targetMarginUsdt: config.marginUsdt, leverage: config.leverage,
     targetNotionalUsdt: config.notionalUsdt, estimatedNotionalUsdt: notional,
     estimatedMarginUsdt: notional / config.leverage, estimatedEntry,
-    takeProfit, stopLoss, tick, expiresAt: forecast.targetCloseTime, token,
+    ...risk,
+    modelRangeQ75: forecast.exitPlan.modelRangeQ75, tick, expiresAt: forecast.targetCloseTime, token,
     entryClientId: `${PREFIX}e-${token}`, stopClientId: `${PREFIX}sl-${token}`,
     takeClientId: `${PREFIX}tp-${token}`, compounding: false };
 }

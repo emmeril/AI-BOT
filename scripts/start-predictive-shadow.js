@@ -3,12 +3,15 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('node:crypto');
 const { setTimeout: delay } = require('node:timers/promises');
 const { normalizeKlines, buildFeatureRows } = require('../src/predictive/features');
 const { validateDirectionModel } = require('../src/predictive/direction-model');
 const { SCHEMA, buildDirectionFeatures } = require('../src/predictive/direction-features');
 const { validateExitModel, planExit } = require('../src/predictive/exit-planner');
 const { simulationSizing, normalizeFixedSizing } = require('../src/predictive/shadow-sizing');
+const { ADAPTIVE_KIND, validateReachability } = require('../src/predictive/reachability');
+const { ADAPTIVE_POLICY_ID } = require('../src/predictive/adaptive-exits');
 const { forecastDirection, scorePendingDirection, directionSummary } =
   require('../src/predictive/direction-forward');
 
@@ -97,6 +100,29 @@ async function fetchPriceTick(exchange, symbol) {
   return tick;
 }
 
+function loadReachabilityModels(directory, symbol, directionModels, exitModels, sourceDirectories) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json')));
+  if (manifest.completed !== true || manifest.objective !== 'TP_BEFORE_SL_WITHIN_HORIZON' || manifest.symbol !== symbol) {
+    throw new Error('Incomplete or incompatible reachability bundle');
+  }
+  return new Map(directionModels.map(direction => {
+    const exitModel = exitModels.get(direction.horizon);
+    if (!exitModel) throw new Error('Missing excursion model for adaptive exits');
+    const model = validateReachability(JSON.parse(fs.readFileSync(path.join(directory,
+      `model-${direction.horizon}m.json`))), symbol, direction.modelId, exitModel.modelId);
+    if (model.horizon !== direction.horizon || model.trainingRunId !== manifest.trainingRunId ||
+        model.modelId !== manifest.modelIds?.[direction.horizon]) throw new Error('Incompatible reachability training run');
+    if (sourceDirectories) {
+      const digest = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+      if (model.directionModelHash !== digest(path.join(sourceDirectories.directionDirectory, `model-${direction.horizon}m.json`)) ||
+          model.exitModelHash !== digest(path.join(sourceDirectories.exitDirectory, `exit-model-${direction.horizon}m.json`))) {
+        throw new Error('Reachability upstream model hash mismatch');
+      }
+    }
+    return [direction.horizon, model];
+  }));
+}
+
 async function main() {
   require('dotenv').config({ path: path.resolve('.env.futures'), quiet: true });
   const symbol = String(process.env.PREDICTIVE_SYMBOL || 'DOGEUSDT');
@@ -109,8 +135,21 @@ async function main() {
   let exitModels = new Map();
   try { exitModels = loadExitModels(exitDirectory, symbol, models); }
   catch (error) { console.error('[PREDICTIVE EXITS] ' + error.message); }
+  const reachabilityDirectory = path.resolve(process.env.PREDICTIVE_REACHABILITY_MODEL_DIR ||
+    path.join('predictive-results', symbol + '-adaptive-exits-v2'));
+  let reachabilityModels = new Map();
+  try {
+    reachabilityModels = loadReachabilityModels(reachabilityDirectory, symbol, models, exitModels,
+      { directionDirectory: modelDir, exitDirectory });
+    if ([...reachabilityModels.values()].some(model => model.kind !== ADAPTIVE_KIND)) {
+      throw new Error('Active worker requires adaptive net expectancy models');
+    }
+  } catch (error) {
+    reachabilityModels = new Map();
+    console.error('[PREDICTIVE REACHABILITY] ' + error.message);
+  }
   const statePath = path.resolve(process.env.PREDICTIVE_SHADOW_STATE_FILE ||
-    path.join('predictive-results', symbol + '-direction-shadow-v2.json'));
+    path.join('predictive-results', symbol + '-adaptive-shadow-v5.json'));
   const state = loadState(statePath, symbol);
   const ccxt = require('ccxt');
   const exchange = new ccxt.binanceusdm({ enableRateLimit: true,
@@ -124,12 +163,13 @@ async function main() {
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   console.log('[PREDICTIVE V2] PRICE_DIRECTION SHADOW_ONLY ' + symbol);
-  console.log('[PREDICTIVE V2] ' + JSON.stringify({ simulationSizing: simulationSizing() }));
+  console.log('[PREDICTIVE V2] ' + JSON.stringify({ simulationSizing: simulationSizing(), riskPolicyId: ADAPTIVE_POLICY_ID }));
   for (const model of models) {
     console.log('[PREDICTIVE V2] ' + JSON.stringify({ horizon: model.horizon,
       modelId: model.modelId, objective: model.objective, temperature: model.temperature,
       classifierKind: model.classifier.kind, featureSchema: model.featureSchema || 'base-v1',
       exitModelId: exitModels.get(model.horizon)?.modelId || null, priceTick: tickSize,
+      reachabilityModelId: reachabilityModels.get(model.horizon)?.modelId || null,
       validationOutperformsBaseline: model.validationOutperformsBaseline,
     }));
   }
@@ -150,7 +190,8 @@ async function main() {
         const next = forecastDirection(model, current, symbol, now);
         if (ids.has(next.id)) continue;
         try {
-          next.exitPlan = planExit(next, exitModels.get(model.horizon), exitFeatures?.x, { tickSize });
+          next.exitPlan = planExit(next, exitModels.get(model.horizon), exitFeatures?.x,
+            { tickSize, targetLevels: true, candles: candles.slice(-16), reachabilityModel: reachabilityModels.get(model.horizon) });
         } catch (error) {
           console.error('[PREDICTIVE EXITS] ' + error.message);
           next.exitPlan = { status: 'UNAVAILABLE', reason: 'EXIT_ESTIMATION_FAILED', executionAllowed: false };
@@ -192,4 +233,4 @@ if (require.main === module) {
   main().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
 }
 
-module.exports = { main, loadState, saveState, loadModels, currentFeatures, loadExitModels, fetchPriceTick };
+module.exports = { main, loadState, saveState, loadModels, currentFeatures, loadExitModels, loadReachabilityModels, fetchPriceTick };

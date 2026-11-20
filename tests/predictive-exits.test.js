@@ -14,6 +14,7 @@ const { scorePendingDirection } = require('../src/predictive/direction-forward')
 const { loadExitModels, fetchPriceTick } = require('../scripts/start-predictive-shadow');
 const { loadState, saveState } = require('../scripts/start-predictive-shadow');
 const { accountExitOutcome, normalizeFixedSizing } = require('../src/predictive/shadow-sizing');
+const { reachabilityFixture, setReachThreshold } = require('./helpers/reachability-fixture');
 
 function features(volatility = 0) {
   const x = Array(NAMES.length).fill(0);
@@ -104,6 +105,40 @@ test('poor cost coverage does not suppress price direction or invent a larger ta
   assert.equal(plan.coversEstimatedCosts, false);
   assert.ok(plan.estimatedNetRewardRisk < 0);
   assert.equal(plan.takeProfit, planExit(forecast(), exitModel(), features()).takeProfit);
+});
+
+test('intrahorizon target support uses the median stop without changing direction or imposing q75', () => {
+  const f = forecast();
+  const original = structuredClone(f);
+  const model = exitModel(), x = features(0.001);
+  model.estimators.up.regressor.values = [0.1, 0.2, 0.4];
+  model.estimators.down.regressor.values = [0.1, 0.3, 0.5];
+  const reachability = reachabilityFixture(15, f.modelId, model.modelId, 0.01);
+  const missing = planExit(f, exitModel(), features(), { tickSize: 0.01, targetLevels: true });
+  assert.equal(missing.reason, 'REACHABILITY_MODEL_UNAVAILABLE');
+  const options = { tickSize: 0.01, targetLevels: true, reachabilityModel: reachability };
+  const blocked = planExit(f, model, x, options);
+  assert.equal(blocked.reason, 'TP1_BEFORE_SL_NOT_SUPPORTED');
+  assert.deepEqual(f, original);
+  setReachThreshold(reachability, 3);
+  const plan = planExit(f, model, x, options);
+  assert.equal(plan.status, 'ESTIMATED');
+  assert.equal(plan.stopQuantile, 0.5);
+  assert.ok(plan.takeProfit > plan.modelRangeQ75);
+  assert.ok(plan.probabilityTpBeforeSl > 0.5);
+  assert.ok(plan.estimatedNetRewardRisk >= 2 - 1e-9);
+  assert.equal(plan.notionalUsdt, 100);
+  assert.deepEqual(f, original);
+  const scale = excursionScale(x, 15), entryFill = f.referencePrice * 1.0002;
+  const distances = plan.targetLevels.map(t => Math.abs(t.takeProfit / entryFill - 1) * 100 / scale);
+  setReachThreshold(reachability, (distances[0] + distances[1]) / 2);
+  const tp1 = planExit(f, model, x, options);
+  assert.equal(tp1.selectedTarget, 'TP1');
+  assert.equal(tp1.takeProfit, tp1.takeProfit1);
+  assert.ok(tp1.estimatedNetRewardRisk >= 1 - 1e-9);
+  setReachThreshold(reachability, 3);
+  model.estimators.up.regressor.values = [0, 0, 0];
+  assert.equal(planExit(f, model, x, options).status, 'ESTIMATED');
 });
 
 test('non-directional, stale or mismatched forecasts cannot produce executable plans', () => {

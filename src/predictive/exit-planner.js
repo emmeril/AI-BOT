@@ -3,6 +3,9 @@
 const { SCHEMA, NAMES } = require('./direction-features');
 const { predictTreeMargins, validateBoostedClassifier } = require('./boosted-classifier');
 const { sizeExitPlan } = require('./shadow-sizing');
+const { RISK_POLICY_ID } = require('./net-risk-reward');
+const { ADAPTIVE_KIND, validateReachability, planReachableTargets } = require('./reachability');
+const { planAdaptiveExits } = require('./adaptive-exits');
 
 const KIND = 'predictive-excursion-quantiles-v1';
 const QUANTILES = Object.freeze([0.25, 0.5, 0.75]);
@@ -82,33 +85,63 @@ function planExit(forecast, model, features, options = {}) {
   if (model.horizon !== forecast.horizon || !(forecast.referencePrice > 0)) throw new Error('Exit forecast mismatch');
   const estimates = estimateExcursions(model, features);
   const long = forecast.direction === 'UP';
-  const targetMovePct = estimates[long ? 'up' : 'down'][1];
-  const stopMovePct = estimates[long ? 'down' : 'up'][2];
-  if (!(targetMovePct > 0 && stopMovePct > 0)) return { ...base, status: 'UNAVAILABLE', reason: 'NON_POSITIVE_EXCURSION_ESTIMATE', estimates };
+  if (options.targetLevels === true && options.reachabilityModel?.kind === ADAPTIVE_KIND) {
+    validateReachability(options.reachabilityModel, forecast.symbol, forecast.modelId, model.modelId);
+    if (options.reachabilityModel.horizon !== forecast.horizon) throw new Error('Reachability horizon mismatch');
+    return sizeExitPlan({ ...base, entryReference: forecast.referencePrice, referenceBasis: 'SIGNAL_CANDLE_CLOSE',
+      referenceTime: forecast.candleCloseTime, expiresAt: forecast.targetCloseTime, horizon: forecast.horizon,
+      priceTick: options.tickSize, estimates, method: 'ADAPTIVE_STOP_NET_EXPECTANCY',
+      ...planAdaptiveExits(forecast, estimates, options.reachabilityModel, features, options) });
+  }
+  if (options.netRewardRisk != null) throw new Error('Use targetLevels:true for the TP1/TP2 policy');
+  if (options.targetLevels != null && typeof options.targetLevels !== 'boolean') throw new Error('Invalid targetLevels option');
+  const netRiskMode = options.targetLevels === true;
+  const targetMovePct = estimates[long ? 'up' : 'down'][netRiskMode ? 2 : 1];
+  const stopMovePct = estimates[long ? 'down' : 'up'][netRiskMode ? 1 : 2];
+  if (!(stopMovePct > 0) || (!netRiskMode && !(targetMovePct > 0))) {
+    return { ...base, status: 'UNAVAILABLE', reason: 'NON_POSITIVE_EXCURSION_ESTIMATE', estimates };
+  }
   const entryReference = forecast.referencePrice;
-  const takeProfit = roundPrice(entryReference * (1 + (long ? 1 : -1) * targetMovePct / 100),
+  let takeProfit = roundPrice(entryReference * (1 + (long ? 1 : -1) * targetMovePct / 100),
     options.tickSize, long ? 'FLOOR' : 'CEIL');
   const stopLoss = roundPrice(entryReference * (1 - (long ? 1 : -1) * stopMovePct / 100),
     options.tickSize, long ? 'FLOOR' : 'CEIL');
-  if (!(takeProfit > 0 && stopLoss > 0 && (long ? takeProfit > entryReference && stopLoss < entryReference :
-    takeProfit < entryReference && stopLoss > entryReference))) {
+  if (!(stopLoss > 0 && (long ? stopLoss < entryReference : stopLoss > entryReference)) ||
+      (!netRiskMode && !(takeProfit > 0 && (long ? takeProfit > entryReference : takeProfit < entryReference)))) {
     return { ...base, status: 'UNAVAILABLE', reason: 'ESTIMATE_BELOW_PRICE_TICK', estimates };
+  }
+  const feePct = Number(options.feePct ?? 0.05), slippagePct = Number(options.slippagePct ?? 0.02);
+  if (![feePct, slippagePct].every(value => Number.isFinite(value) && value >= 0)) throw new Error('Invalid exit cost assumptions');
+  let riskDetails = {};
+  if (netRiskMode) {
+    if (!options.reachabilityModel) return { ...base, riskPolicyId: RISK_POLICY_ID,
+      status: 'UNAVAILABLE', reason: 'REACHABILITY_MODEL_UNAVAILABLE', estimates };
+    validateReachability(options.reachabilityModel, forecast.symbol, forecast.modelId, model.modelId);
+    if (options.reachabilityModel.horizon !== forecast.horizon) throw new Error('Reachability horizon mismatch');
+    riskDetails = { modelRangeQ75: takeProfit,
+      ...planReachableTargets(options.reachabilityModel, features, forecast.probabilities,
+      { side: long ? 'LONG' : 'SHORT',
+      entryFill: entryReference * (1 + (long ? 1 : -1) * slippagePct / 100),
+      stopLoss, tickSize: options.tickSize,
+      costAssumptions: { feePctPerSide: feePct, slippagePctPerSide: slippagePct } }) };
+    if (riskDetails.status !== 'ESTIMATED') return { ...base, ...riskDetails, estimates,
+      horizon: forecast.horizon, expiresAt: forecast.targetCloseTime };
+    takeProfit = riskDetails.takeProfit;
   }
   const targetPct = Math.abs(takeProfit / entryReference - 1) * 100;
   const stopPct = Math.abs(stopLoss / entryReference - 1) * 100;
-  const feePct = Number(options.feePct ?? 0.05), slippagePct = Number(options.slippagePct ?? 0.02);
-  if (![feePct, slippagePct].every(value => Number.isFinite(value) && value >= 0)) throw new Error('Invalid exit cost assumptions');
   const roundTripCostsPct = 2 * (feePct + slippagePct);
   return sizeExitPlan({ ...base, status: 'ESTIMATED', side: long ? 'LONG' : 'SHORT',
     entryReference, referenceBasis: 'SIGNAL_CANDLE_CLOSE', referenceTime: forecast.candleCloseTime,
     expiresAt: forecast.targetCloseTime, horizon: forecast.horizon, takeProfit, stopLoss,
     targetPct, stopPct, rewardRisk: targetPct / stopPct,
-    targetQuantile: 0.5, stopQuantile: 0.75, estimates,
+    targetQuantile: netRiskMode ? null : 0.5, stopQuantile: netRiskMode ? 0.5 : 0.75, estimates,
     priceTick: options.tickSize || null, tickRoundingApplied: Boolean(options.tickSize),
     costAssumptions: { feePctPerSide: feePct, slippagePctPerSide: slippagePct },
     estimatedNetRewardRisk: (targetPct - roundTripCostsPct) / (stopPct + roundTripCostsPct),
     coversEstimatedCosts: targetPct > roundTripCostsPct,
-    method: 'HISTORICAL_EXCURSION_QUANTILES' });
+    method: netRiskMode ? 'MODEL_STOP_INTRAHORIZON_TP1_TP2' : 'HISTORICAL_EXCURSION_QUANTILES',
+    ...riskDetails });
 }
 
 module.exports = { KIND, QUANTILES, excursionScale, excursionLabels, validateExitModel,

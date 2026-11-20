@@ -50,11 +50,13 @@
     "fetch:predictive": "node scripts/fetch-predictive-klines.js",
     "train:predictive": "node scripts/train-predictive.js",
     "train:predictive-exits": "node scripts/train-predictive-exits.js",
+    "train:predictive-adaptive-exits": "node scripts/train-predictive-adaptive-exits.js",
+    "evaluate:predictive-net-forward": "node scripts/evaluate-predictive-net-forward.js",
     "research:predictive": "OPENBLAS_NUM_THREADS=2 node scripts/research-predictive-direction.js",
     "start:predictive-shadow": "node scripts/start-predictive-shadow.js",
     "check:predictive-live": "node scripts/start-predictive-live.js --check",
     "test:predictive-live": "node --test tests/predictive-live.test.js",
-    "test:predictive": "node --test tests/predictive-shadow.test.js tests/predictive-direction.test.js tests/predictive-exits.test.js"
+    "test:predictive": "node --test tests/predictive-shadow.test.js tests/predictive-direction.test.js tests/predictive-exits.test.js tests/predictive-reachability.test.js tests/predictive-adaptive-exits.test.js tests/predictive-live.test.js"
   },
   "keywords": [],
   "author": "",
