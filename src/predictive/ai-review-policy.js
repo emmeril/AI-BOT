@@ -12,6 +12,7 @@ function buildAiReviewConfig(environment = {}) {
     model: String(environment.PREDICTIVE_AI_REVIEW_MODEL || environment.AI_SIGNAL_MODEL || 'gemini-3.8-flash-high'),
     failureMode: String(environment.PREDICTIVE_AI_REVIEW_FAILURE_MODE || 'BLOCK'),
     positionExitPolicy: environment.PREDICTIVE_LIVE_POSITION_EXIT_POLICY || 'PREDICTION_REVERSAL',
+    maxOpenPositions: Number(environment.PREDICTIVE_LIVE_MAX_OPEN_POSITIONS || 1),
     binary: environment.PREDICTIVE_AI_REVIEW_BIN || environment.AI_SIGNAL_ANTIGRAVITY_BIN,
     timeoutMs: Number(environment.PREDICTIVE_AI_REVIEW_TIMEOUT_MS || 30000),
     minimumConfidence: Number(environment.PREDICTIVE_AI_REVIEW_MIN_CONFIDENCE ?? 65),
@@ -20,7 +21,8 @@ function buildAiReviewConfig(environment = {}) {
     historyLimit: 1000,
   };
   if (!['BLOCK', 'PRIMARY_FALLBACK'].includes(config.failureMode) ||
-      !['PREDICTION_REVERSAL', 'HORIZON'].includes(config.positionExitPolicy) ||
+      !['TP_SL_ONLY', 'PREDICTION_REVERSAL', 'HORIZON'].includes(config.positionExitPolicy) ||
+      ![1, 2].includes(config.maxOpenPositions) ||
       !config.model.trim() || !Number.isFinite(config.timeoutMs) || config.timeoutMs <= 0 || config.timeoutMs > 30000 ||
       !Number.isInteger(config.minimumConfidence) || config.minimumConfidence < 0 || config.minimumConfidence > 100 ||
       !Number.isFinite(config.maxReviewAgeMs) || config.maxReviewAgeMs <= 0 || config.maxReviewAgeMs > FORECAST_MAX_AGE_MS) {
@@ -30,6 +32,7 @@ function buildAiReviewConfig(environment = {}) {
   config.effort = config.model.match(/-(low|medium|high)$/)?.[1] || 'low';
   config.configId = crypto.createHash('sha256').update(JSON.stringify({ policyId: config.policyId,
     model: config.model, effort: config.effort, failureMode: config.failureMode, positionExitPolicy: config.positionExitPolicy,
+    maxOpenPositions: config.maxOpenPositions,
     timeoutMs: config.timeoutMs, minimumConfidence: config.minimumConfidence,
     maxReviewAgeMs: config.maxReviewAgeMs })).digest('hex');
   return config;
@@ -175,7 +178,8 @@ function buildReviewSnapshot(forecast, candles, now, options = {}) {
       probabilityTimeout: plan.probabilityTimeout, costAssumptions: plan.costAssumptions,
       riskPolicyId: plan.riskPolicyId, modelId: forecast.modelId, exitModelId: plan.exitModelId,
       reachabilityModelId: plan.reachabilityModelId,
-      liveSizing: { marginUsdt: 5, leverage: 10, targetNotionalUsdt: 50, compounding: false } } };
+      liveSizing: { marginUsdt: 5, leverage: 10, targetNotionalUsdt: 50, compounding: false,
+        maxOpenPositions: options.maxOpenPositions || 1, maxPositionsPerSide: 1 } } };
 }
 
 module.exports = { AI_REVIEW_POLICY_ID, FORECAST_MAX_AGE_MS, buildAiReviewConfig, candidateFingerprint,

@@ -9,6 +9,7 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { CrossProcessMutex } = require('../src/cross-process-mutex');
 const { buildLiveConfig } = require('../src/predictive/live-policy');
 const { PredictiveLiveEngine } = require('../src/predictive/live-engine');
+const { PredictiveHedgeEngine } = require('../src/predictive/hedge-engine');
 
 function loadEnvironment() {
   const root = path.resolve(__dirname, '..');
@@ -30,7 +31,8 @@ async function main() {
   const exchange = new ccxt.binanceusdm({ apiKey: environment.EXCHANGE_API_KEY,
     secret: environment.EXCHANGE_SECRET, enableRateLimit: true,
     options: { adjustForTimeDifference: true, recvWindow: 10000, fetchCurrencies: false } });
-  const engine = new PredictiveLiveEngine({ config, exchange });
+  const Engine = config.maxOpenPositions === 2 ? PredictiveHedgeEngine : PredictiveLiveEngine;
+  const createEngine = () => new Engine({ config, exchange });
   const redact = error => {
     let message = String(error?.message || error).replace(/signature=[^&\s]+/g, 'signature=[redacted]');
     for (const value of [environment.EXCHANGE_API_KEY, environment.EXCHANGE_SECRET]) {
@@ -39,10 +41,11 @@ async function main() {
     return message;
   };
   if (mode === '--check') {
+    const engine = createEngine();
     const report = await engine.preflight();
     console.log(JSON.stringify({ ...report, orderExecutionEnabled: false,
       inspectedAt: new Date().toISOString(), checkWasReadOnly: true }, null, 2));
-    if (!report.evidence.matchesUserCriteria || report.aiReview?.approved === false) process.exitCode = 2;
+    if (report.status !== 'CONFIGURATION_VERIFIED_READ_ONLY') process.exitCode = 2;
     return;
   }
   fs.mkdirSync(path.dirname(config.stateFile), { recursive: true });
@@ -51,10 +54,13 @@ async function main() {
   process.once('SIGINT', () => shutdown.abort());
   process.once('SIGTERM', () => shutdown.abort());
   await mutex.run('DOGEUSDT-predictive-60m', async () => {
-    if (!engine.state.tracked && !engine.state.intent && !engine.state.pausedReason) await engine.configureAccount();
-    console.log('[PREDICTIVE LIVE] DOGEUSDT horizon=60 margin=5USDT leverage=10 notionalTarget=50USDT isolated one-position');
+    const engine = createEngine();
+    const active = config.maxOpenPositions === 2 ? engine.hasExposure() : engine.state.tracked || engine.state.intent;
+    if (!active && !engine.state.pausedReason) await engine.configureAccount();
+    console.log('[PREDICTIVE LIVE] DOGEUSDT horizon=60 marginPerPosition=5USDT leverage=10 notionalPerPosition=50USDT isolated maxPositions=' + config.maxOpenPositions);
     console.log('[PREDICTIVE LIVE] ' + JSON.stringify({ positionExitPolicy: config.positionExitPolicy,
-      timeBasedPositionExit: config.positionExitPolicy === 'HORIZON', aiReviewEnabled: config.aiReview.enabled,
+      timeBasedPositionExit: config.positionExitPolicy === 'HORIZON', maxOpenPositions: config.maxOpenPositions,
+      maxTotalNotionalUsdt: config.maxTotalNotionalUsdt, aiReviewEnabled: config.aiReview.enabled,
       aiReviewRequired: config.aiReview.enabled && config.aiReview.failureMode === 'BLOCK',
       aiReviewFailureMode: config.aiReview.failureMode,
       aiReviewModel: config.aiReview.model, aiReviewTimeoutMs: config.aiReview.timeoutMs, aiReviewStateFile: config.aiReview.stateFile }));

@@ -8,6 +8,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { buildLiveConfig, selectLiveForecast, buildEntryPlan, candidateEvidence, openPositions } = require('../src/predictive/live-policy');
 const { PredictiveLiveEngine, loadLiveState, saveLiveState } = require('../src/predictive/live-engine');
+const { PredictiveHedgeEngine, hedgeState } = require('../src/predictive/hedge-engine');
 const { RISK_POLICY_ID } = require('../src/predictive/net-risk-reward');
 const { ADAPTIVE_POLICY_ID } = require('../src/predictive/adaptive-exits');
 const { planReachableTargets } = require('../src/predictive/reachability');
@@ -42,7 +43,8 @@ function fixture(t, options = {}) {
     approvedForTrading: false, temperature: 1, classifier: { kind: 'softmax-baseline-v1',
       mean: [0], std: [1], weights: [[0, 0], [0, 0], [0, 0]] } }));
   const config = buildLiveConfig({ PREDICTIVE_LIVE_ENABLED: options.enabled === false ? 'false' : 'true',
-    PREDICTIVE_LIVE_POSITION_EXIT_POLICY: options.positionExitPolicy || 'HORIZON',
+    PREDICTIVE_LIVE_POSITION_EXIT_POLICY: options.positionExitPolicy || (options.hedged ? 'TP_SL_ONLY' : 'HORIZON'),
+    PREDICTIVE_LIVE_MAX_OPEN_POSITIONS: options.hedged ? '2' : '1',
     PREDICTIVE_LIVE_RISK_POLICY_ID: options.adaptive ? ADAPTIVE_POLICY_ID : RISK_POLICY_ID,
     PREDICTIVE_LIVE_MODEL_FILE: modelFile, PREDICTIVE_LIVE_STATE_FILE: path.join(dir, 'state.json'),
     PREDICTIVE_LIVE_REACHABILITY_MODEL_FILE: path.join(dir, 'reachability.json'),
@@ -80,17 +82,21 @@ function fixture(t, options = {}) {
     fapiPublicGetTickerBookTicker: async () => ({ symbol: 'DOGEUSDT', bidPrice: '0.05911', askPrice: '0.05912', time: context.now }),
     fapiPrivatePostLeverage: async params => { context.writes.push({ method: 'leverage', params }); context.leverage = params.leverage; return params; },
     fapiPrivatePostMarginType: async params => { context.writes.push({ method: 'margin', params }); context.marginType = params.marginType; return params; },
+    fapiPrivatePostPositionSideDual: async params => { context.writes.push({ method: 'hedgeMode', params }); context.hedgeMode = params.dualSidePosition === 'true'; return params; },
     fapiPrivatePostOrder: async params => {
-      context.writes.push({ method: 'order', params: clone(params), savedIntent: clone(engine.state.intent) });
+      context.writes.push({ method: 'order', params: clone(params), savedIntent: clone(engine.state.intent),
+        savedHedgeIntent: options.hedged ? clone(engine.state.slots[params.positionSide].intent) : undefined });
       if (params.newClientOrderId.startsWith('p60-x-')) {
-        context.positions = [];
+        context.positions = options.hedged ? context.positions.filter(row => row.positionSide !== params.positionSide) : [];
         return { orderId: 'close-order', status: 'FILLED', executedQty: String(params.quantity), avgPrice: '0.0591' };
       }
       const avgPrice = options.fillPrice || 0.05912;
       const signed = params.positionSide === 'SHORT' || (params.positionSide === 'BOTH' && params.side === 'SELL') ? -1 : 1;
-      context.positions = [{ symbol: 'DOGEUSDT', positionSide: params.positionSide,
-        positionAmt: String(signed * params.quantity), entryPrice: String(avgPrice) }];
-      const order = { orderId: 'entry-order', status: 'FILLED', executedQty: String(params.quantity), avgPrice: String(avgPrice) };
+      const newPosition = { symbol: 'DOGEUSDT', positionSide: params.positionSide,
+        positionAmt: String(signed * params.quantity), entryPrice: String(avgPrice) };
+      context.positions = options.hedged ? [...context.positions.filter(row => row.positionSide !== params.positionSide), newPosition] : [newPosition];
+      const order = { orderId: options.hedged ? 'entry-' + params.positionSide + '-' + context.writes.length : 'entry-order',
+        status: 'FILLED', executedQty: String(params.quantity), avgPrice: String(avgPrice) };
       context.orderMap.set(params.newClientOrderId, order);
       if (options.entryTimeout) throw new Error('Request timeout');
       return order;
@@ -102,7 +108,7 @@ function fixture(t, options = {}) {
     },
     fapiPrivatePostAlgoOrder: async params => {
       context.writes.push({ method: 'algo', params: clone(params) });
-      if (options.failTakeProfit && params.type === 'TAKE_PROFIT_MARKET') throw new Error('TP placement rejected');
+      if ((options.failTakeProfit || options.failTakeProfitSide === params.positionSide) && params.type === 'TAKE_PROFIT_MARKET') throw new Error('TP placement rejected');
       const order = { ...params, orderType: params.type, algoId: String(++context.algoId) };
       context.algorithms.push(order); return clone(order);
     },
@@ -114,7 +120,8 @@ function fixture(t, options = {}) {
   };
   const state = loadLiveState(config.stateFile);
   state.initialWalletUsdt = context.wallet;
-  let engine = new PredictiveLiveEngine({ config, exchange, state, now: () => context.now,
+  const Engine = options.hedged ? PredictiveHedgeEngine : PredictiveLiveEngine;
+  let engine = new Engine({ config, exchange, state, now: () => context.now,
     readForecasts: () => context.forecasts, readAiReviews: () => context.aiReviews,
     save: () => context.saved.push(clone(engine.state)) });
   return { context, config, exchange, engine, market, dir };
@@ -1360,4 +1367,253 @@ test('protection failure can still close an aligned position after its original 
   await engine.cycle();
   assert.equal(engine.state.tracked, null);
   assert.equal(engine.state.closed.at(-1).reason, 'PROTECTION_FAILURE');
+});
+
+test('TP/SL-only positions ignore both forecast reversals and the original forecast deadline', async t => {
+  const { engine, context } = fixture(t, { adaptive: true, positionExitPolicy: 'TP_SL_ONLY' });
+  await engine.cycle();
+  context.now = engine.state.tracked.plan.expiresAt + 3600000;
+  publishDirection(context, 'DOWN');
+  await engine.cycle();
+  engine.readForecasts = () => { throw new Error('No prediction data'); };
+  await engine.cycle();
+  assert.ok(engine.state.tracked);
+  assert.equal(context.algorithms.length, 2);
+  assert.equal(context.writes.filter(row => row.method === 'order').length, 1);
+});
+
+async function openHedgePair(t, options = {}) {
+  const result = fixture(t, { adaptive: true, hedged: true, ...options });
+  await result.engine.cycle();
+  result.context.now += 60000;
+  publishDirection(result.context, 'DOWN');
+  await result.engine.cycle();
+  return result;
+}
+
+test('hedge mode opens an opposite entry without closing the first position or stacking a side', async t => {
+  const { engine, context } = await openHedgePair(t);
+  assert.equal(engine.state.version, 2);
+  assert.deepEqual(engine.state.openSides, ['LONG', 'SHORT']);
+  assert.equal(context.positions.length, 2);
+  assert.equal(context.algorithms.length, 4);
+  const entries = context.writes.filter(row => row.method === 'order');
+  assert.equal(entries.length, 2);
+  assert.deepEqual(entries.map(row => row.params.positionSide), ['LONG', 'SHORT']);
+  assert.equal(entries[1].savedHedgeIntent.plan.side, 'SHORT');
+  assert.equal(entries[1].savedHedgeIntent.phase, 'SUBMITTING');
+  context.now += 60000;
+  publishDirection(context, 'DOWN');
+  await engine.cycle();
+  assert.equal(context.writes.filter(row => row.method === 'order').length, 2);
+  assert.equal(engine.state.closed.length, 0);
+});
+
+test('both hedge slots and their four protective orders survive a process restart and expired forecasts', async t => {
+  const { engine, context, config, exchange } = await openHedgePair(t);
+  saveLiveState(config.stateFile, engine.state);
+  const resumed = new PredictiveHedgeEngine({ config, exchange, now: () => context.now,
+    save: () => {}, readForecasts: () => context.forecasts });
+  context.now += 24 * 3600000;
+  publishDirection(context, 'UP');
+  await resumed.cycle();
+  assert.deepEqual(resumed.state.openSides, ['LONG', 'SHORT']);
+  assert.equal(context.algorithms.length, 4);
+  assert.equal(context.writes.filter(row => row.method === 'order').length, 2);
+});
+
+test('a TP/SL close on one hedge side cancels only that side protective orders', async t => {
+  const { engine, context } = await openHedgePair(t);
+  const shortIds = context.algorithms.filter(row => row.positionSide === 'SHORT').map(row => row.algoId);
+  context.positions = context.positions.filter(row => row.positionSide !== 'LONG');
+  await engine.cycle(); await engine.cycle();
+  assert.equal(engine.state.slots.LONG.tracked, null);
+  assert.ok(engine.state.slots.SHORT.tracked);
+  assert.deepEqual(context.algorithms.map(row => row.algoId).sort(), shortIds.sort());
+  assert.equal(context.writes.filter(row => row.method === 'order').length, 2);
+  assert.equal(engine.state.closed.at(-1).side, 'LONG');
+});
+
+test('an SL repair failure reduces only its owned hedge leg while the other leg stays protected', async t => {
+  const { engine, context } = await openHedgePair(t);
+  const longIds = context.algorithms.filter(row => row.positionSide === 'LONG').map(row => row.algoId);
+  context.options.failTakeProfitSide = 'SHORT';
+  context.algorithms = context.algorithms.filter(row => !(row.positionSide === 'SHORT' && row.type === 'TAKE_PROFIT_MARKET'));
+  await engine.cycle(); await engine.cycle();
+  assert.ok(engine.state.slots.LONG.tracked);
+  assert.equal(engine.state.slots.SHORT.tracked, null);
+  assert.deepEqual(context.positions.map(row => row.positionSide), ['LONG']);
+  assert.deepEqual(context.algorithms.map(row => row.algoId).sort(), longIds.sort());
+  const close = context.writes.filter(row => row.method === 'order').at(-1).params;
+  assert.equal(close.side, 'BUY'); assert.equal(close.positionSide, 'SHORT');
+});
+
+test('hedge entry still requires enough available USDT for the second margin and fees', async t => {
+  const { engine, context } = fixture(t, { adaptive: true, hedged: true });
+  await engine.cycle();
+  context.available = 5;
+  context.now += 60000; publishDirection(context, 'DOWN');
+  await assert.rejects(engine.cycle(), /Insufficient free USDT/);
+  assert.equal(context.writes.filter(row => row.method === 'order').length, 1);
+  assert.ok(engine.state.slots.LONG.tracked);
+  assert.equal(engine.state.slots.SHORT.tracked, null);
+});
+
+test('hedge mode blocks foreign positions without adopting, closing or cancelling them', async t => {
+  const { engine, context } = fixture(t, { adaptive: true, hedged: true });
+  await engine.cycle();
+  context.positions.push({ symbol: 'DOGEUSDT', positionSide: 'SHORT', positionAmt: '-100', entryPrice: '0.05912' });
+  context.now += 60000; publishDirection(context, 'DOWN');
+  const result = await engine.cycle();
+  assert.equal(result.reason, 'FOREIGN_DOGE_POSITION');
+  assert.equal(engine.state.slots.SHORT.tracked, null);
+  assert.equal(context.positions.length, 2);
+  assert.equal(context.writes.filter(row => row.method === 'order').length, 1);
+  assert.equal(context.algorithms.length, 2);
+});
+
+test('one hedge manager failure cannot prevent protection repair for the other side', async t => {
+  const { engine, context } = await openHedgePair(t);
+  engine.engines.LONG.manageTrackedPosition = async () => { throw new Error('LONG endpoint unavailable'); };
+  context.algorithms = context.algorithms.filter(row => !(row.positionSide === 'SHORT' && row.type === 'STOP_MARKET'));
+  const result = await engine.cycle();
+  assert.equal(result.reason, 'HEDGE_MANAGEMENT_ERROR');
+  assert.equal(engine.state.lastManagementErrors[0].side, 'LONG');
+  assert.equal(context.algorithms.length, 4);
+  assert.equal(context.writes.filter(row => row.method === 'order').length, 2);
+});
+
+test('an uncertain hedge entry blocks further entries and recovers without a duplicate submission', async t => {
+  const { engine, context } = fixture(t, { adaptive: true, hedged: true, entryTimeout: true, lookupUnavailable: true });
+  await assert.rejects(engine.cycle(), /unresolved/);
+  assert.ok(engine.state.slots.LONG.intent);
+  context.now += 60000; publishDirection(context, 'DOWN');
+  await engine.cycle();
+  assert.equal(context.writes.filter(row => row.method === 'order').length, 1);
+  context.options.lookupUnavailable = false;
+  await engine.cycle();
+  assert.ok(engine.state.slots.LONG.tracked);
+  assert.ok(engine.state.slots.SHORT.tracked);
+  assert.equal(context.algorithms.length, 4);
+  assert.equal(context.writes.filter(row => row.method === 'order').length, 2);
+});
+
+test('the shared session loss budget blocks new hedge entries while both existing sides stay managed', async t => {
+  const { engine, context } = await openHedgePair(t);
+  context.wallet -= 5;
+  context.algorithms = context.algorithms.filter(row => !(row.positionSide === 'SHORT' && row.type === 'STOP_MARKET'));
+  const result = await engine.cycle();
+  assert.equal(result.reason, 'SESSION_LOSS_BUDGET_REACHED');
+  assert.equal(engine.state.pausedReason, 'SESSION_LOSS_BUDGET_REACHED');
+  assert.equal(context.algorithms.length, 4);
+  assert.equal(context.positions.length, 2);
+  assert.equal(context.writes.filter(row => row.method === 'order').length, 2);
+});
+
+test('legacy owned positions migrate into one hedge slot without changing their protective IDs or budget', async t => {
+  const { engine, context, config, exchange } = fixture(t, { adaptive: true, positionExitPolicy: 'TP_SL_ONLY' });
+  await engine.cycle();
+  const original = structuredClone(engine.state.tracked.plan);
+  const hedge = new PredictiveHedgeEngine({ config: { ...config, maxOpenPositions: 2, maxTotalNotionalUsdt: 100 },
+    exchange, state: structuredClone(engine.state), save: () => {}, now: () => context.now,
+    readForecasts: () => context.forecasts });
+  await hedge.cycle();
+  assert.equal(hedge.state.initialWalletUsdt, engine.state.initialWalletUsdt);
+  assert.equal(hedge.state.slots.LONG.tracked.plan.stopClientId, original.stopClientId);
+  assert.equal(hedge.state.slots.LONG.tracked.plan.takeClientId, original.takeClientId);
+  assert.equal(hedge.state.slots.SHORT.tracked, null);
+  assert.equal(context.writes.filter(row => row.method === 'order').length, 1);
+  const invalid = structuredClone(engine.state); invalid.tracked.plan.positionSide = 'BOTH';
+  assert.throws(() => hedgeState(invalid), /cannot be migrated into hedge slots/);
+  invalid.tracked.plan.positionSide = 'LONG'; invalid.tracked.plan.symbol = 'ETHUSDT';
+  assert.throws(() => hedgeState(invalid), /foreign position/);
+});
+
+test('a hedge account cannot submit into one-way mode or enable reversal exits for concurrent slots', async t => {
+  assert.throws(() => buildLiveConfig({ PREDICTIVE_LIVE_MAX_OPEN_POSITIONS: '2',
+    PREDICTIVE_LIVE_POSITION_EXIT_POLICY: 'PREDICTION_REVERSAL' }), /require TP_SL_ONLY/);
+  const { engine, context } = fixture(t, { adaptive: true, hedged: true, hedgeMode: false });
+  await assert.rejects(engine.cycle(), /require Hedge Mode/);
+  assert.equal(context.writes.length, 0);
+});
+
+test('a second hedge entry is cancelled if the first side loses protection before submission', async t => {
+  const { engine, context } = fixture(t, { adaptive: true, hedged: true });
+  await engine.cycle();
+  context.now += 60000; publishDirection(context, 'DOWN');
+  const guard = engine.beforeEntry.bind(engine);
+  let checks = 0;
+  engine.beforeEntry = async plan => {
+    if (++checks === 2) context.algorithms = context.algorithms.filter(row => !(row.positionSide === 'LONG' && row.type === 'STOP_MARKET'));
+    await guard(plan);
+  };
+  await assert.rejects(engine.cycle(), /HEDGE_PROTECTION_NOT_CONFIRMED/);
+  assert.equal(engine.state.slots.SHORT.intent, null);
+  assert.equal(engine.state.slots.SHORT.tracked, null);
+  assert.equal(context.writes.filter(row => row.method === 'order').length, 1);
+  await engine.cycle();
+  assert.equal(context.algorithms.length, 4);
+  assert.equal(context.writes.filter(row => row.method === 'order').length, 2);
+});
+
+test('an incomplete second-side fill is reconciled while preserving the first side and its protection', async t => {
+  const { engine, exchange, context } = fixture(t, { adaptive: true, hedged: true });
+  await engine.cycle();
+  const submit = exchange.fapiPrivatePostOrder;
+  exchange.fapiPrivatePostOrder = async params => {
+    const result = await submit(params);
+    return params.positionSide === 'SHORT' ? { ...result, executedQty: '0', avgPrice: '0', cumQuote: '0' } : result;
+  };
+  context.now += 60000; publishDirection(context, 'DOWN');
+  await engine.cycle();
+  assert.ok(engine.state.slots.LONG.tracked);
+  assert.ok(engine.state.slots.SHORT.tracked);
+  assert.equal(engine.state.slots.SHORT.intent, null);
+  assert.equal(context.algorithms.length, 4);
+  assert.equal(context.writes.filter(row => row.method === 'order').length, 2);
+});
+
+test('hedge preflight can inspect a free opposite slot without changing orders or runtime state', async t => {
+  const { engine, exchange, context, config } = fixture(t, { adaptive: true, hedged: true });
+  await engine.cycle();
+  context.now += 60000; publishDirection(context, 'DOWN');
+  const readonly = new PredictiveHedgeEngine({ config: { ...config, enabled: false }, exchange,
+    state: structuredClone(engine.state), now: () => context.now, readForecasts: () => context.forecasts,
+    save: () => { throw new Error('Read-only preflight attempted to persist state'); } });
+  const before = JSON.stringify(readonly.state), writes = context.writes.length;
+  const report = await readonly.preflight();
+  assert.equal(report.status, 'CONFIGURATION_VERIFIED_READ_ONLY');
+  assert.equal(report.side, 'SHORT'); assert.equal(report.maxOpenPositions, 2);
+  assert.equal(report.maxTotalNotionalUsdt, 100);
+  assert.equal(JSON.stringify(readonly.state), before);
+  assert.equal(context.writes.length, writes);
+});
+
+test('Hedge Mode is enabled only on a flat account and never by closing a foreign position', async t => {
+  for (const foreign of [false, true]) {
+    const { engine, context } = fixture(t, { adaptive: true, hedged: true, hedgeMode: false });
+    if (foreign) context.positions.push({ symbol: 'DOGEUSDT', positionSide: 'BOTH', positionAmt: '100', entryPrice: '0.05912' });
+    await engine.configureAccount();
+    assert.equal(context.hedgeMode, !foreign);
+    assert.equal(context.writes.some(row => row.method === 'hedgeMode'), !foreign);
+    assert.equal(context.writes.filter(row => row.method === 'order').length, 0);
+  }
+});
+
+test('restart discards a prepared unsent hedge intent without querying or duplicating an order', async t => {
+  const { engine, config, exchange, context } = fixture(t, { adaptive: true, hedged: true });
+  const plan = (await engine.preflight()).plan;
+  engine.state.slots.LONG.intent = { plan, phase: 'PREPARED', submittedAt: context.now, previouslyConsumedForecastId: 'previous-signal' };
+  engine.state.slots.LONG.consumedForecastId = plan.forecastId;
+  let queries = 0;
+  exchange.fapiPrivateGetOrder = async () => { queries++; throw new Error('An unsent order must not be queried'); };
+  const resumed = new PredictiveHedgeEngine({ config, exchange, state: structuredClone(engine.state),
+    now: () => context.now, save: () => {}, readForecasts: () => context.forecasts });
+  context.forecasts.records[0].exitPlan.status = 'UNAVAILABLE';
+  context.forecasts.records[0].exitPlan.reason = 'NON_POSITIVE_EXPECTED_NET';
+  await resumed.cycle();
+  assert.equal(resumed.state.slots.LONG.intent, null);
+  assert.equal(resumed.state.slots.LONG.consumedForecastId, 'previous-signal');
+  assert.equal(queries, 0);
+  assert.equal(context.writes.length, 0);
 });

@@ -18,6 +18,8 @@ function buildLiveConfig(environment = {}) {
     symbol: environment.PREDICTIVE_LIVE_SYMBOL || 'DOGEUSDT',
     horizon: Number(environment.PREDICTIVE_LIVE_HORIZON || 60),
     positionExitPolicy: environment.PREDICTIVE_LIVE_POSITION_EXIT_POLICY || 'PREDICTION_REVERSAL',
+    maxOpenPositions: Number(environment.PREDICTIVE_LIVE_MAX_OPEN_POSITIONS || 1),
+    entrySide: environment.PREDICTIVE_LIVE_ENTRY_SIDE || null,
     marginUsdt: Number(environment.PREDICTIVE_LIVE_MARGIN_USDT || 5),
     leverage: Number(environment.PREDICTIVE_LIVE_LEVERAGE || 10),
     sessionLossBudgetUsdt: Number(environment.PREDICTIVE_LIVE_LOSS_BUDGET_USDT || 5),
@@ -34,8 +36,12 @@ function buildLiveConfig(environment = {}) {
   if (config.symbol !== 'DOGEUSDT' || config.horizon !== 60 || config.marginUsdt !== 5 || config.leverage !== 10 ||
       config.sessionLossBudgetUsdt !== 5) throw new Error('This live profile requires DOGEUSDT, horizon 60, fixed 5 USDT margin and 10x leverage');
   config.notionalUsdt = config.marginUsdt * config.leverage;
+  config.maxTotalNotionalUsdt = config.notionalUsdt * config.maxOpenPositions;
   if (![RISK_POLICY_ID, ADAPTIVE_POLICY_ID].includes(config.riskPolicyId)) throw new Error('Unsupported predictive exit policy');
-  if (!['PREDICTION_REVERSAL', 'HORIZON'].includes(config.positionExitPolicy)) throw new Error('Unsupported position exit policy');
+  if (!['TP_SL_ONLY', 'PREDICTION_REVERSAL', 'HORIZON'].includes(config.positionExitPolicy)) throw new Error('Unsupported position exit policy');
+  if (![1, 2].includes(config.maxOpenPositions) ||
+      (config.entrySide !== null && !['LONG', 'SHORT'].includes(config.entrySide))) throw new Error('Invalid hedge position limits');
+  if (config.maxOpenPositions === 2 && config.positionExitPolicy !== 'TP_SL_ONLY') throw new Error('Concurrent hedge positions require TP_SL_ONLY exits');
   config.aiReview = buildAiReviewConfig(environment);
   return config;
 }
@@ -147,6 +153,7 @@ function insideProtection(price, side, plan) {
 }
 
 function buildEntryPlan(config, forecast, market, book, availableBalance, hedgeMode, now = Date.now(), reachabilityModel) {
+  if (config.maxOpenPositions === 2 && !hedgeMode) throw new Error('Concurrent LONG/SHORT entries require Hedge Mode');
   if (market?.symbol !== config.symbol || market.status !== 'TRADING') throw new Error('DOGE market is not trading');
   const filters = Object.fromEntries(market.filters.map(filter => [filter.filterType, filter]));
   const lot = filters.MARKET_LOT_SIZE || filters.LOT_SIZE;
@@ -186,7 +193,7 @@ function buildEntryPlan(config, forecast, market, book, availableBalance, hedgeM
   const notional = quantity * estimatedEntry;
   if (!(quantity > 0) || quantity < minQty || quantity > maxQty ||
       notional < minNotional || notional > config.notionalUsdt + 1e-8) throw new Error('50 USDT target violates exchange quantity or notional limits');
-  const token = crypto.createHash('sha256').update(forecast.id).digest('hex').slice(0, 18);
+  const token = crypto.createHash('sha256').update(config.maxOpenPositions === 2 ? forecast.id + ':' + side : forecast.id).digest('hex').slice(0, 18);
   return { forecastId: forecast.id, modelId: forecast.modelId, exitModelId: forecast.exitPlan.exitModelId,
     forecastCandleCloseTime: forecast.candleCloseTime, forecastCreatedAt: Date.parse(forecast.createdAt),
     positionExitPolicy: config.positionExitPolicy,

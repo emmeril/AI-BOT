@@ -34,7 +34,7 @@ function saveLiveState(file, state) {
 }
 
 class PredictiveLiveEngine {
-  constructor({ config, exchange, state, save, readForecasts, readAiReviews, now = Date.now }) {
+  constructor({ config, exchange, state, save, readForecasts, readAiReviews, beforeEntry, now = Date.now }) {
     this.config = config;
     this.exchange = exchange;
     this.state = state || loadLiveState(config.stateFile);
@@ -42,6 +42,7 @@ class PredictiveLiveEngine {
     this.readForecasts = readForecasts || (() => JSON.parse(fs.readFileSync(config.forecastFile)));
     this.readAiReviews = readAiReviews || (() => loadAiReviewState(config.aiReview.stateFile));
     this.now = now;
+    this.beforeEntry = beforeEntry;
     const model = JSON.parse(fs.readFileSync(config.modelFile));
     validateDirectionModel(model, config.symbol);
     if (model.horizon !== config.horizon || !model.modelId) throw new Error('Selected live model must be the current 60 minute direction model');
@@ -82,6 +83,9 @@ class PredictiveLiveEngine {
   }
 
   assertEntryReview(plan) {
+    if (this.config.entrySide && (plan.side !== this.config.entrySide || plan.positionSide !== this.config.entrySide)) {
+      throw new Error('Entry plan does not match its hedge side');
+    }
     if (!this.config.aiReview.enabled) return;
     if (!Number.isFinite(plan.quoteTime) || plan.quoteTime > this.now() + 2000 || this.now() - plan.quoteTime > 10000) {
       throw new Error('Entry quote expired before submission');
@@ -122,6 +126,7 @@ class PredictiveLiveEngine {
   }
 
   validateAccount(snapshot) {
+    if (this.config.maxOpenPositions === 2 && snapshot.hedgeMode !== true) throw new Error('Concurrent LONG/SHORT entries require Hedge Mode');
     if (!asBoolean(snapshot.accountConfig.canTrade)) throw new Error('Futures trading permission is unavailable');
     if (asBoolean(snapshot.accountConfig.multiAssetsMargin)) throw new Error('This profile requires single-asset isolated margin');
     if (asBoolean(snapshot.settings.isAutoAddMargin)) throw new Error('Disable DOGE auto-add margin before using the fixed margin profile');
@@ -148,7 +153,7 @@ class PredictiveLiveEngine {
       availableUsdt: snapshot.availableUsdt, walletUsdt: snapshot.walletUsdt,
       currentLeverage: Number(snapshot.settings.leverage), requestedLeverage: this.config.leverage,
       currentMarginType: snapshot.settings.marginType, requestedMarginType: 'ISOLATED',
-      hedgeMode: snapshot.hedgeMode, maxOpenPositions: 1, sessionLossBudgetUsdt: this.config.sessionLossBudgetUsdt,
+      hedgeMode: snapshot.hedgeMode, maxOpenPositions: this.config.maxOpenPositions, sessionLossBudgetUsdt: this.config.sessionLossBudgetUsdt,
       directionModelId: this.expectedModelId, reachabilityModelId: this.expectedReachabilityModelId, evidence, aiReview, plan };
   }
 
@@ -175,7 +180,9 @@ class PredictiveLiveEngine {
 
   async cancelOwnedOrders(orders) {
     this.assertEnabled();
-    for (const order of orders.filter(ownedAlgo)) {
+    const plan = this.state.tracked?.plan;
+    const ids = [plan?.stopClientId, plan?.takeClientId];
+    for (const order of orders.filter(row => ownedAlgo(row) && plan && ids.includes(row.clientAlgoId) && row.positionSide === plan.positionSide)) {
       await this.exchange.fapiPrivateDeleteAlgoOrder({ symbol: this.config.symbol, algoId: order.algoId });
     }
   }
@@ -213,6 +220,12 @@ class PredictiveLiveEngine {
     this.assertEnabled();
     const intent = this.state.intent;
     if (!intent) return;
+    if (intent.phase === 'PREPARED') {
+      this.state.intent = null;
+      this.state.consumedForecastId = intent.previouslyConsumedForecastId ?? null;
+      this.save();
+      return;
+    }
     try {
       const order = await this.exchange.fapiPrivateGetOrder({ symbol: this.config.symbol,
         origClientOrderId: intent.plan.entryClientId });
@@ -226,12 +239,19 @@ class PredictiveLiveEngine {
 
   async enter(plan) {
     this.assertEnabled();
+    if (this.beforeEntry) await this.beforeEntry(plan);
     this.assertEntryReview(plan);
     const previouslyConsumed = this.state.consumedForecastId;
     this.state.consumedForecastId = plan.forecastId;
-    this.state.intent = { plan, submittedAt: this.now() };
+    this.state.intent = { plan, submittedAt: this.now(), phase: 'PREPARED', previouslyConsumedForecastId: previouslyConsumed };
     this.save();
-    try { this.assertEntryReview(plan); }
+    try {
+      if (this.beforeEntry) await this.beforeEntry(plan);
+      this.assertEntryReview(plan);
+      this.state.intent.phase = 'SUBMITTING';
+      this.save();
+      this.assertEntryReview(plan);
+    }
     catch (error) {
       this.state.intent = null;
       this.state.consumedForecastId = previouslyConsumed;
@@ -428,6 +448,9 @@ class PredictiveLiveEngine {
     const tracked = this.state.tracked;
     this.state.closed.push({ forecastId: tracked?.plan.forecastId || null,
       entryOrderId: tracked?.orderId || null, entryPrice: tracked?.entryPrice || null,
+      entryClientId: tracked?.plan.entryClientId || null, positionSide: tracked?.plan.positionSide || null,
+      exitOrderId: tracked?.closing?.orderId || null, exitClientId: tracked?.closing?.clientOrderId || null,
+      stopClientId: tracked?.plan.stopClientId || null, takeClientId: tracked?.plan.takeClientId || null,
       quantity: tracked?.quantity || null, side: tracked?.plan.side || null,
       takeProfit: tracked?.plan.takeProfit || null, stopLoss: tracked?.plan.stopLoss || null,
       positionExitPolicy: this.config.positionExitPolicy, directionReview: tracked?.directionReview || null,
@@ -462,7 +485,7 @@ class PredictiveLiveEngine {
     }
     if (this.config.positionExitPolicy === 'HORIZON') {
       if (this.now() >= tracked.plan.expiresAt) { await this.close('HORIZON_EXPIRED'); return; }
-    } else {
+    } else if (this.config.positionExitPolicy === 'PREDICTION_REVERSAL') {
       let review;
       try { review = positionDirectionReview(this.readForecasts(), this.config, tracked.plan, this.expectedModelId, this.now()); }
       catch { review = { close: false, reason: 'PREDICTION_UNAVAILABLE', forecastId: null, direction: null }; }
@@ -476,7 +499,7 @@ class PredictiveLiveEngine {
     await this.ensureProtection(snapshot);
   }
 
-  async cycle() {
+  async cycle({ manageOnly = false } = {}) {
     this.assertEnabled();
     if (this.state.intent) {
       try { await this.resolveIntent(); }
@@ -490,6 +513,7 @@ class PredictiveLiveEngine {
       await this.manageTrackedPosition();
       return this.state.intent ? { status: 'ENTRY_PENDING', forecastId: this.state.intent.plan.forecastId } : undefined;
     }
+    if (manageOnly) return { status: 'FLAT' };
     const snapshot = await this.snapshot();
     this.validateAccount(snapshot);
     if (this.state.pausedReason) return { status: 'PAUSED', reason: this.state.pausedReason };
@@ -514,6 +538,7 @@ class PredictiveLiveEngine {
       throw error;
     }
     if (forecast.id === this.state.consumedForecastId) return { status: 'WAITING', reason: 'FORECAST_ALREADY_CONSUMED' };
+    if (this.config.entrySide && forecast.exitPlan.side !== this.config.entrySide) return { status: 'WAITING', reason: 'FORECAST_FOR_OTHER_HEDGE_SIDE' };
     const aiReview = this.reviewEntry(forecast);
     if (!aiReview.approved) return { status: 'WAITING', reason: aiReview.reason, aiReview, evidence };
     const plan = buildEntryPlan(this.config, forecast, snapshot.market, snapshot.book, snapshot.availableUsdt,
