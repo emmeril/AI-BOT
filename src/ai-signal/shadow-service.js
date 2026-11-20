@@ -34,7 +34,7 @@ function buildShadowConfig(environment = process.env) {
     candleCloseBufferMs: Math.max(0, readNumber(environment, 'AI_SIGNAL_CANDLE_CLOSE_BUFFER_MS', 30_000)),
     minimumConfidence: Math.min(100, Math.max(0, readNumber(environment, 'AI_SIGNAL_MIN_CONFIDENCE', 65))),
     timeoutMs: Math.max(10_000, readNumber(environment, 'AI_SIGNAL_TIMEOUT_MS', 120_000)),
-    model: String(environment.AI_SIGNAL_MODEL || 'gemini-3.8-flash-low'),
+    model: String(environment.AI_SIGNAL_MODEL || 'gemini-3.8-flash-high'),
     binary: environment.AI_SIGNAL_ANTIGRAVITY_BIN || undefined,
     statePath: path.resolve(environment.AI_SIGNAL_SHADOW_STATE_FILE || 'ai-signal-shadow-state.json'),
     historyLimit: Math.max(100, readNumber(environment, 'AI_SIGNAL_HISTORY_LIMIT', 6000)),

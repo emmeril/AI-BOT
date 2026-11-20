@@ -38,7 +38,7 @@ class PredictiveAiReviewService {
     this.state = state || loadAiReviewState(config.stateFile);
     this.save = save || (() => saveAiReviewState(config.stateFile, this.state));
     this.provider = provider || ((snapshots, options) => requestAntigravity(snapshots,
-      { ...options, environment, binary: config.binary, model: config.model,
+      { ...options, environment, binary: config.binary, model: config.model, effort: config.effort,
         minimumConfidence: config.minimumConfidence, timeoutMs: config.timeoutMs,
         strictDeadline: true, purpose: 'PREDICTIVE_ENTRY_REVIEW', liveEnabled: true }));
     this.job = null;
@@ -54,6 +54,7 @@ class PredictiveAiReviewService {
     this.state.updatedAt = this.now();
     this.state.enabled = this.config.enabled;
     this.state.model = this.config.model;
+    this.state.effort = this.config.effort;
     this.state.configId = this.config.configId;
     this.state.timeoutMs = this.config.timeoutMs;
     this.state.reviews = this.state.reviews.slice(-this.config.historyLimit);
@@ -80,7 +81,7 @@ class PredictiveAiReviewService {
     const frozen = structuredClone(forecast);
     const requestedAt = this.now();
     const review = { id: `${AI_REVIEW_POLICY_ID}:${forecast.id}:${fingerprint.slice(0, 16)}:${requestedAt}`,
-      policyId: AI_REVIEW_POLICY_ID, configId: this.config.configId, model: this.config.model,
+      policyId: AI_REVIEW_POLICY_ID, configId: this.config.configId, model: this.config.model, effort: this.config.effort,
       forecastId: forecast.id, candidateFingerprint: fingerprint, requestedAt,
       expiresAt: forecastReviewExpiry(forecast), status: 'PENDING', reason: 'AI_REVIEW_PENDING' };
     this.state.reviews.push(review);

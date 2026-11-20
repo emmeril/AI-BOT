@@ -160,6 +160,8 @@ function normalizeDecisions(raw, symbols, minimumConfidence = 65) {
 async function requestAntigravity(snapshots, options = {}) {
   const binary = options.binary || path.join(os.homedir(), '.local', 'bin', 'agy');
   const timeoutMs = Math.max(10_000, Number(options.timeoutMs) || 120_000);
+  const effort = options.effort ?? String(options.model || '').match(/-(low|medium|high)$/)?.[1] ?? 'low';
+  if (!['low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) throw new Error('Invalid Antigravity effort');
   const childEnvironment = { ...process.env, ...(options.environment || {}) };
   delete childEnvironment.GEMINI_API_KEY;
   delete childEnvironment.GOOGLE_API_KEY;
@@ -174,7 +176,7 @@ async function requestAntigravity(snapshots, options = {}) {
     '--mode', 'plan',
     '--sandbox',
     '--disable-slash-commands',
-    '--effort', 'low',
+    '--effort', effort,
     '--print-timeout', `${Math.ceil(timeoutMs / 1000)}s`,
   ];
   if (options.model) args.push('--model', options.model);

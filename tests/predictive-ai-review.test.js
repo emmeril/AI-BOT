@@ -68,6 +68,8 @@ function serviceFixture(t, options = {}) {
 test('AI review configuration keeps a hard 30 second maximum and is opt-in', () => {
   assert.equal(buildAiReviewConfig().enabled, false);
   assert.equal(config().timeoutMs, 30000);
+  assert.equal(config().model, 'gemini-3.8-flash-high');
+  assert.equal(config().effort, 'high');
   assert.throws(() => config({ PREDICTIVE_AI_REVIEW_TIMEOUT_MS: '30001' }), /Invalid/);
   assert.throws(() => config({ PREDICTIVE_AI_REVIEW_MIN_CONFIDENCE: '101' }), /Invalid/);
   assert.throws(() => config({ PREDICTIVE_AI_REVIEW_MAX_AGE_MS: '120001' }), /Invalid/);

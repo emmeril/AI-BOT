@@ -9,7 +9,7 @@ const FORECAST_MAX_AGE_MS = 120000;
 function buildAiReviewConfig(environment = {}) {
   const config = {
     enabled: environment.PREDICTIVE_AI_REVIEW_ENABLED === true || environment.PREDICTIVE_AI_REVIEW_ENABLED === 'true',
-    model: String(environment.PREDICTIVE_AI_REVIEW_MODEL || environment.AI_SIGNAL_MODEL || 'gemini-3.8-flash-low'),
+    model: String(environment.PREDICTIVE_AI_REVIEW_MODEL || environment.AI_SIGNAL_MODEL || 'gemini-3.8-flash-high'),
     binary: environment.PREDICTIVE_AI_REVIEW_BIN || environment.AI_SIGNAL_ANTIGRAVITY_BIN,
     timeoutMs: Number(environment.PREDICTIVE_AI_REVIEW_TIMEOUT_MS || 30000),
     minimumConfidence: Number(environment.PREDICTIVE_AI_REVIEW_MIN_CONFIDENCE ?? 65),
@@ -23,8 +23,9 @@ function buildAiReviewConfig(environment = {}) {
     throw new Error('Invalid predictive AI review configuration');
   }
   config.policyId = AI_REVIEW_POLICY_ID;
+  config.effort = config.model.match(/-(low|medium|high)$/)?.[1] || 'low';
   config.configId = crypto.createHash('sha256').update(JSON.stringify({ policyId: config.policyId,
-    model: config.model, timeoutMs: config.timeoutMs, minimumConfidence: config.minimumConfidence,
+    model: config.model, effort: config.effort, timeoutMs: config.timeoutMs, minimumConfidence: config.minimumConfidence,
     maxReviewAgeMs: config.maxReviewAgeMs })).digest('hex');
   return config;
 }

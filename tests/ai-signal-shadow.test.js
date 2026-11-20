@@ -153,7 +153,7 @@ test('predictive entry review prompt evaluates frozen candidates with a strict s
   let argumentsUsed, optionsUsed;
   const controller = new AbortController();
   await requestAntigravity([{ symbol: 'DOGEUSDT', candidate: { side: 'LONG', expectedNetPct: 0.1 } }], {
-    purpose: 'PREDICTIVE_ENTRY_REVIEW', liveEnabled: true, timeoutMs: 30000,
+    purpose: 'PREDICTIVE_ENTRY_REVIEW', liveEnabled: true, timeoutMs: 30000, model: 'gemini-3.8-flash-high',
     strictDeadline: true, signal: controller.signal,
     execFile: async (_binary, args, options) => {
       argumentsUsed = args; optionsUsed = options;
@@ -165,6 +165,8 @@ test('predictive entry review prompt evaluates frozen candidates with a strict s
   });
   assert.equal(optionsUsed.timeout, 30000);
   assert.equal(optionsUsed.signal, controller.signal);
+  assert.equal(argumentsUsed[argumentsUsed.indexOf('--model') + 1], 'gemini-3.8-flash-high');
+  assert.equal(argumentsUsed[argumentsUsed.indexOf('--effort') + 1], 'high');
   assert.match(argumentsUsed[1], /approve that candidate direction or choose HOLD/);
   assert.match(argumentsUsed[1], /Never reverse a candidate/);
   assert.match(argumentsUsed[1], /completed 1-minute candles/);
@@ -226,7 +228,7 @@ test('shadow configuration defaults to a 15-minute independent worker', () => {
   const config = buildShadowConfig({ SYMBOLS: 'A,B' });
   assert.equal(config.intervalMs, 15 * 60_000);
   assert.equal(config.timeframe, '15m');
-  assert.equal(config.model, 'gemini-3.8-flash-low');
+  assert.equal(config.model, 'gemini-3.8-flash-high');
   assert.equal(config.maximumRefreshMs, 4 * 60 * 60_000);
   assert.equal(config.featureConfirmationCandles, 3);
   assert.deepEqual(config.symbols, ['A', 'B']);
