@@ -1127,3 +1127,60 @@ test('an explicitly rejected zero-fill order still clears the intent and pauses 
   assert.equal((await engine.cycle()).status, 'PAUSED');
   assert.equal(context.writes.filter(r => r.method === 'order').length, 1);
 });
+
+test('protection is installed even when the position endpoint fails immediately after entry', async t => {
+  const { engine, exchange, context } = fixture(t, { adaptive: true });
+  const readPositions = exchange.fapiPrivateV3GetPositionRisk;
+  exchange.fapiPrivateV3GetPositionRisk = async params => {
+    if (context.positions.length) throw new Error('Position endpoint unavailable');
+    return readPositions(params);
+  };
+  await assert.rejects(engine.cycle(), /Position endpoint unavailable/);
+  assert.ok(engine.state.tracked);
+  assert.ok(engine.state.tracked.protectedAt);
+  assert.equal(context.algorithms.length, 2);
+  assert.equal(context.writes.filter(r => r.method === 'order').length, 1);
+});
+
+test('restart repairs missing protection while the position endpoint is unavailable', async t => {
+  const { engine, exchange, context, config } = fixture(t, { adaptive: true });
+  await engine.cycle();
+  const state = structuredClone(engine.state);
+  delete state.tracked.protectedAt;
+  context.algorithms = [];
+  exchange.fapiPrivateV3GetPositionRisk = async () => { throw new Error('Position endpoint unavailable'); };
+  const resumed = new PredictiveLiveEngine({ config, exchange, state,
+    now: () => context.now, save: () => {}, readForecasts: () => context.forecasts });
+  await assert.rejects(resumed.cycle(), /Position endpoint unavailable/);
+  assert.ok(resumed.state.tracked.protectedAt);
+  assert.equal(context.algorithms.length, 2);
+  assert.equal(context.writes.filter(r => r.method === 'order').length, 1);
+});
+
+test('an incomplete FILLED close is queried across restart without another market close', async t => {
+  for (const reportedQuantity of ['0', '200', null]) {
+    const { engine, exchange, context, config } = fixture(t, { adaptive: true });
+    await engine.cycle();
+    const query = exchange.fapiPrivateGetOrder;
+    let queries = 0;
+    exchange.fapiPrivatePostOrder = async params => {
+      context.writes.push({ method: 'order', params: structuredClone(params) });
+      const confirmed = { orderId: 'incomplete-close', clientOrderId: params.newClientOrderId,
+        status: 'FILLED', executedQty: String(params.quantity), avgPrice: '0.0591' };
+      context.orderMap.set(params.newClientOrderId, confirmed);
+      return { ...confirmed, executedQty: reportedQuantity };
+    };
+    exchange.fapiPrivateGetOrder = async params => {
+      if (params.origClientOrderId.startsWith('p60-x-')) { queries++; context.positions = []; }
+      return query(params);
+    };
+    context.now = engine.state.tracked.plan.expiresAt + 1;
+    await engine.cycle();
+    const resumed = new PredictiveLiveEngine({ config, exchange, state: structuredClone(engine.state),
+      now: () => context.now, save: () => {}, readForecasts: () => context.forecasts });
+    for (let i = 0; i < 4 && resumed.state.tracked; i++) await resumed.cycle();
+    assert.equal(queries, 1, 'the existing close order must be reconciled');
+    assert.equal(Boolean(resumed.state.tracked), false);
+    assert.equal(context.writes.filter(r => r.method === 'order').length, 2);
+  }
+});

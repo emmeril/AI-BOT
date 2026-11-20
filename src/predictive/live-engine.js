@@ -249,8 +249,8 @@ class PredictiveLiveEngine {
     }
     if (needsReconciliation && this.state.intent) await this.resolveIntent();
     if (this.state.tracked) {
-      await this.ensureProtection(await this.positionSnapshot());
-      if (this.state.tracked && !this.state.tracked.closing) await this.manage(await this.positionSnapshot());
+      await this.ensureProtection({});
+      if (this.state.tracked && !this.state.tracked.closing) await this.manageTrackedPosition();
     }
   }
 
@@ -303,7 +303,9 @@ class PredictiveLiveEngine {
 
   recordCloseOrder(order) {
     const tracked = this.state.tracked, closing = tracked.closing;
-    const executedQty = Number(order?.executedQty);
+    const rawQuantity = order?.executedQty;
+    const executedQty = ['string', 'number'].includes(typeof rawQuantity) && String(rawQuantity).trim()
+      ? Number(rawQuantity) : NaN;
     if (!['NEW', 'PARTIALLY_FILLED', 'PENDING_CANCEL', ...TERMINAL_ORDER_STATUSES].includes(order?.status) ||
         !Number.isFinite(executedQty) || executedQty < 0 ||
         (order.clientOrderId && order.clientOrderId !== closing.clientOrderId)) {
@@ -361,7 +363,10 @@ class PredictiveLiveEngine {
       tracked.closing.quantity = tracked.quantity;
       this.save();
     }
-    if (tracked.closing && !TERMINAL_ORDER_STATUSES.has(tracked.closing.status)) await this.resolveCloseIntent();
+    const closing = tracked.closing;
+    if (closing && (!TERMINAL_ORDER_STATUSES.has(closing.status) ||
+        (closing.status === 'FILLED' && !(Number.isFinite(closing.executedQty) &&
+          closing.executedQty >= closing.quantity - 1e-8)))) await this.resolveCloseIntent();
     if (!position && (tracked.positionSeen || tracked.closeConfirmed || this.now() - tracked.enteredAt >= 15000)) {
       await this.confirmFlat(snapshot, reason); return;
     }
@@ -428,6 +433,16 @@ class PredictiveLiveEngine {
     this.state.tracked = null; this.save();
   }
 
+  async manageTrackedPosition() {
+    let snapshot;
+    try { snapshot = await this.positionSnapshot(); }
+    catch (error) {
+      if (this.state.tracked && !this.state.tracked.closing) await this.ensureProtection({});
+      throw error;
+    }
+    if (this.state.tracked) await this.manage(snapshot);
+  }
+
   async manage(snapshot) {
     const tracked = this.state.tracked;
     if (tracked.closing) { await this.close(tracked.closing.reason); return; }
@@ -451,13 +466,13 @@ class PredictiveLiveEngine {
     if (this.state.intent) {
       try { await this.resolveIntent(); }
       catch (error) {
-        if (this.state.tracked) await this.manage(await this.positionSnapshot());
+        if (this.state.tracked) await this.manageTrackedPosition();
         throw error;
       }
       if (this.state.intent && !this.state.tracked) return { status: 'ENTRY_PENDING', forecastId: this.state.intent.plan.forecastId };
     }
     if (this.state.tracked) {
-      await this.manage(await this.positionSnapshot());
+      await this.manageTrackedPosition();
       return this.state.intent ? { status: 'ENTRY_PENDING', forecastId: this.state.intent.plan.forecastId } : undefined;
     }
     const snapshot = await this.snapshot();
