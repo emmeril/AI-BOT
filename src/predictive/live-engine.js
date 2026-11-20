@@ -179,7 +179,12 @@ class PredictiveLiveEngine {
   }
 
   recordFill(order, plan) {
-    const quantity = Number(order?.executedQty), entryPrice = Number(order?.avgPrice);
+    const rawQuantity = order?.executedQty;
+    const quantity = ['string', 'number'].includes(typeof rawQuantity) && String(rawQuantity).trim()
+      ? Number(rawQuantity) : NaN;
+    const reportedPrice = Number(order?.avgPrice), cumulativeQuote = Number(order?.cumQuote);
+    const entryPrice = Number.isFinite(reportedPrice) && reportedPrice > 0 ? reportedPrice :
+      Number.isFinite(cumulativeQuote) && cumulativeQuote > 0 && quantity > 0 ? cumulativeQuote / quantity : NaN;
     if (Number.isFinite(quantity) && quantity > 0 && Number.isFinite(entryPrice) && entryPrice > 0) {
       const tracked = this.state.tracked;
       if (tracked && (tracked.plan.entryClientId !== plan.entryClientId || tracked.orderId !== String(order.orderId))) {
@@ -196,7 +201,7 @@ class PredictiveLiveEngine {
       this.save();
       return true;
     }
-    if (TERMINAL_ORDER_STATUSES.has(order.status)) {
+    if (TERMINAL_ORDER_STATUSES.has(order?.status) && order.status !== 'FILLED' && quantity === 0) {
       this.state.intent = null; this.state.pausedReason = 'ENTRY_REJECTED'; this.save();
     }
     return false;
@@ -231,16 +236,18 @@ class PredictiveLiveEngine {
       this.save();
       throw error;
     }
+    let needsReconciliation = false;
     try {
       const order = await this.exchange.fapiPrivatePostOrder({ symbol: plan.symbol, side: plan.orderSide,
         positionSide: plan.positionSide, type: 'MARKET', quantity: plan.quantity,
         newClientOrderId: plan.entryClientId, newOrderRespType: 'RESULT' });
-      this.recordFill(order, plan);
+      needsReconciliation = !this.recordFill(order, plan);
     } catch (error) {
       if (!this.state.pausedReason) this.state.pausedReason = 'ENTRY_SUBMISSION_UNCERTAIN';
       this.save();
       await this.resolveIntent();
     }
+    if (needsReconciliation && this.state.intent) await this.resolveIntent();
     if (this.state.tracked) {
       await this.ensureProtection(await this.positionSnapshot());
       if (this.state.tracked && !this.state.tracked.closing) await this.manage(await this.positionSnapshot());

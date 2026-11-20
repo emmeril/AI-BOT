@@ -1042,3 +1042,88 @@ test('a primary fallback cannot submit a plan after its underlying TP/SL candida
   await assert.rejects(engine.cycle(), /approval changed or expired/);
   assert.equal(context.writes.length, 0);
 });
+
+test('a filled entry with a zero average price uses the confirmed executed quote to install protection', async t => {
+  const { engine, exchange, context } = fixture(t, { adaptive: true });
+  const submit = exchange.fapiPrivatePostOrder;
+  exchange.fapiPrivatePostOrder = async params => {
+    const order = await submit(params);
+    return { ...order, avgPrice: '0', cumQuote: String(Number(order.executedQty) * Number(order.avgPrice)) };
+  };
+  assert.equal((await engine.cycle()).status, 'POSITION_OPEN');
+  assert.ok(Math.abs(engine.state.tracked.entryPrice - 0.05912) < 1e-12);
+  assert.equal(engine.state.pausedReason, null);
+  assert.equal(engine.state.intent, null);
+  assert.equal(context.algorithms.length, 2);
+  assert.equal(context.writes.filter(r => r.method === 'order').length, 1);
+});
+
+test('an incomplete FILLED submission response is queried immediately before protecting the owned position', async t => {
+  const { engine, exchange, context } = fixture(t, { adaptive: true });
+  const submit = exchange.fapiPrivatePostOrder;
+  let queries = 0;
+  const query = exchange.fapiPrivateGetOrder;
+  exchange.fapiPrivateGetOrder = async params => { queries++; return query(params); };
+  exchange.fapiPrivatePostOrder = async params => {
+    const order = await submit(params);
+    return { ...order, executedQty: '0', avgPrice: '0', cumQuote: '0' };
+  };
+  assert.equal((await engine.cycle()).status, 'POSITION_OPEN');
+  assert.equal(queries, 1);
+  assert.equal(engine.state.intent, null);
+  assert.equal(engine.state.pausedReason, null);
+  assert.equal(context.algorithms.length, 2);
+  assert.equal(context.writes.filter(r => r.method === 'order').length, 1);
+});
+
+test('repeated incomplete fill details retain the entry intent across restart and never submit a second entry', async t => {
+  for (const incomplete of [
+    { status: 'FILLED', executedQty: '0', avgPrice: '0' },
+    { status: 'FILLED', executedQty: '200', avgPrice: '0' },
+    { status: 'EXPIRED', executedQty: '200', avgPrice: '0' },
+    { status: 'CANCELED' },
+    { status: 'CANCELED', executedQty: null },
+    { status: 'CANCELED', executedQty: ' ' },
+  ]) {
+    const { engine, exchange, context, config } = fixture(t, { adaptive: true });
+    let complete, clientId;
+    const submit = exchange.fapiPrivatePostOrder;
+    exchange.fapiPrivatePostOrder = async params => {
+      complete = await submit(params); clientId = params.newClientOrderId;
+      if (['CANCELED', 'EXPIRED'].includes(incomplete.status)) {
+        complete = { ...complete, status: incomplete.status, executedQty: '200' };
+        context.positions[0].positionAmt = '200';
+      }
+      const partial = { orderId: complete.orderId, ...incomplete };
+      context.orderMap.set(clientId, partial);
+      return partial;
+    };
+    assert.equal((await engine.cycle()).status, 'ENTRY_PENDING');
+    assert.ok(engine.state.intent);
+    assert.equal(engine.state.pausedReason, null);
+    const resumed = new PredictiveLiveEngine({ config, exchange, state: structuredClone(engine.state),
+      now: () => context.now, save: () => {}, readForecasts: () => context.forecasts });
+    assert.equal((await resumed.cycle()).status, 'ENTRY_PENDING');
+    context.orderMap.set(clientId, complete);
+    await resumed.cycle();
+    assert.ok(resumed.state.tracked);
+    assert.equal(resumed.state.intent, null);
+    assert.equal(resumed.state.pausedReason, null);
+    assert.equal(context.algorithms.length, 2);
+    assert.equal(context.writes.filter(r => r.method === 'order').length, 1);
+  }
+});
+
+test('an explicitly rejected zero-fill order still clears the intent and pauses new entries', async t => {
+  const { engine, exchange, context } = fixture(t, { adaptive: true });
+  exchange.fapiPrivatePostOrder = async params => {
+    context.writes.push({ method: 'order', params });
+    return { orderId: 'rejected-entry', status: 'REJECTED', executedQty: '0', avgPrice: '0' };
+  };
+  await engine.cycle();
+  assert.equal(engine.state.intent, null);
+  assert.equal(engine.state.tracked, null);
+  assert.equal(engine.state.pausedReason, 'ENTRY_REJECTED');
+  assert.equal((await engine.cycle()).status, 'PAUSED');
+  assert.equal(context.writes.filter(r => r.method === 'order').length, 1);
+});
