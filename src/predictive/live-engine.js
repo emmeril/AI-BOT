@@ -10,6 +10,8 @@ const { RISK_POLICY_ID } = require('./net-risk-reward');
 const { ADAPTIVE_KIND, validateReachability, planReachableTargets } = require('./reachability');
 const { ADAPTIVE_POLICY_ID } = require('./adaptive-exits');
 
+const TERMINAL_ORDER_STATUSES = new Set(['FILLED', 'CANCELED', 'REJECTED', 'EXPIRED', 'EXPIRED_IN_MATCH']);
+
 function loadLiveState(file) {
   try {
     const state = JSON.parse(fs.readFileSync(file));
@@ -60,6 +62,11 @@ class PredictiveLiveEngine {
 
   assertEnabled() {
     if (this.config.enabled !== true) throw new Error('Live order execution is disabled; use read-only preflight');
+  }
+
+  async positionSnapshot() {
+    const rows = await this.exchange.fapiPrivateV3GetPositionRisk({ symbol: this.config.symbol });
+    return { positions: openPositions(rows) };
   }
 
   async snapshot() {
@@ -142,15 +149,24 @@ class PredictiveLiveEngine {
   }
 
   recordFill(order, plan) {
-    if (Number(order.executedQty) > 0 && Number(order.avgPrice) > 0) {
-      this.state.tracked = { plan, enteredAt: this.now(), orderId: String(order.orderId),
-        entryPrice: Number(order.avgPrice), quantity: Number(order.executedQty), closeAttempts: 0,
-        positionSeen: false, flatChecks: 0 };
-      this.state.intent = null;
+    const quantity = Number(order?.executedQty), entryPrice = Number(order?.avgPrice);
+    if (Number.isFinite(quantity) && quantity > 0 && Number.isFinite(entryPrice) && entryPrice > 0) {
+      const tracked = this.state.tracked;
+      if (tracked && (tracked.plan.entryClientId !== plan.entryClientId || tracked.orderId !== String(order.orderId))) {
+        throw new Error('Entry fill does not match the owned order');
+      }
+      if (tracked && quantity < tracked.quantity) throw new Error('Entry cumulative fill decreased');
+      if (tracked) Object.assign(tracked, { entryPrice, quantity });
+      else this.state.tracked = { plan, enteredAt: this.now(), orderId: String(order.orderId),
+        closeAttempts: 0, positionSeen: false, flatChecks: 0, entryPrice, quantity };
+      if (TERMINAL_ORDER_STATUSES.has(order.status)) {
+        this.state.intent = null;
+        if (this.state.pausedReason === 'ENTRY_SUBMISSION_UNCERTAIN') this.state.pausedReason = null;
+      }
       this.save();
       return true;
     }
-    if (['CANCELED', 'REJECTED', 'EXPIRED'].includes(order.status)) {
+    if (TERMINAL_ORDER_STATUSES.has(order.status)) {
       this.state.intent = null; this.state.pausedReason = 'ENTRY_REJECTED'; this.save();
     }
     return false;
@@ -165,7 +181,7 @@ class PredictiveLiveEngine {
         origClientOrderId: intent.plan.entryClientId });
       this.recordFill(order, intent.plan);
     } catch (error) {
-      this.state.pausedReason = 'ENTRY_SUBMISSION_UNCERTAIN';
+      if (!this.state.pausedReason) this.state.pausedReason = 'ENTRY_SUBMISSION_UNCERTAIN';
       this.save();
       throw new Error('Entry outcome unresolved; no new entry will be submitted: ' + error.message);
     }
@@ -182,40 +198,43 @@ class PredictiveLiveEngine {
         newClientOrderId: plan.entryClientId, newOrderRespType: 'RESULT' });
       this.recordFill(order, plan);
     } catch (error) {
-      this.state.pausedReason = 'ENTRY_SUBMISSION_UNCERTAIN'; this.save();
+      if (!this.state.pausedReason) this.state.pausedReason = 'ENTRY_SUBMISSION_UNCERTAIN';
+      this.save();
       await this.resolveIntent();
     }
     if (this.state.tracked) {
-      await this.ensureProtection(await this.snapshot());
-      if (this.state.tracked && !this.state.tracked.closing) await this.manage(await this.snapshot());
+      await this.ensureProtection(await this.positionSnapshot());
+      if (this.state.tracked && !this.state.tracked.closing) await this.manage(await this.positionSnapshot());
     }
   }
 
   async ensureProtection(snapshot) {
     this.assertEnabled();
     const tracked = this.state.tracked, plan = tracked.plan;
-    if (plan.riskPolicyId === this.config.riskPolicyId) {
-      const risk = planReachableTargets(this.reachabilityModel, plan.contextFeatures, plan.directionProbabilities,
-        { side: plan.side, entryFill: tracked.entryPrice, stopLoss: plan.stopLoss, tickSize: plan.tick,
-        costAssumptions: plan.costAssumptions });
-      if (risk.status !== 'ESTIMATED') {
-        await this.close(plan.riskPolicyId === ADAPTIVE_POLICY_ID ?
-          'FILLED_ENTRY_NON_POSITIVE_EXPECTED_NET' : 'FILLED_ENTRY_TP1_BEFORE_SL_NOT_SUPPORTED');
+    try {
+      if (plan.riskPolicyId === this.config.riskPolicyId &&
+          plan.reachabilityModelId === this.expectedReachabilityModelId) {
+        const risk = planReachableTargets(this.reachabilityModel, plan.contextFeatures, plan.directionProbabilities,
+          { side: plan.side, entryFill: tracked.entryPrice, stopLoss: plan.stopLoss, tickSize: plan.tick,
+          costAssumptions: plan.costAssumptions });
+        if (risk.status !== 'ESTIMATED') {
+          await this.close(plan.riskPolicyId === ADAPTIVE_POLICY_ID ?
+            'FILLED_ENTRY_NON_POSITIVE_EXPECTED_NET' : 'FILLED_ENTRY_TP1_BEFORE_SL_NOT_SUPPORTED');
+          return;
+        }
+        const targetChanged = plan.takeProfit !== risk.takeProfit || plan.selectedTarget !== risk.selectedTarget;
+        Object.assign(plan, risk);
+        if (targetChanged) this.save();
+      }
+      if (!insideProtection(tracked.entryPrice, plan.side, plan) ||
+          tracked.quantity * tracked.entryPrice > this.config.notionalUsdt + 1e-8) {
+        await this.close('FILLED_ENTRY_OUTSIDE_BUDGET_OR_PROTECTION');
         return;
       }
-      const targetChanged = plan.takeProfit !== risk.takeProfit || plan.selectedTarget !== risk.selectedTarget;
-      Object.assign(plan, risk);
-      if (targetChanged) this.save();
-    }
-    if (!insideProtection(tracked.entryPrice, plan.side, plan) ||
-        tracked.quantity * tracked.entryPrice > this.config.notionalUsdt + 1e-8) {
-      await this.close('FILLED_ENTRY_OUTSIDE_BUDGET_OR_PROTECTION');
-      return;
-    }
-    try {
+      const algorithms = snapshot.algorithms ?? algoOrders(await this.exchange.fapiPrivateGetOpenAlgoOrders({ symbol: plan.symbol }));
       for (const kind of ['SL', 'TP']) {
         const clientId = kind === 'SL' ? plan.stopClientId : plan.takeClientId;
-        const existing = snapshot.algorithms.find(row => row.clientAlgoId === clientId);
+        const existing = algorithms.find(row => row.clientAlgoId === clientId);
         if (existing && protectionMatches(existing, plan, kind)) continue;
         if (existing) await this.exchange.fapiPrivateDeleteAlgoOrder({ symbol: plan.symbol, algoId: existing.algoId });
         try { await this.exchange.fapiPrivatePostAlgoOrder(protectionParameters(plan, kind)); }
@@ -236,32 +255,96 @@ class PredictiveLiveEngine {
     }
   }
 
+  recordCloseOrder(order) {
+    const tracked = this.state.tracked, closing = tracked.closing;
+    const executedQty = Number(order?.executedQty);
+    if (!['NEW', 'PARTIALLY_FILLED', 'PENDING_CANCEL', ...TERMINAL_ORDER_STATUSES].includes(order?.status) ||
+        !Number.isFinite(executedQty) || executedQty < 0 ||
+        (order.clientOrderId && order.clientOrderId !== closing.clientOrderId)) {
+      throw new Error('Invalid close order response');
+    }
+    closing.status = order.status;
+    closing.executedQty = executedQty;
+    closing.orderId = order.orderId == null ? null : String(order.orderId);
+    if (order.status === 'FILLED' && executedQty >= closing.quantity - 1e-8) tracked.closeConfirmed = true;
+    if (TERMINAL_ORDER_STATUSES.has(order.status) && this.state.pausedReason === 'CLOSE_SUBMISSION_UNCERTAIN') {
+      this.state.pausedReason = null;
+    }
+    this.save();
+  }
+
+  async resolveCloseIntent() {
+    const tracked = this.state.tracked;
+    try {
+      const order = await this.exchange.fapiPrivateGetOrder({ symbol: tracked.plan.symbol,
+        origClientOrderId: tracked.closing.clientOrderId });
+      this.recordCloseOrder(order);
+    } catch (error) {
+      if (!this.state.pausedReason) this.state.pausedReason = 'CLOSE_SUBMISSION_UNCERTAIN';
+      this.save();
+      throw new Error('Close outcome unresolved; no duplicate close will be submitted: ' + error.message);
+    }
+  }
+
   async close(reason) {
     this.assertEnabled();
     const tracked = this.state.tracked;
     if (!tracked) return;
-    const snapshot = await this.snapshot();
+    if (this.state.intent) {
+      const intent = this.state.intent;
+      if (intent.plan.entryClientId !== tracked.plan.entryClientId) throw new Error('Pending entry has a different owner');
+      try {
+        const order = await this.exchange.fapiPrivateDeleteOrder({ symbol: tracked.plan.symbol,
+          origClientOrderId: intent.plan.entryClientId });
+        this.recordFill(order, intent.plan);
+      } catch {
+        await this.resolveIntent();
+      }
+      if (this.state.intent) {
+        if (!this.state.pausedReason) this.state.pausedReason = 'ENTRY_SUBMISSION_UNCERTAIN';
+        this.save();
+        throw new Error('Pending entry cancellation is unresolved; protection remains active');
+      }
+    }
+    const snapshot = await this.positionSnapshot();
     const position = this.positionFor(snapshot, tracked.plan);
-    if (!position && (tracked.positionSeen || this.now() - tracked.enteredAt >= 15000)) {
+    const plan = tracked.plan;
+    if (position) { tracked.positionSeen = true; tracked.flatChecks = 0; }
+    if (tracked.closing && !tracked.closing.clientOrderId) {
+      tracked.closing.clientOrderId = `p60-x-${plan.token}-${Math.max(0, tracked.closeAttempts - 1)}`.slice(0, 36);
+      tracked.closing.quantity = tracked.quantity;
+      this.save();
+    }
+    if (tracked.closing && !TERMINAL_ORDER_STATUSES.has(tracked.closing.status)) await this.resolveCloseIntent();
+    if (!position && (tracked.positionSeen || tracked.closeConfirmed || this.now() - tracked.enteredAt >= 15000)) {
       await this.confirmFlat(snapshot, reason); return;
     }
-    const plan = tracked.plan;
+    if (tracked.closing && (tracked.closing.status === 'FILLED' || !TERMINAL_ORDER_STATUSES.has(tracked.closing.status))) return;
+    if (position && positionAmount(position) > tracked.quantity + 1e-8) {
+      this.state.pausedReason = 'POSITION_OWNERSHIP_CHANGED'; this.save();
+      throw new Error('DOGE position size changed externally; no additional close submitted');
+    }
     const attempt = tracked.closeAttempts++;
-    tracked.closing = { reason, submittedAt: this.now() }; this.save();
     const params = { symbol: plan.symbol, side: plan.side === 'LONG' ? 'SELL' : 'BUY',
       positionSide: plan.positionSide, type: 'MARKET', quantity: position ? positionAmount(position) : tracked.quantity,
       newClientOrderId: `p60-x-${plan.token}-${attempt}`.slice(0, 36), newOrderRespType: 'RESULT' };
     if (plan.positionSide === 'BOTH') params.reduceOnly = 'true';
+    tracked.closing = { reason: tracked.closing?.reason || reason, submittedAt: this.now(),
+      clientOrderId: params.newClientOrderId, quantity: params.quantity };
+    this.save();
     try {
       const order = await this.exchange.fapiPrivatePostOrder(params);
-      if (order.status === 'FILLED' && Number(order.executedQty) >= Number(params.quantity) - 1e-8) {
-        tracked.closeConfirmed = true; this.save();
-      }
+      this.recordCloseOrder(order);
     }
     catch (error) {
-      if (this.positionFor(await this.snapshot(), plan)) throw error;
+      const rejectionCode = Number(error.code ?? String(error.message).match(/"code"\s*:\s*(-\d+)/)?.[1]);
+      if ([-2022, -2024].includes(rejectionCode)) {
+        tracked.closing.status = 'REJECTED';
+        tracked.closing.rejectionCode = rejectionCode;
+        this.save();
+      } else await this.resolveCloseIntent();
     }
-    const after = await this.snapshot();
+    const after = await this.positionSnapshot();
     if (!this.positionFor(after, plan)) await this.confirmFlat(after, reason);
   }
 
@@ -279,19 +362,29 @@ class PredictiveLiveEngine {
 
   async finalizeFlat(snapshot, reason = 'EXCHANGE_POSITION_CLOSED') {
     this.assertEnabled();
-    await this.cancelOwnedOrders(snapshot.algorithms);
+    const algorithms = snapshot.algorithms ?? algoOrders(await this.exchange.fapiPrivateGetOpenAlgoOrders({ symbol: this.config.symbol }));
+    await this.cancelOwnedOrders(algorithms);
+    let walletUsdt = Number.isFinite(snapshot.walletUsdt) ? snapshot.walletUsdt : null;
+    if (walletUsdt === null) {
+      try {
+        const account = await this.exchange.fapiPrivateV3GetAccount();
+        const value = Number(account.assets?.find(row => row.asset === 'USDT')?.walletBalance ?? account.totalWalletBalance);
+        if (Number.isFinite(value)) walletUsdt = value;
+      } catch {}
+    }
     const tracked = this.state.tracked;
     this.state.closed.push({ forecastId: tracked?.plan.forecastId || null,
       entryOrderId: tracked?.orderId || null, entryPrice: tracked?.entryPrice || null,
       quantity: tracked?.quantity || null, side: tracked?.plan.side || null,
       takeProfit: tracked?.plan.takeProfit || null, stopLoss: tracked?.plan.stopLoss || null,
-      closedAt: this.now(), reason, walletUsdt: snapshot.walletUsdt });
+      closedAt: this.now(), reason, walletUsdt });
     this.state.closed = this.state.closed.slice(-1000);
     this.state.tracked = null; this.save();
   }
 
   async manage(snapshot) {
     const tracked = this.state.tracked;
+    if (tracked.closing) { await this.close(tracked.closing.reason); return; }
     const position = this.positionFor(snapshot, tracked.plan);
     if (!position) {
       if (!tracked.protectedAt && !tracked.closing) await this.ensureProtection(snapshot);
@@ -309,9 +402,19 @@ class PredictiveLiveEngine {
 
   async cycle() {
     this.assertEnabled();
-    if (this.state.intent) await this.resolveIntent();
+    if (this.state.intent) {
+      try { await this.resolveIntent(); }
+      catch (error) {
+        if (this.state.tracked) await this.manage(await this.positionSnapshot());
+        throw error;
+      }
+      if (this.state.intent && !this.state.tracked) return { status: 'ENTRY_PENDING', forecastId: this.state.intent.plan.forecastId };
+    }
+    if (this.state.tracked) {
+      await this.manage(await this.positionSnapshot());
+      return this.state.intent ? { status: 'ENTRY_PENDING', forecastId: this.state.intent.plan.forecastId } : undefined;
+    }
     const snapshot = await this.snapshot();
-    if (this.state.tracked) { await this.manage(snapshot); return; }
     this.validateAccount(snapshot);
     if (this.state.pausedReason) return { status: 'PAUSED', reason: this.state.pausedReason };
     if (snapshot.positions.length || snapshot.orders.length || snapshot.algorithms.length) {

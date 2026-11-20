@@ -37,9 +37,9 @@ function buildLiveConfig(environment = {}) {
 
 function selectLiveForecast(state, config, expectedModelId, now = Date.now(), expectedReachabilityModelId) {
   if (state?.objective !== 'PRICE_DIRECTION' || !Array.isArray(state.records)) throw new Error('Invalid direction state');
-  const latest = state.records.filter(r => r.symbol === config.symbol && r.horizon === config.horizon && r.status === 'FORECAST')
-    .sort((a, b) => b.candleCloseTime - a.candleCloseTime)[0];
-  if (!latest || latest.modelId !== expectedModelId || !Number.isFinite(latest.candleCloseTime) ||
+  const latest = state.records.filter(r => r.symbol === config.symbol && r.horizon === config.horizon)
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.candleCloseTime - a.candleCloseTime)[0];
+  if (!latest || latest.status !== 'FORECAST' || latest.modelId !== expectedModelId || !Number.isFinite(latest.candleCloseTime) ||
       latest.targetCloseTime !== latest.candleCloseTime + config.horizon * 60000 ||
       latest.candleCloseTime > now || now - latest.candleCloseTime > config.maxForecastAgeMs ||
       !Number.isFinite(Date.parse(latest.createdAt)) || Date.parse(latest.createdAt) > now ||
@@ -66,7 +66,14 @@ function selectLiveForecast(state, config, expectedModelId, now = Date.now(), ex
   return latest;
 }
 
-function positionAmount(position) { return Math.abs(Number(position.positionAmt || 0)); }
+function positionAmount(position) {
+  const value = position?.positionAmt;
+  if (!['string', 'number'].includes(typeof value) ||
+      (typeof value === 'string' && !value.trim()) || !Number.isFinite(Number(value))) {
+    throw new Error('Invalid position amount');
+  }
+  return Math.abs(Number(value));
+}
 function candidateEvidence(state, config, expectedModelId, expectedReachabilityModelId) {
   const records = (state.records || []).filter(r => r.symbol === config.symbol && r.horizon === config.horizon && r.modelId === expectedModelId);
   const directions = records.filter(r => r.outcome);
@@ -107,8 +114,12 @@ function buildEntryPlan(config, forecast, market, book, availableBalance, hedgeM
   const filters = Object.fromEntries(market.filters.map(filter => [filter.filterType, filter]));
   const lot = filters.MARKET_LOT_SIZE || filters.LOT_SIZE;
   const step = Number(lot?.stepSize), tick = Number(filters.PRICE_FILTER?.tickSize);
+  const minQty = Number(lot?.minQty), maxQty = Number(lot?.maxQty);
   const minNotional = Number(filters.MIN_NOTIONAL?.notional ?? filters.NOTIONAL?.minNotional);
-  if (![step, tick, minNotional].every(value => Number.isFinite(value) && value > 0)) throw new Error('Invalid exchange trading limits');
+  if (![step, tick, minNotional, maxQty].every(value => Number.isFinite(value) && value > 0) ||
+      ![lot?.minQty, lot?.maxQty].every(value => ['string', 'number'].includes(typeof value) &&
+        (typeof value !== 'string' || value.trim())) ||
+      !Number.isFinite(minQty) || minQty < 0 || minQty > maxQty) throw new Error('Invalid exchange trading limits');
   if (!(availableBalance >= config.marginUsdt + config.feeReserveUsdt)) throw new Error('Insufficient free USDT for 5 USDT margin and fee reserve');
   const side = forecast.direction === 'UP' ? 'LONG' : 'SHORT';
   if (!Number.isFinite(Number(book.time)) || Number(book.time) > now + 2000 || now - Number(book.time) > 10000) {
@@ -136,7 +147,7 @@ function buildEntryPlan(config, forecast, market, book, availableBalance, hedgeM
   const sizingPrice = Math.max(quote, estimatedEntry) * 1.001;
   const quantity = Number((Math.floor(config.notionalUsdt / sizingPrice / step) * step).toPrecision(14));
   const notional = quantity * estimatedEntry;
-  if (!(quantity > 0) || quantity < Number(lot.minQty) || quantity > Number(lot.maxQty) ||
+  if (!(quantity > 0) || quantity < minQty || quantity > maxQty ||
       notional < minNotional || notional > config.notionalUsdt + 1e-8) throw new Error('50 USDT target violates exchange quantity or notional limits');
   const token = crypto.createHash('sha256').update(forecast.id).digest('hex').slice(0, 18);
   return { forecastId: forecast.id, modelId: forecast.modelId, exitModelId: forecast.exitPlan.exitModelId,

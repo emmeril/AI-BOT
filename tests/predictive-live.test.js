@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { buildLiveConfig, selectLiveForecast, buildEntryPlan, candidateEvidence } = require('../src/predictive/live-policy');
+const { buildLiveConfig, selectLiveForecast, buildEntryPlan, candidateEvidence, openPositions } = require('../src/predictive/live-policy');
 const { PredictiveLiveEngine, loadLiveState, saveLiveState } = require('../src/predictive/live-engine');
 const { RISK_POLICY_ID } = require('../src/predictive/net-risk-reward');
 const { ADAPTIVE_POLICY_ID } = require('../src/predictive/adaptive-exits');
@@ -291,6 +291,7 @@ test('an uncertain market entry is queried by client ID without a duplicate entr
   assert.ok(engine.state.tracked);
   assert.equal(context.writes.filter(row => row.method === 'order').length, 1);
   assert.equal(context.algorithms.length, 2);
+  assert.equal(engine.state.pausedReason, null);
 });
 
 test('unresolved entry submission remains paused across retries', async t => {
@@ -537,3 +538,269 @@ test('legacy positions retain their saved TP and SL when the candidate engine re
   assert.equal(resumed.state.tracked.plan.stopLoss, 0.05877);
   assert.equal(context.writes.length, count);
 });
+
+test('audit: a pending entry blocks a newer forecast until its order is resolved', async t => {
+  const { engine, context } = fixture(t, { adaptive: true });
+  const plan = (await engine.preflight()).plan;
+  engine.state.intent = { plan, submittedAt: context.now };
+  engine.state.consumedForecastId = plan.forecastId;
+  context.orderMap.set(plan.entryClientId, { orderId: 'pending-entry', status: 'NEW', executedQty: '0', avgPrice: '0' });
+  context.forecasts.records.unshift(forecast(context.now + 1000, 'UP', 'newer-forecast', true));
+  const result = await engine.cycle();
+  assert.equal(result.status, 'ENTRY_PENDING');
+  assert.equal(engine.state.intent.plan.entryClientId, plan.entryClientId);
+  assert.equal(context.writes.length, 0);
+});
+
+test('audit: an inference exception after fill reduces the owned position', async t => {
+  const { engine, context } = fixture(t, { adaptive: true });
+  const ensure = engine.ensureProtection.bind(engine);
+  engine.ensureProtection = async snapshot => {
+    engine.state.tracked.plan.contextFeatures = null;
+    return ensure(snapshot);
+  };
+  await assert.rejects(engine.cycle(), /Invalid first-passage features/);
+  assert.equal(context.writes.filter(r => r.method === 'order').length, 2);
+  assert.equal(context.positions.length, 0);
+  await engine.cycle();
+  assert.equal(engine.state.closed.at(-1).reason, 'PROTECTION_FAILURE');
+});
+
+for (const method of ['fapiPublicGetTickerBookTicker', 'fapiPrivateV3GetAccount',
+  'fapiPrivateGetAccountConfig', 'fapiPrivateGetSymbolConfig', 'fapiPublicGetExchangeInfo']) {
+  test('audit: horizon close continues when an entry dependency is unavailable: ' + method, async t => {
+    const { engine, context, exchange } = fixture(t, { adaptive: true });
+    await engine.cycle();
+    exchange[method] = async () => { throw new Error('Entry dependency unavailable'); };
+    engine.market = null;
+    context.now = engine.state.tracked.plan.expiresAt + 1;
+    await engine.cycle();
+    await engine.cycle();
+    assert.equal(engine.state.tracked, null);
+    assert.equal(engine.state.closed.at(-1).reason, 'HORIZON_EXPIRED');
+    assert.equal(context.writes.filter(r => r.method === 'order').length, 2);
+  });
+}
+
+test('audit: an algo query failure after fill cannot prevent a reducing close', async t => {
+  const { engine, context, exchange } = fixture(t, { adaptive: true });
+  const getAlgorithms = exchange.fapiPrivateGetOpenAlgoOrders;
+  exchange.fapiPrivateGetOpenAlgoOrders = async () => {
+    if (context.positions.length) throw new Error('Algo service unavailable');
+    return getAlgorithms();
+  };
+  await assert.rejects(engine.cycle(), /Algo service unavailable/);
+  assert.equal(context.positions.length, 0);
+  assert.equal(context.writes.filter(r => r.method === 'order').length, 2);
+  await engine.cycle();
+  assert.equal(engine.state.tracked, null);
+});
+
+test('audit: a pending close is queried across restart without another market close', async t => {
+  const { engine, context, exchange, config } = fixture(t, { adaptive: true });
+  await engine.cycle();
+  exchange.fapiPrivatePostOrder = async params => {
+    context.writes.push({ method: 'order', params: structuredClone(params) });
+    const order = { orderId: 'pending-close', status: 'NEW', executedQty: '0', avgPrice: '0' };
+    context.orderMap.set(params.newClientOrderId, order);
+    return order;
+  };
+  context.now = engine.state.tracked.plan.expiresAt + 1;
+  await engine.cycle();
+  const resumed = new PredictiveLiveEngine({ config, exchange, state: structuredClone(engine.state),
+    now: () => context.now, readForecasts: () => context.forecasts, save: () => {} });
+  await resumed.cycle();
+  await resumed.cycle();
+  assert.equal(context.writes.filter(r => r.method === 'order').length, 2);
+  const clientId = resumed.state.tracked.closing.clientOrderId;
+  assert.ok(clientId);
+  context.orderMap.set(clientId, { orderId: 'pending-close', status: 'FILLED',
+    executedQty: String(resumed.state.tracked.quantity), avgPrice: '0.0591' });
+  context.positions = [];
+  await resumed.cycle(); await resumed.cycle();
+  assert.equal(resumed.state.tracked, null);
+});
+
+test('audit: an uncertain close submission remains identified while lookup is unavailable', async t => {
+  const { engine, context, exchange } = fixture(t, { adaptive: true });
+  await engine.cycle();
+  exchange.fapiPrivatePostOrder = async params => {
+    context.writes.push({ method: 'order', params: structuredClone(params) });
+    throw new Error('Close submission timeout');
+  };
+  exchange.fapiPrivateGetOrder = async () => { throw new Error('Close lookup unavailable'); };
+  context.now = engine.state.tracked.plan.expiresAt + 1;
+  await assert.rejects(engine.cycle());
+  const first = engine.state.tracked.closing.clientOrderId;
+  await assert.rejects(engine.cycle());
+  assert.ok(first);
+  assert.equal(engine.state.tracked.closing.clientOrderId, first);
+  assert.equal(context.writes.filter(r => r.method === 'order').length, 2);
+  assert.equal(context.algorithms.length, 2);
+});
+
+test('audit: a model version change cannot reinterpret an existing position', async t => {
+  const { engine, context, exchange, config } = fixture(t, { adaptive: true });
+  await engine.cycle();
+  const original = structuredClone(engine.state.tracked.plan);
+  const changed = JSON.parse(fs.readFileSync(config.reachabilityModelFile));
+  changed.modelId = 'new-model-version';
+  changed.timeoutRegressor.weights[0] = -10;
+  fs.writeFileSync(config.reachabilityModelFile, JSON.stringify(changed));
+  const count = context.writes.length;
+  const resumed = new PredictiveLiveEngine({ config, exchange, state: structuredClone(engine.state),
+    now: () => context.now, readForecasts: () => context.forecasts, save: () => {} });
+  await resumed.cycle();
+  assert.equal(resumed.state.tracked?.plan.takeProfit, original.takeProfit);
+  assert.equal(resumed.state.tracked?.plan.stopLoss, original.stopLoss);
+  assert.equal(context.writes.length, count);
+});
+
+test('audit: malformed position amounts cannot be interpreted as a flat account', () => {
+  for (const value of [undefined, null, '', 'unknown', Infinity, NaN]) {
+    assert.throws(() => openPositions([{ symbol: 'DOGEUSDT', positionAmt: value }]), /position amount/i);
+  }
+  assert.deepEqual(openPositions([{ positionAmt: '0' }]), []);
+});
+
+test('audit: a partial close waits, then retries only the unfilled remainder after expiry', async t => {
+  const { engine, context, exchange } = fixture(t, { adaptive: true });
+  await engine.cycle();
+  const quantity = engine.state.tracked.quantity;
+  let attempts = 0;
+  exchange.fapiPrivatePostOrder = async params => {
+    context.writes.push({ method: 'order', params: structuredClone(params) });
+    const partial = attempts++ === 0;
+    const order = { orderId: 'close-' + attempts, status: partial ? 'PARTIALLY_FILLED' : 'FILLED',
+      executedQty: String(partial ? 200 : params.quantity), avgPrice: '0.0591' };
+    context.positions = partial ? [{ ...context.positions[0], positionAmt: String(quantity - 200) }] : [];
+    context.orderMap.set(params.newClientOrderId, order);
+    return order;
+  };
+  context.now = engine.state.tracked.plan.expiresAt + 1;
+  await engine.cycle();
+  const first = engine.state.tracked.closing.clientOrderId;
+  await engine.cycle();
+  assert.equal(attempts, 1);
+  context.orderMap.set(first, { orderId: 'close-1', status: 'EXPIRED', executedQty: '200', avgPrice: '0.0591' });
+  await engine.cycle(); await engine.cycle();
+  assert.equal(attempts, 2);
+  assert.equal(context.writes.filter(r => r.method === 'order').at(-1).params.quantity, quantity - 200);
+  assert.equal(engine.state.tracked, null);
+});
+
+test('audit: a timed-out close with a confirmed fill waits for stale position data to catch up', async t => {
+  const { engine, context, exchange } = fixture(t, { adaptive: true });
+  await engine.cycle();
+  exchange.fapiPrivatePostOrder = async params => {
+    context.writes.push({ method: 'order', params: structuredClone(params) });
+    context.orderMap.set(params.newClientOrderId, { orderId: 'close-filled', status: 'FILLED',
+      executedQty: String(params.quantity), avgPrice: '0.0591' });
+    throw new Error('Close response timeout');
+  };
+  context.now = engine.state.tracked.plan.expiresAt + 1;
+  await engine.cycle(); await engine.cycle();
+  assert.equal(context.writes.filter(r => r.method === 'order').length, 2);
+  assert.equal(engine.state.tracked.closeConfirmed, true);
+  context.positions = [];
+  await engine.cycle(); await engine.cycle();
+  assert.equal(engine.state.tracked, null);
+});
+
+test('audit: legacy close intents recover their deterministic client ID before any retry', async t => {
+  const { engine, context } = fixture(t, { adaptive: true });
+  await engine.cycle();
+  const tracked = engine.state.tracked;
+  tracked.closing = { reason: 'HORIZON_EXPIRED', submittedAt: context.now };
+  tracked.closeAttempts = 1;
+  const clientId = `p60-x-${tracked.plan.token}-0`;
+  context.orderMap.set(clientId, { orderId: 'legacy-close', status: 'FILLED',
+    executedQty: String(tracked.quantity), avgPrice: '0.0591' });
+  context.positions = [];
+  await engine.cycle(); await engine.cycle();
+  assert.equal(engine.state.tracked, null);
+  assert.equal(context.writes.filter(r => r.method === 'order').length, 1);
+});
+
+test('audit: partial entry fills retain the pending order and protect newly filled quantity', async t => {
+  const { engine, context } = fixture(t, { adaptive: true });
+  const plan = (await engine.preflight()).plan;
+  engine.state.intent = { plan, submittedAt: context.now };
+  engine.state.consumedForecastId = plan.forecastId;
+  context.orderMap.set(plan.entryClientId, { orderId: 'partial-entry', status: 'PARTIALLY_FILLED',
+    executedQty: '200', avgPrice: '0.05912' });
+  context.positions = [{ symbol: plan.symbol, positionSide: plan.positionSide, positionAmt: '200', entryPrice: '0.05912' }];
+  await engine.cycle();
+  assert.ok(engine.state.intent);
+  assert.equal(engine.state.tracked.quantity, 200);
+  assert.equal(context.algorithms.length, 2);
+  context.orderMap.set(plan.entryClientId, { orderId: 'partial-entry', status: 'FILLED',
+    executedQty: String(plan.quantity), avgPrice: '0.05912' });
+  context.positions[0].positionAmt = String(plan.quantity);
+  await engine.cycle();
+  assert.equal(engine.state.intent, null);
+  assert.equal(engine.state.tracked.quantity, plan.quantity);
+  assert.equal(engine.state.pausedReason, null);
+  assert.equal(context.writes.filter(r => r.method === 'order').length, 0);
+});
+
+test('audit: horizon expiry cancels the remaining partial entry before closing its fill', async t => {
+  const { engine, context, exchange } = fixture(t, { adaptive: true });
+  const plan = (await engine.preflight()).plan;
+  engine.state.intent = { plan, submittedAt: context.now };
+  engine.state.consumedForecastId = plan.forecastId;
+  context.orderMap.set(plan.entryClientId, { orderId: 'partial-entry', status: 'PARTIALLY_FILLED',
+    executedQty: '200', avgPrice: '0.05912' });
+  context.positions = [{ symbol: plan.symbol, positionSide: plan.positionSide, positionAmt: '200', entryPrice: '0.05912' }];
+  exchange.fapiPrivateDeleteOrder = async params => {
+    context.writes.push({ method: 'cancelEntry', params: structuredClone(params) });
+    const order = { ...context.orderMap.get(params.origClientOrderId), status: 'CANCELED' };
+    context.orderMap.set(params.origClientOrderId, order);
+    return order;
+  };
+  await engine.cycle();
+  context.now = plan.expiresAt + 1;
+  await engine.cycle(); await engine.cycle();
+  assert.equal(context.writes.find(r => r.method === 'cancelEntry').params.origClientOrderId, plan.entryClientId);
+  assert.ok(context.writes.findIndex(r => r.method === 'cancelEntry') < context.writes.findIndex(r => r.method === 'order'));
+  assert.equal(context.writes.find(r => r.method === 'order').params.quantity, 200);
+  assert.equal(engine.state.intent, null);
+  assert.equal(engine.state.tracked, null);
+});
+
+test('audit: a newer unavailable forecast blocks fallback to an older valid signal', t => {
+  for (const missingReference of [false, true]) {
+    const { context, config } = fixture(t, { adaptive: true });
+    const unavailable = { ...forecast(context.now + 1000, 'UP', 'unavailable', true), status: 'UNAVAILABLE' };
+    if (missingReference) unavailable.candleCloseTime = null;
+    context.forecasts.records.push(unavailable);
+    assert.throws(() => selectLiveForecast(context.forecasts, config, 'frozen-60-model', context.now), /No fresh forecast/);
+  }
+});
+
+test('audit: invalid market quantity bounds block entry before any order submission', async t => {
+  for (const [key, value] of [['minQty', undefined], ['minQty', null], ['minQty', ' '], ['minQty', '-1'],
+    ['maxQty', undefined], ['maxQty', 'Infinity']]) {
+    const { engine, market, context } = fixture(t, { adaptive: true });
+    market.filters.find(f => f.filterType === 'MARKET_LOT_SIZE')[key] = value;
+    await assert.rejects(engine.preflight(), /Invalid exchange trading limits/);
+    assert.equal(context.writes.length, 0);
+  }
+});
+
+for (const code of [-2022, -2024]) {
+  test('audit: an exchange rejection during a protective fill race still reconciles flat: ' + code, async t => {
+    const { engine, context, exchange } = fixture(t, { adaptive: true, hedgeMode: false });
+    await engine.cycle();
+    exchange.fapiPrivatePostOrder = async params => {
+      context.writes.push({ method: 'order', params: structuredClone(params) });
+      context.positions = [];
+      throw new Error('binance ' + JSON.stringify({ code, msg: 'Close rejected' }));
+    };
+    context.now = engine.state.tracked.plan.expiresAt + 1;
+    await engine.cycle(); await engine.cycle();
+    assert.equal(engine.state.tracked, null);
+    assert.equal(engine.state.pausedReason, null);
+    assert.equal(context.writes.filter(r => r.method === 'order').length, 2);
+  });
+}
