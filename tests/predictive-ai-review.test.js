@@ -71,6 +71,8 @@ test('AI review configuration keeps a hard 30 second maximum and is opt-in', () 
   assert.equal(config().model, 'gemini-3.8-flash-high');
   assert.equal(config().effort, 'high');
   assert.equal(config().failureMode, 'BLOCK');
+  assert.equal(config().positionExitPolicy, 'PREDICTION_REVERSAL');
+  assert.notEqual(config({ PREDICTIVE_LIVE_POSITION_EXIT_POLICY: 'HORIZON' }).configId, config().configId);
   assert.notEqual(config({ PREDICTIVE_AI_REVIEW_FAILURE_MODE: 'PRIMARY_FALLBACK' }).configId, config().configId);
   assert.throws(() => config({ PREDICTIVE_AI_REVIEW_FAILURE_MODE: 'ALLOW_ALL' }), /Invalid/);
   assert.throws(() => config({ PREDICTIVE_AI_REVIEW_TIMEOUT_MS: '30001' }), /Invalid/);
@@ -87,6 +89,8 @@ test('AI market context uses completed causal windows and ignores future extreme
   assert.equal(expected.recentClosedCandles.length, 15);
   assert.ok(expected.windows.every(w => w.returnPct > 0 && w.takerFlowImbalance > 0));
   assert.equal(expected.candidate.liveSizing.targetNotionalUsdt, 50);
+  assert.equal(expected.candidate.positionExitPolicy, 'PREDICTION_REVERSAL');
+  assert.equal(buildReviewSnapshot(f, bars, START, { positionExitPolicy: 'HORIZON' }).candidate.positionExitPolicy, 'HORIZON');
   assert.throws(() => buildReviewSnapshot(f, bars.slice(1), START), /241 contiguous/);
   bars[10].closeTime++;
   assert.throws(() => buildReviewSnapshot(f, bars, START), /241 contiguous/);

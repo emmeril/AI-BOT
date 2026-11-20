@@ -56,6 +56,7 @@ class PredictiveAiReviewService {
     this.state.model = this.config.model;
     this.state.effort = this.config.effort;
     this.state.failureMode = this.config.failureMode;
+    this.state.positionExitPolicy = this.config.positionExitPolicy;
     this.state.configId = this.config.configId;
     this.state.timeoutMs = this.config.timeoutMs;
     this.state.reviews = this.state.reviews.slice(-this.config.historyLimit);
@@ -86,7 +87,7 @@ class PredictiveAiReviewService {
       forecastId: forecast.id, candidateFingerprint: fingerprint, requestedAt,
       expiresAt: forecastReviewExpiry(forecast), status: 'PENDING', reason: 'AI_REVIEW_PENDING' };
     this.state.reviews.push(review);
-    try { review.snapshot = buildReviewSnapshot(frozen, candles, requestedAt); }
+    try { review.snapshot = buildReviewSnapshot(frozen, candles, requestedAt, this.config); }
     catch (error) {
       Object.assign(review, { status: 'UNAVAILABLE', reason: 'AI_REVIEW_INVALID_MARKET_DATA',
         completedAt: this.now(), diagnostic: String(error.message).slice(0, 200) });

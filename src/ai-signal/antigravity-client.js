@@ -56,7 +56,8 @@ For each supplied symbol return exactly one decision using the required JSON sch
 - LONG only to approve a LONG candidate with supporting trend, momentum, taker flow and acceptable volatility.
 - SHORT only to approve a SHORT candidate with supporting trend, momentum, taker flow and acceptable volatility.
 - HOLD when the supplied candidate is unsupported, its expected net is nonpositive, evidence conflicts, volatility is dangerous, or data is insufficient.
-- horizonMinutes must be "60". Assess the remaining time until candidate.expiresAt, rather than assuming a new full hour.
+- horizonMinutes must be "60". candidate.expiresAt ends the forecast window; it is not an automatic position deadline under PREDICTION_REVERSAL.
+- Follow candidate.positionExitPolicy: PREDICTION_REVERSAL keeps a protected position open while fresh statistical forecasts align and closes on a validated reversal; HORIZON closes at the forecast deadline. TP/SL and safety exits remain active under both policies.
 - Confidence is a subjective assessment, not a measured probability of profit. Do not claim guaranteed profit or invent future prices.
 - The execution worker independently rechecks costs and price, and may adjust TP1/TP2 using its frozen net-risk policy at the actual quote and fill.
 

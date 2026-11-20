@@ -7,6 +7,7 @@ const { planReachableTargets } = require('./reachability');
 const { ADAPTIVE_POLICY_ID } = require('./adaptive-exits');
 const { sequentialExitRecords } = require('./exit-evaluator');
 const { buildAiReviewConfig } = require('./ai-review-policy');
+const { mostLikelyDirection } = require('./direction-model');
 
 const PREFIX = 'p60-';
 const asBoolean = value => value === true || value === 'true';
@@ -16,10 +17,10 @@ function buildLiveConfig(environment = {}) {
     enabled: asBoolean(environment.PREDICTIVE_LIVE_ENABLED),
     symbol: environment.PREDICTIVE_LIVE_SYMBOL || 'DOGEUSDT',
     horizon: Number(environment.PREDICTIVE_LIVE_HORIZON || 60),
+    positionExitPolicy: environment.PREDICTIVE_LIVE_POSITION_EXIT_POLICY || 'PREDICTION_REVERSAL',
     marginUsdt: Number(environment.PREDICTIVE_LIVE_MARGIN_USDT || 5),
     leverage: Number(environment.PREDICTIVE_LIVE_LEVERAGE || 10),
     sessionLossBudgetUsdt: Number(environment.PREDICTIVE_LIVE_LOSS_BUDGET_USDT || 5),
-    aiReview: buildAiReviewConfig(environment),
     feeReserveUsdt: 0.1, intervalMs: 5000, maxForecastAgeMs: 120000,
     riskPolicyId: environment.PREDICTIVE_LIVE_RISK_POLICY_ID || ADAPTIVE_POLICY_ID,
     forecastFile: path.resolve(environment.PREDICTIVE_LIVE_FORECAST_FILE || 'predictive-results/DOGEUSDT-adaptive-shadow-v5.json'),
@@ -34,6 +35,8 @@ function buildLiveConfig(environment = {}) {
       config.sessionLossBudgetUsdt !== 5) throw new Error('This live profile requires DOGEUSDT, horizon 60, fixed 5 USDT margin and 10x leverage');
   config.notionalUsdt = config.marginUsdt * config.leverage;
   if (![RISK_POLICY_ID, ADAPTIVE_POLICY_ID].includes(config.riskPolicyId)) throw new Error('Unsupported predictive exit policy');
+  if (!['PREDICTION_REVERSAL', 'HORIZON'].includes(config.positionExitPolicy)) throw new Error('Unsupported position exit policy');
+  config.aiReview = buildAiReviewConfig(environment);
   return config;
 }
 
@@ -66,6 +69,38 @@ function selectLiveForecast(state, config, expectedModelId, now = Date.now(), ex
     throw new Error('Forecast has no compatible fresh exit estimate');
   }
   return latest;
+}
+
+function positionDirectionReview(state, config, plan, expectedModelId, now = Date.now()) {
+  const hold = (reason, forecast) => ({ close: false, reason,
+    forecastId: forecast?.id || null, direction: forecast?.direction || null });
+  if (state?.objective !== 'PRICE_DIRECTION' || !Array.isArray(state.records)) return hold('PREDICTION_UNAVAILABLE');
+  const latest = state.records.filter(row => row?.symbol === config.symbol && row.horizon === config.horizon)
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.candleCloseTime - a.candleCloseTime)[0];
+  const createdAt = Date.parse(latest?.createdAt);
+  if (!latest || latest.objective !== 'PRICE_DIRECTION' || latest.status !== 'FORECAST' ||
+      latest.modelId !== expectedModelId || plan.modelId !== expectedModelId ||
+      !Number.isFinite(latest.candleCloseTime) || latest.candleCloseTime > now ||
+      now - latest.candleCloseTime > config.maxForecastAgeMs || !Number.isFinite(createdAt) ||
+      createdAt < latest.candleCloseTime || createdAt > now || now - createdAt > config.maxForecastAgeMs ||
+      latest.targetCloseTime !== latest.candleCloseTime + config.horizon * 60000 ||
+      (Number.isFinite(plan.forecastCandleCloseTime) && latest.candleCloseTime < plan.forecastCandleCloseTime) ||
+      (Number.isFinite(plan.forecastCreatedAt) && createdAt < plan.forecastCreatedAt)) {
+    return hold('PREDICTION_UNAVAILABLE', latest);
+  }
+  const probabilities = latest.probabilities;
+  const values = ['up', 'down', 'unchanged'].map(key => probabilities?.[key]);
+  if (!values.every(value => Number.isFinite(value) && value >= 0 && value <= 1) ||
+      Math.abs(values.reduce((sum, value) => sum + value, 0) - 1) > 1e-6 ||
+      mostLikelyDirection(probabilities).direction !== latest.direction) return hold('PREDICTION_UNAVAILABLE', latest);
+  if (['UNCHANGED', 'UNCERTAIN'].includes(latest.direction)) return hold('PREDICTION_NEUTRAL', latest);
+  if (!['UP', 'DOWN'].includes(latest.direction) || !['LONG', 'SHORT'].includes(plan.side)) {
+    return hold('PREDICTION_UNAVAILABLE', latest);
+  }
+  const reversed = latest.direction !== (plan.side === 'LONG' ? 'UP' : 'DOWN');
+  return { close: reversed, reason: reversed ? 'PREDICTION_REVERSED' : 'PREDICTION_ALIGNED',
+    forecastId: latest.id, direction: latest.direction, modelId: latest.modelId,
+    candleCloseTime: latest.candleCloseTime, createdAt };
 }
 
 function positionAmount(position) {
@@ -153,6 +188,8 @@ function buildEntryPlan(config, forecast, market, book, availableBalance, hedgeM
       notional < minNotional || notional > config.notionalUsdt + 1e-8) throw new Error('50 USDT target violates exchange quantity or notional limits');
   const token = crypto.createHash('sha256').update(forecast.id).digest('hex').slice(0, 18);
   return { forecastId: forecast.id, modelId: forecast.modelId, exitModelId: forecast.exitPlan.exitModelId,
+    forecastCandleCloseTime: forecast.candleCloseTime, forecastCreatedAt: Date.parse(forecast.createdAt),
+    positionExitPolicy: config.positionExitPolicy,
     stopId: forecast.exitPlan.stopId,
     symbol: config.symbol, side,
     positionSide: hedgeMode ? side : 'BOTH', orderSide: side === 'LONG' ? 'BUY' : 'SELL',
@@ -183,5 +220,5 @@ function protectionMatches(order, plan, kind) {
     Math.abs(Number(order.triggerPrice) - p.triggerPrice) < plan.tick / 2;
 }
 
-module.exports = { PREFIX, asBoolean, buildLiveConfig, selectLiveForecast, positionAmount,
+module.exports = { PREFIX, asBoolean, buildLiveConfig, selectLiveForecast, positionDirectionReview, positionAmount,
   candidateEvidence, openPositions, algoOrders, ownedAlgo, insideProtection, buildEntryPlan, protectionParameters, protectionMatches };

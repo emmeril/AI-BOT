@@ -42,6 +42,7 @@ function fixture(t, options = {}) {
     approvedForTrading: false, temperature: 1, classifier: { kind: 'softmax-baseline-v1',
       mean: [0], std: [1], weights: [[0, 0], [0, 0], [0, 0]] } }));
   const config = buildLiveConfig({ PREDICTIVE_LIVE_ENABLED: options.enabled === false ? 'false' : 'true',
+    PREDICTIVE_LIVE_POSITION_EXIT_POLICY: options.positionExitPolicy || 'HORIZON',
     PREDICTIVE_LIVE_RISK_POLICY_ID: options.adaptive ? ADAPTIVE_POLICY_ID : RISK_POLICY_ID,
     PREDICTIVE_LIVE_MODEL_FILE: modelFile, PREDICTIVE_LIVE_STATE_FILE: path.join(dir, 'state.json'),
     PREDICTIVE_LIVE_REACHABILITY_MODEL_FILE: path.join(dir, 'reachability.json'),
@@ -124,6 +125,8 @@ test('profile defaults to disabled DOGE 60m, 5 USDT margin, 10x and 50 USDT targ
   assert.equal(c.enabled, false); assert.equal(c.horizon, 60);
   assert.equal(c.marginUsdt, 5); assert.equal(c.leverage, 10); assert.equal(c.notionalUsdt, 50);
   assert.equal(c.riskPolicyId, ADAPTIVE_POLICY_ID);
+  assert.equal(c.positionExitPolicy, 'PREDICTION_REVERSAL');
+  assert.throws(() => buildLiveConfig({ PREDICTIVE_LIVE_POSITION_EXIT_POLICY: 'UNKNOWN' }), /Unsupported position exit policy/);
   assert.throws(() => buildLiveConfig({ PREDICTIVE_LIVE_MARGIN_USDT: '50' }), /requires/);
   assert.throws(() => buildLiveConfig({ PREDICTIVE_LIVE_HORIZON: '15' }), /requires/);
 });
@@ -1183,4 +1186,178 @@ test('an incomplete FILLED close is queried across restart without another marke
     assert.equal(Boolean(resumed.state.tracked), false);
     assert.equal(context.writes.filter(r => r.method === 'order').length, 2);
   }
+});
+
+function publishDirection(context, direction, overrides = {}) {
+  const next = forecast(context.now, direction === 'DOWN' ? 'DOWN' : 'UP',
+    'position-review-' + direction + '-' + context.now, true);
+  next.direction = direction;
+  next.probabilities = direction === 'UP' ? { up: 0.6, down: 0.3, unchanged: 0.1 } :
+    direction === 'DOWN' ? { up: 0.3, down: 0.6, unchanged: 0.1 } :
+    direction === 'UNCHANGED' ? { up: 0.15, down: 0.15, unchanged: 0.7 } :
+    { up: 0.45, down: 0.45, unchanged: 0.1 };
+  Object.assign(next, overrides);
+  context.forecasts.records.push(next);
+  return next;
+}
+
+test('aligned live predictions keep LONG and SHORT positions open beyond their original horizon and across restart', async t => {
+  for (const direction of ['UP', 'DOWN']) {
+    const { engine, exchange, context, config } = fixture(t, { adaptive: true, direction,
+      positionExitPolicy: 'PREDICTION_REVERSAL' });
+    await engine.cycle();
+    const original = structuredClone(engine.state.tracked.plan);
+    context.now = original.expiresAt + 3 * 3600000;
+    const next = publishDirection(context, direction);
+    next.exitPlan = { status: 'UNAVAILABLE', reason: 'NON_POSITIVE_EXPECTED_NET' };
+    await engine.cycle();
+    assert.equal(engine.state.tracked.directionReview.reason, 'PREDICTION_ALIGNED');
+    assert.equal(engine.state.tracked.plan.expiresAt, original.expiresAt);
+    assert.equal(engine.state.tracked.plan.stopLoss, original.stopLoss);
+    assert.equal(engine.state.tracked.plan.takeProfit, original.takeProfit);
+    const resumed = new PredictiveLiveEngine({ config, exchange, state: structuredClone(engine.state),
+      now: () => context.now, save: () => {}, readForecasts: () => context.forecasts });
+    context.now += 24 * 3600000;
+    publishDirection(context, direction);
+    await resumed.cycle();
+    assert.ok(resumed.state.tracked);
+    assert.equal(context.algorithms.length, 2);
+    assert.equal(context.writes.filter(row => row.method === 'order').length, 1);
+  }
+});
+
+test('a fresh validated reversal closes only the owned position without waiting for the original horizon', async t => {
+  for (const direction of ['UP', 'DOWN']) {
+    const { engine, context } = fixture(t, { adaptive: true, direction, positionExitPolicy: 'PREDICTION_REVERSAL' });
+    await engine.cycle();
+    context.now += 60000;
+    assert.ok(context.now < engine.state.tracked.plan.expiresAt);
+    const next = publishDirection(context, direction === 'UP' ? 'DOWN' : 'UP');
+    await engine.cycle(); await engine.cycle();
+    assert.equal(engine.state.tracked, null);
+    assert.equal(engine.state.closed.at(-1).reason, 'PREDICTION_REVERSED');
+    assert.equal(engine.state.closed.at(-1).directionReview.forecastId, next.id);
+    const orders = context.writes.filter(row => row.method === 'order');
+    assert.equal(orders.length, 2);
+    assert.equal(orders[1].params.side, direction === 'UP' ? 'SELL' : 'BUY');
+    assert.equal(orders[1].params.positionSide, direction === 'UP' ? 'LONG' : 'SHORT');
+  }
+});
+
+test('neutral predictions keep exchange protection active without a time-based close', async t => {
+  for (const direction of ['UNCHANGED', 'UNCERTAIN']) {
+    const { engine, context } = fixture(t, { adaptive: true, positionExitPolicy: 'PREDICTION_REVERSAL' });
+    await engine.cycle();
+    context.now = engine.state.tracked.plan.expiresAt + 60000;
+    publishDirection(context, direction);
+    await engine.cycle();
+    assert.equal(engine.state.tracked.directionReview.reason, 'PREDICTION_NEUTRAL');
+    assert.equal(context.algorithms.length, 2);
+    assert.equal(context.writes.filter(row => row.method === 'order').length, 1);
+  }
+});
+
+test('stale, malformed, future and incompatible predictions cannot force a direction exit', async t => {
+  for (const change of [
+    row => { row.status = 'UNAVAILABLE'; }, row => { row.modelId = 'another-model'; },
+    (row, context) => { row.createdAt = new Date(context.now + 1000).toISOString(); },
+    (row, context) => { row.candleCloseTime = context.now - 120001; },
+    row => { row.probabilities.down = NaN; },
+    row => { row.probabilities = { up: 0.6, down: 0.3, unchanged: 0.1 }; },
+    (row, context, engine) => { engine.state.tracked.plan.modelId = 'earlier-model'; },
+  ]) {
+    const { engine, context } = fixture(t, { adaptive: true, positionExitPolicy: 'PREDICTION_REVERSAL' });
+    await engine.cycle();
+    context.now = engine.state.tracked.plan.expiresAt + 60000;
+    const next = publishDirection(context, 'DOWN'); change(next, context, engine);
+    await engine.cycle();
+    assert.equal(engine.state.tracked.directionReview.reason, 'PREDICTION_UNAVAILABLE');
+    assert.equal(context.algorithms.length, 2);
+    assert.equal(context.writes.filter(row => row.method === 'order').length, 1);
+  }
+});
+
+test('an older opposite forecast cannot override a newer unavailable or neutral prediction', async t => {
+  for (const neutral of [false, true]) {
+    const { engine, context } = fixture(t, { adaptive: true, positionExitPolicy: 'PREDICTION_REVERSAL' });
+    await engine.cycle();
+    context.now = engine.state.tracked.plan.expiresAt + 60000;
+    publishDirection(context, 'DOWN');
+    publishDirection(context, neutral ? 'UNCHANGED' : 'DOWN', {
+      createdAt: new Date(context.now - 5000).toISOString(), ...(neutral ? {} : { status: 'UNAVAILABLE' }),
+    });
+    await engine.cycle();
+    assert.ok(engine.state.tracked);
+    assert.equal(context.writes.filter(row => row.method === 'order').length, 1);
+  }
+});
+
+test('a prediction-file outage cannot stop SL repair or create a hidden holding deadline', async t => {
+  const { engine, context } = fixture(t, { adaptive: true, positionExitPolicy: 'PREDICTION_REVERSAL' });
+  await engine.cycle();
+  context.now = engine.state.tracked.plan.expiresAt + 3600000;
+  engine.readForecasts = () => { throw new SyntaxError('Prediction file unavailable'); };
+  context.algorithms = context.algorithms.filter(row => row.type !== 'STOP_MARKET');
+  await engine.cycle();
+  assert.equal(engine.state.tracked.directionReview.reason, 'PREDICTION_UNAVAILABLE');
+  assert.equal(context.algorithms.length, 2);
+  assert.equal(context.writes.filter(row => row.method === 'order').length, 1);
+});
+
+test('Gemini outage cannot impose a holding deadline or prevent a fresh statistical reversal close', async t => {
+  const { engine, context, config } = fixture(t, { adaptive: true, aiReview: true,
+    positionExitPolicy: 'PREDICTION_REVERSAL' });
+  approveAi(context, config);
+  await engine.cycle();
+  engine.readAiReviews = () => { throw new Error('Gemini unavailable'); };
+  context.now = engine.state.tracked.plan.expiresAt + 3600000;
+  publishDirection(context, 'UP');
+  await engine.cycle();
+  assert.ok(engine.state.tracked);
+  context.now += 60000;
+  publishDirection(context, 'DOWN');
+  await engine.cycle(); await engine.cycle();
+  assert.equal(engine.state.closed.at(-1).reason, 'PREDICTION_REVERSED');
+});
+
+test('a partial entry survives the original horizon while aligned, then cancels its remainder before reversal close', async t => {
+  const { engine, exchange, context } = fixture(t, { adaptive: true, positionExitPolicy: 'PREDICTION_REVERSAL' });
+  const plan = (await engine.preflight()).plan;
+  engine.state.intent = { plan, submittedAt: context.now };
+  context.orderMap.set(plan.entryClientId, { orderId: 'partial-entry', status: 'PARTIALLY_FILLED',
+    executedQty: '200', avgPrice: '0.05912' });
+  context.positions = [{ symbol: plan.symbol, positionSide: plan.positionSide, positionAmt: '200', entryPrice: '0.05912' }];
+  exchange.fapiPrivateDeleteOrder = async params => {
+    context.writes.push({ method: 'cancelEntry', params });
+    const canceled = { ...context.orderMap.get(params.origClientOrderId), status: 'CANCELED' };
+    context.orderMap.set(params.origClientOrderId, canceled);
+    return canceled;
+  };
+  await engine.cycle();
+  context.now = plan.expiresAt + 60000;
+  publishDirection(context, 'UP');
+  await engine.cycle();
+  assert.ok(engine.state.intent);
+  assert.equal(context.writes.filter(row => row.method === 'cancelEntry').length, 0);
+  context.now += 60000;
+  publishDirection(context, 'DOWN');
+  await engine.cycle(); await engine.cycle();
+  assert.equal(engine.state.intent, null);
+  assert.equal(engine.state.tracked, null);
+  assert.equal(engine.state.closed.at(-1).reason, 'PREDICTION_REVERSED');
+  assert.ok(context.writes.findIndex(row => row.method === 'cancelEntry') < context.writes.findIndex(row => row.method === 'order'));
+  assert.equal(context.writes.find(row => row.method === 'order').params.quantity, 200);
+});
+
+test('protection failure can still close an aligned position after its original forecast horizon', async t => {
+  const { engine, context } = fixture(t, { adaptive: true, positionExitPolicy: 'PREDICTION_REVERSAL' });
+  await engine.cycle();
+  context.now = engine.state.tracked.plan.expiresAt + 3600000;
+  publishDirection(context, 'UP');
+  context.options.failTakeProfit = true;
+  context.algorithms = context.algorithms.filter(row => row.type !== 'TAKE_PROFIT_MARKET');
+  await assert.rejects(engine.cycle(), /TP placement rejected/);
+  await engine.cycle();
+  assert.equal(engine.state.tracked, null);
+  assert.equal(engine.state.closed.at(-1).reason, 'PROTECTION_FAILURE');
 });

@@ -175,6 +175,7 @@ test('predictive entry review prompt evaluates frozen candidates with a strict s
   assert.match(argumentsUsed[1], /completed 1-minute candles/);
   assert.match(argumentsUsed[1], /may authorize an automated LONG or SHORT entry/);
   assert.match(argumentsUsed[1], /Return only JSON matching this schema/);
+  assert.match(argumentsUsed[1], /not an automatic position deadline under PREDICTION_REVERSAL/);
 });
 
 test('predictive entry review rejects an unsafe decision returned as JSON text', async () => {

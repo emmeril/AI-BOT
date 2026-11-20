@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('node:crypto');
 const { asBoolean, selectLiveForecast, candidateEvidence, openPositions, positionAmount, algoOrders,
-  ownedAlgo, insideProtection, buildEntryPlan, protectionParameters, protectionMatches } = require('./live-policy');
+  ownedAlgo, insideProtection, buildEntryPlan, protectionParameters, protectionMatches, positionDirectionReview } = require('./live-policy');
 const { validateDirectionModel } = require('./direction-model');
 const { RISK_POLICY_ID } = require('./net-risk-reward');
 const { ADAPTIVE_KIND, validateReachability, planReachableTargets } = require('./reachability');
@@ -143,6 +143,8 @@ class PredictiveLiveEngine {
     return { status: !evidence.matchesUserCriteria ? 'BLOCKED_BY_FORWARD_RESULTS' :
       !aiReview.approved ? 'BLOCKED_BY_AI_REVIEW' : 'CONFIGURATION_VERIFIED_READ_ONLY',
       orderExecutionEnabled: false,
+      positionExitPolicy: this.config.positionExitPolicy,
+      timeBasedPositionExit: this.config.positionExitPolicy === 'HORIZON',
       availableUsdt: snapshot.availableUsdt, walletUsdt: snapshot.walletUsdt,
       currentLeverage: Number(snapshot.settings.leverage), requestedLeverage: this.config.leverage,
       currentMarginType: snapshot.settings.marginType, requestedMarginType: 'ISOLATED',
@@ -428,6 +430,7 @@ class PredictiveLiveEngine {
       entryOrderId: tracked?.orderId || null, entryPrice: tracked?.entryPrice || null,
       quantity: tracked?.quantity || null, side: tracked?.plan.side || null,
       takeProfit: tracked?.plan.takeProfit || null, stopLoss: tracked?.plan.stopLoss || null,
+      positionExitPolicy: this.config.positionExitPolicy, directionReview: tracked?.directionReview || null,
       closedAt: this.now(), reason, walletUsdt });
     this.state.closed = this.state.closed.slice(-1000);
     this.state.tracked = null; this.save();
@@ -457,7 +460,19 @@ class PredictiveLiveEngine {
       this.state.pausedReason = 'POSITION_OWNERSHIP_CHANGED'; this.save();
       throw new Error('DOGE position size changed externally; new entries paused');
     }
-    if (tracked.closing || this.now() >= tracked.plan.expiresAt) { await this.close(tracked.closing?.reason || 'HORIZON_EXPIRED'); return; }
+    if (this.config.positionExitPolicy === 'HORIZON') {
+      if (this.now() >= tracked.plan.expiresAt) { await this.close('HORIZON_EXPIRED'); return; }
+    } else {
+      let review;
+      try { review = positionDirectionReview(this.readForecasts(), this.config, tracked.plan, this.expectedModelId, this.now()); }
+      catch { review = { close: false, reason: 'PREDICTION_UNAVAILABLE', forecastId: null, direction: null }; }
+      if (tracked.directionReview?.forecastId !== review.forecastId || tracked.directionReview?.reason !== review.reason ||
+          tracked.directionReview?.direction !== review.direction) {
+        tracked.directionReview = { ...review, checkedAt: this.now() };
+        this.save();
+      }
+      if (review.close) { await this.close('PREDICTION_REVERSED'); return; }
+    }
     await this.ensureProtection(snapshot);
   }
 

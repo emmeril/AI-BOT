@@ -11,6 +11,7 @@ function buildAiReviewConfig(environment = {}) {
     enabled: environment.PREDICTIVE_AI_REVIEW_ENABLED === true || environment.PREDICTIVE_AI_REVIEW_ENABLED === 'true',
     model: String(environment.PREDICTIVE_AI_REVIEW_MODEL || environment.AI_SIGNAL_MODEL || 'gemini-3.8-flash-high'),
     failureMode: String(environment.PREDICTIVE_AI_REVIEW_FAILURE_MODE || 'BLOCK'),
+    positionExitPolicy: environment.PREDICTIVE_LIVE_POSITION_EXIT_POLICY || 'PREDICTION_REVERSAL',
     binary: environment.PREDICTIVE_AI_REVIEW_BIN || environment.AI_SIGNAL_ANTIGRAVITY_BIN,
     timeoutMs: Number(environment.PREDICTIVE_AI_REVIEW_TIMEOUT_MS || 30000),
     minimumConfidence: Number(environment.PREDICTIVE_AI_REVIEW_MIN_CONFIDENCE ?? 65),
@@ -19,6 +20,7 @@ function buildAiReviewConfig(environment = {}) {
     historyLimit: 1000,
   };
   if (!['BLOCK', 'PRIMARY_FALLBACK'].includes(config.failureMode) ||
+      !['PREDICTION_REVERSAL', 'HORIZON'].includes(config.positionExitPolicy) ||
       !config.model.trim() || !Number.isFinite(config.timeoutMs) || config.timeoutMs <= 0 || config.timeoutMs > 30000 ||
       !Number.isInteger(config.minimumConfidence) || config.minimumConfidence < 0 || config.minimumConfidence > 100 ||
       !Number.isFinite(config.maxReviewAgeMs) || config.maxReviewAgeMs <= 0 || config.maxReviewAgeMs > FORECAST_MAX_AGE_MS) {
@@ -27,7 +29,7 @@ function buildAiReviewConfig(environment = {}) {
   config.policyId = AI_REVIEW_POLICY_ID;
   config.effort = config.model.match(/-(low|medium|high)$/)?.[1] || 'low';
   config.configId = crypto.createHash('sha256').update(JSON.stringify({ policyId: config.policyId,
-    model: config.model, effort: config.effort, failureMode: config.failureMode,
+    model: config.model, effort: config.effort, failureMode: config.failureMode, positionExitPolicy: config.positionExitPolicy,
     timeoutMs: config.timeoutMs, minimumConfidence: config.minimumConfidence,
     maxReviewAgeMs: config.maxReviewAgeMs })).digest('hex');
   return config;
@@ -141,7 +143,7 @@ function assessAiReview(forecast, state, config, now = Date.now()) {
     decision: structuredClone(review.decision) };
 }
 
-function buildReviewSnapshot(forecast, candles, now) {
+function buildReviewSnapshot(forecast, candles, now, options = {}) {
   const rows = (candles || []).filter(c => c.closeTime <= forecast.candleCloseTime).slice(-241);
   if (rows.length < 241 || rows.at(-1).closeTime !== forecast.candleCloseTime ||
       rows.at(-1).close !== forecast.referencePrice || forecast.candleCloseTime > now ||
@@ -164,6 +166,7 @@ function buildReviewSnapshot(forecast, candles, now) {
     recentClosedCandles: rows.slice(-15).map(c => ({ closeTime: c.closeTime, open: c.open,
       high: c.high, low: c.low, close: c.close, quoteVolume: c.quoteVolume, takerBuyQuote: c.takerBuyQuote })),
     candidate: { forecastId: forecast.id, side: plan.side, horizonMinutes: 60,
+      positionExitPolicy: options.positionExitPolicy || 'PREDICTION_REVERSAL',
       referencePrice: forecast.referencePrice, expiresAt: forecast.targetCloseTime,
       directionProbabilities: forecast.probabilities, takeProfit: plan.takeProfit, stopLoss: plan.stopLoss,
       takeProfit1: plan.takeProfit1, takeProfit2: plan.takeProfit2, selectedTarget: plan.selectedTarget,
