@@ -60,6 +60,9 @@ For each supplied symbol return exactly one decision using the required JSON sch
 - Confidence is a subjective assessment, not a measured probability of profit. Do not claim guaranteed profit or invent future prices.
 - The execution worker independently rechecks costs and price, and may adjust TP1/TP2 using its frozen net-risk policy at the actual quote and fill.
 
+Return only JSON matching this schema, without Markdown or explanations:
+${JSON.stringify(OUTPUT_SCHEMA)}
+
 Input candidates:
 ${JSON.stringify(snapshots)}`;
   }
@@ -172,8 +175,9 @@ async function requestAntigravity(snapshots, options = {}) {
   const args = [
     '-p', buildPrompt(snapshots, { liveEnabled: Boolean(options.liveEnabled), purpose: options.purpose }),
     '--output-format', 'json',
-    '--json-schema', JSON.stringify(OUTPUT_SCHEMA),
-    '--mode', 'plan',
+    ...(options.purpose === 'PREDICTIVE_ENTRY_REVIEW' ? [] : [
+      '--json-schema', JSON.stringify(OUTPUT_SCHEMA), '--mode', 'plan',
+    ]),
     '--sandbox',
     '--disable-slash-commands',
     '--effort', effort,

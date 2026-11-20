@@ -14,7 +14,7 @@ const { splitDirectionRows, trainAndEvaluateDirection } =
 const { forecastDirection, scoreDirection, scorePendingDirection, directionSummary } =
   require('../src/predictive/direction-forward');
 const { loadState, saveState, loadModels } = require('../scripts/start-predictive-shadow');
-const { currentFeatures } = require('../scripts/start-predictive-shadow');
+const { currentFeatures, fetchCompletedCandles } = require('../scripts/start-predictive-shadow');
 const { SCHEMA, NAMES, buildDirectionFeatures } = require('../src/predictive/direction-features');
 const { predictBoosted, validateBoostedClassifier, predictEnsemble } = require('../src/predictive/boosted-classifier');
 const { selectValidationCandidate, pairedDayInterval } = require('../scripts/research-predictive-direction');
@@ -35,6 +35,27 @@ function model(horizon = 15) {
     trainingRunId: 'test-run', classifier: { kind: 'softmax-baseline-v1',
       mean: [0], std: [1], weights: [[-2, -3], [-8, 0], [2, 3]] } };
 }
+
+test('a candle that closes while the market request is in flight cannot become a forecast reference', async () => {
+  const raw = klines(100);
+  let now = raw.at(-1)[6] - 500;
+  const exchange = { fapiPublicGetKlines: async () => {
+    now = raw.at(-1)[6] + 1500;
+    return raw;
+  } };
+  const candles = await fetchCompletedCandles(exchange, 'DOGEUSDT', () => now);
+  assert.equal(candles.length, 99);
+  assert.equal(candles.at(-1).closeTime, raw.at(-2)[6]);
+});
+
+test('market input waits two seconds after a candle close before using that candle', async () => {
+  const raw = klines(100);
+  const exchange = { fapiPublicGetKlines: async () => raw };
+  const early = await fetchCompletedCandles(exchange, 'DOGEUSDT', () => raw.at(-1)[6] + 1000);
+  const settled = await fetchCompletedCandles(exchange, 'DOGEUSDT', () => raw.at(-1)[6] + 2500);
+  assert.equal(early.length, 99);
+  assert.equal(settled.length, 100);
+});
 
 test('direction labels compare future close with reference close, including exact equality', () => {
   const candles = normalizeKlines(klines(100));

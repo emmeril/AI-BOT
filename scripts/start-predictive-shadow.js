@@ -125,6 +125,12 @@ function loadReachabilityModels(directory, symbol, directionModels, exitModels, 
   }));
 }
 
+async function fetchCompletedCandles(exchange, symbol, clock = Date.now) {
+  const cutoff = clock() - 2000;
+  const raw = await exchange.fapiPublicGetKlines({ symbol, interval: '1m', limit: 1000 });
+  return normalizeKlines(raw.filter(row => Number(row[6]) < cutoff));
+}
+
 async function main() {
   const dotenv = require('dotenv');
   dotenv.config({ path: path.resolve('.env.futures'), quiet: true });
@@ -192,11 +198,8 @@ async function main() {
   }
   while (running) {
     try {
-      const raw = await exchange.fapiPublicGetKlines({
-        symbol, interval: '1m', limit: 1000,
-      });
+      const candles = await fetchCompletedCandles(exchange, symbol);
       const now = Date.now();
-      const candles = normalizeKlines(raw.filter(row => Number(row[6]) < now));
       const features = currentFeatures(models, candles);
       const exitFeatures = exitModels.size ? buildDirectionFeatures(candles).at(-1) : null;
       const outcomes = scorePendingDirection(state.records, candles);
@@ -255,4 +258,5 @@ if (require.main === module) {
   main().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
 }
 
-module.exports = { main, loadState, saveState, loadModels, currentFeatures, loadExitModels, loadReachabilityModels, fetchPriceTick };
+module.exports = { main, loadState, saveState, loadModels, currentFeatures, loadExitModels, loadReachabilityModels,
+  fetchPriceTick, fetchCompletedCandles };

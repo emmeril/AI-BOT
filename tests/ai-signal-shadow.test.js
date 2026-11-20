@@ -152,25 +152,38 @@ test('Antigravity OAuth invocation strips API credentials from its child process
 test('predictive entry review prompt evaluates frozen candidates with a strict subprocess deadline', async () => {
   let argumentsUsed, optionsUsed;
   const controller = new AbortController();
-  await requestAntigravity([{ symbol: 'DOGEUSDT', candidate: { side: 'LONG', expectedNetPct: 0.1 } }], {
+  const result = await requestAntigravity([{ symbol: 'DOGEUSDT', candidate: { side: 'LONG', expectedNetPct: 0.1 } }], {
     purpose: 'PREDICTIVE_ENTRY_REVIEW', liveEnabled: true, timeoutMs: 30000, model: 'gemini-3.8-flash-high',
     strictDeadline: true, signal: controller.signal,
     execFile: async (_binary, args, options) => {
       argumentsUsed = args; optionsUsed = options;
-      return { stdout: JSON.stringify({ status: 'SUCCESS', structured_output: { decisions: [{
+      return { stdout: JSON.stringify({ status: 'SUCCESS', response: JSON.stringify({ decisions: [{
         symbol: 'DOGEUSDT', action: 'HOLD', confidence: 70, horizonMinutes: '60', risk: 'MEDIUM',
         reasonCodes: ['CONFLICT'], reason: 'Candidate is unsupported.',
-      }] } }) };
+      }] }) }) };
     },
   });
   assert.equal(optionsUsed.timeout, 30000);
   assert.equal(optionsUsed.signal, controller.signal);
   assert.equal(argumentsUsed[argumentsUsed.indexOf('--model') + 1], 'gemini-3.8-flash-high');
   assert.equal(argumentsUsed[argumentsUsed.indexOf('--effort') + 1], 'high');
+  assert.equal(argumentsUsed.includes('--json-schema'), false);
+  assert.equal(result.decisions[0].action, 'HOLD');
+  assert.equal(result.decisions[0].horizonMinutes, 60);
   assert.match(argumentsUsed[1], /approve that candidate direction or choose HOLD/);
   assert.match(argumentsUsed[1], /Never reverse a candidate/);
   assert.match(argumentsUsed[1], /completed 1-minute candles/);
   assert.match(argumentsUsed[1], /may authorize an automated LONG or SHORT entry/);
+  assert.match(argumentsUsed[1], /Return only JSON matching this schema/);
+});
+
+test('predictive entry review rejects an unsafe decision returned as JSON text', async () => {
+  await assert.rejects(requestAntigravity([{ symbol: 'DOGEUSDT' }], {
+    purpose: 'PREDICTIVE_ENTRY_REVIEW',
+    execFile: async () => ({ stdout: JSON.stringify({ status: 'SUCCESS', response: JSON.stringify({
+      decisions: [{ symbol: 'DOGEUSDT', action: 'LONG', confidence: 90, horizonMinutes: '60', risk: 'UNKNOWN' }],
+    }) }) }),
+  }), /invalid risk/);
 });
 
 test('forward scoring evaluates long and short directions without look-ahead', () => {
